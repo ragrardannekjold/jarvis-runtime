@@ -1,5 +1,6 @@
 name: Kyiv Early Warning Fast Watch
 
+# Fast-path revision 2: JSON push publishing verified by workflow readback.
 on:
   workflow_dispatch:
   schedule:
