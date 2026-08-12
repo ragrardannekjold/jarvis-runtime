@@ -21,6 +21,9 @@
     "storefront/"
   ],
   "runtime_state_branch_private": "jarvis-runtime-state",
-  "status": "DEPLOYED_SELF_TEST_PENDING",
+  "status": "SELF_TEST_PASS_BRIDGE_TOKEN_REQUIRED",
+  "self_test_run_id": 31561080370,
+  "self_test_conclusion": "success",
+  "bridge_secret_required": "COMMAND_CENTER_TOKEN",
   "bridge_schedule_enabled": false
 }
