@@ -1,10 +1,12 @@
 name: Kyiv Early Warning Fast Watch
 
-# Fast-path revision 2: JSON push publishing verified by workflow readback.
+# Fast-path revision 3: GitHub schedule remains a bootstrap/watchdog, while
+# workflow_dispatch self-chaining keeps the watcher alive when scheduled events
+# are delayed or skipped. Concurrency prevents duplicate queues when cron works.
 on:
   workflow_dispatch:
   schedule:
-    # Offset from the top of the hour to reduce GitHub scheduler congestion.
+    # Keep the native 5-minute schedule as an independent bootstrap/watchdog.
     - cron: '2-59/5 * * * *'
   push:
     paths:
@@ -12,15 +14,16 @@ on:
 
 permissions:
   contents: read
+  actions: write
 
 concurrency:
   group: kyiv-early-warning-fast-watch
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
   fast-watch:
     runs-on: ubuntu-latest
-    timeout-minutes: 4
+    timeout-minutes: 7
     steps:
       - name: Require private bridge token
         shell: bash
@@ -61,3 +64,28 @@ jobs:
             extra+=(--test-once)
           fi
           python command-center/scripts/runtime_kyiv_fast_watch.py "${extra[@]}"
+
+      - name: Keep fast path alive if cron is delayed
+        if: always()
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # A native scheduled run may arrive during this wait. With
+          # cancel-in-progress=true it replaces this run and becomes the next
+          # heartbeat. If cron stays silent, workflow_dispatch creates the next
+          # watcher pass without depending on GitHub schedule liveness.
+          sleep 270
+          code=$(curl -sS -o /tmp/dispatch-response -w '%{http_code}' \
+            -X POST \
+            -H 'Accept: application/vnd.github+json' \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H 'X-GitHub-Api-Version: 2022-11-28' \
+            "https://api.github.com/repos/${{ github.repository }}/actions/workflows/kyiv-fast-watch.yml/dispatches" \
+            -d '{"ref":"main"}')
+          if [[ "$code" != "204" ]]; then
+            echo "self-dispatch failed HTTP $code" >&2
+            cat /tmp/dispatch-response >&2 || true
+            exit 1
+          fi
+          echo 'self-dispatch accepted'
