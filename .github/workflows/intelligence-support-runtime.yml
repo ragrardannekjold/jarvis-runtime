@@ -2,6 +2,10 @@ name: Intelligence Support Public Runtime
 
 on:
   workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/intelligence-support-runtime.yml'
   schedule:
     - cron: '7 * * * *'
 
