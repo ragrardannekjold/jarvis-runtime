@@ -5,6 +5,7 @@
     ".github/workflows/command-center-runtime.yml",
     ".github/workflows/runtime-self-test.yml",
     "runtime/secure_runner.py",
+    "runtime/bridge-trigger.txt",
     "README.md",
     "SECURITY.md"
   ],
@@ -25,5 +26,6 @@
   "self_test_run_id": 31561080370,
   "self_test_conclusion": "success",
   "bridge_secret_required": "COMMAND_CENTER_TOKEN",
-  "bridge_schedule_enabled": false
+  "bridge_schedule_enabled": false,
+  "bridge_activation_trigger": "trusted main push changing runtime/bridge-trigger.txt"
 }
