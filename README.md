@@ -8,8 +8,8 @@ Use standard GitHub-hosted runners in a public repository while keeping the auth
 
 The public runner is designed to:
 1. check out this public runtime;
-2. receive two repository secrets: `COMMAND_CENTER_REPO` and `COMMAND_CENTER_TOKEN`;
-3. ephemerally check out the private command center;
+2. use one repository secret: `COMMAND_CENTER_TOKEN`;
+3. ephemerally check out the private `ragrardannekjold/jarvis-command-center` repository;
 4. run a strict allowlist of control-plane validation/regression commands with private stdout/stderr captured rather than printed;
 5. write a minimal heartbeat back to the private `jarvis-runtime-state` branch;
 6. upload no private artifacts.
@@ -25,6 +25,8 @@ The public runner is designed to:
 - Runtime state belongs in the private `jarvis-runtime-state` branch.
 
 ## Current capability
+
+The secret-free public runner self-test is verified working. The authenticated private bridge remains disabled until `COMMAND_CENTER_TOKEN` is configured and a manual bridge test passes.
 
 Phase 1 restores **independent control-plane validation** outside the private repository's billing-blocked GitHub-hosted Actions.
 
