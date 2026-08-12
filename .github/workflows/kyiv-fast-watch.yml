@@ -1,12 +1,13 @@
 name: Kyiv Early Warning Fast Watch
 
-# Fast-path revision 3: GitHub schedule remains a bootstrap/watchdog, while
-# workflow_dispatch self-chaining keeps the watcher alive when scheduled events
-# are delayed or skipped. Concurrency prevents duplicate queues when cron works.
+# Fast-path revision 4:
+# - workflow_dispatch is the independent ~5-minute watcher loop;
+# - native GitHub schedule is only a watchdog/bootstrap and does not create a
+#   second competing watcher chain;
+# - push remains a one-shot transport test after workflow changes.
 on:
   workflow_dispatch:
   schedule:
-    # Keep the native 5-minute schedule as an independent bootstrap/watchdog.
     - cron: '2-59/5 * * * *'
   push:
     paths:
@@ -16,12 +17,53 @@ permissions:
   contents: read
   actions: write
 
+# Separate event classes so a bootstrap or workflow update cannot cancel the
+# active self-dispatch loop. Successor workflow_dispatch runs queue behind the
+# current loop iteration and start as soon as it completes.
 concurrency:
-  group: kyiv-early-warning-fast-watch
-  cancel-in-progress: true
+  group: kyiv-fast-watch-${{ github.event_name }}
+  cancel-in-progress: false
 
 jobs:
+  schedule-watchdog:
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Bootstrap self-dispatch loop only if stale
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          api="https://api.github.com/repos/${{ github.repository }}/actions/workflows/kyiv-fast-watch.yml/runs?event=workflow_dispatch&per_page=1"
+          payload=$(curl -fsSL \
+            -H 'Accept: application/vnd.github+json' \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H 'X-GitHub-Api-Version: 2022-11-28' \
+            "$api")
+          latest=$(printf '%s' "$payload" | python -c 'import json,sys; d=json.load(sys.stdin); r=d.get("workflow_runs", []); print(r[0].get("created_at", "") if r else "")')
+          stale=$(LATEST="$latest" python -c 'import datetime,os; s=os.environ.get("LATEST",""); now=datetime.datetime.now(datetime.timezone.utc); age=10**9 if not s else (now-datetime.datetime.fromisoformat(s.replace("Z","+00:00"))).total_seconds(); print("1" if age > 420 else "0")')
+          if [[ "$stale" != "1" ]]; then
+            echo "self-dispatch loop is recent; watchdog does not duplicate it"
+            exit 0
+          fi
+          code=$(curl -sS -o /tmp/dispatch-response -w '%{http_code}' \
+            -X POST \
+            -H 'Accept: application/vnd.github+json' \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H 'X-GitHub-Api-Version: 2022-11-28' \
+            "https://api.github.com/repos/${{ github.repository }}/actions/workflows/kyiv-fast-watch.yml/dispatches" \
+            -d '{"ref":"main"}')
+          if [[ "$code" != "204" ]]; then
+            echo "watchdog bootstrap failed HTTP $code" >&2
+            cat /tmp/dispatch-response >&2 || true
+            exit 1
+          fi
+          echo "stale/missing self-dispatch loop bootstrapped"
+
   fast-watch:
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     timeout-minutes: 7
     steps:
@@ -65,16 +107,12 @@ jobs:
           fi
           python command-center/scripts/runtime_kyiv_fast_watch.py "${extra[@]}"
 
-      - name: Keep fast path alive if cron is delayed
-        if: always()
+      - name: Continue independent fast-watch loop
+        if: always() && github.event_name == 'workflow_dispatch'
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          # A native scheduled run may arrive during this wait. With
-          # cancel-in-progress=true it replaces this run and becomes the next
-          # heartbeat. If cron stays silent, workflow_dispatch creates the next
-          # watcher pass without depending on GitHub schedule liveness.
           sleep 270
           code=$(curl -sS -o /tmp/dispatch-response -w '%{http_code}' \
             -X POST \
