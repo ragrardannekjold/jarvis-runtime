@@ -1,0 +1,57 @@
+name: Command Center Public Runtime
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: command-center-public-runtime
+  cancel-in-progress: false
+
+jobs:
+  control-plane:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout public runtime
+        uses: actions/checkout@v4
+
+      - name: Require private bridge secrets
+        shell: bash
+        env:
+          COMMAND_CENTER_REPO: ${{ secrets.COMMAND_CENTER_REPO }}
+          COMMAND_CENTER_TOKEN: ${{ secrets.COMMAND_CENTER_TOKEN }}
+        run: |
+          set -euo pipefail
+          test -n "$COMMAND_CENTER_REPO" || { echo "COMMAND_CENTER_REPO secret is missing"; exit 2; }
+          test -n "$COMMAND_CENTER_TOKEN" || { echo "COMMAND_CENTER_TOKEN secret is missing"; exit 2; }
+
+      - name: Checkout private command center ephemerally
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ secrets.COMMAND_CENTER_REPO }}
+          token: ${{ secrets.COMMAND_CENTER_TOKEN }}
+          ref: main
+          path: command-center
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Execute fail-closed control-plane checks
+        env:
+          COMMAND_CENTER_REPO: ${{ secrets.COMMAND_CENTER_REPO }}
+          COMMAND_CENTER_TOKEN: ${{ secrets.COMMAND_CENTER_TOKEN }}
+          COMMAND_CENTER_PATH: command-center
+        run: python runtime/secure_runner.py
+
+      - name: Public-safe summary
+        if: always()
+        run: |
+          echo "Runtime completed. Detailed private output is intentionally not uploaded or printed."
