@@ -71,9 +71,11 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          # Temporary short interval to verify self-dispatch end-to-end. It is
-          # restored to the production cadence immediately after readback.
-          sleep 20
+          # A native scheduled run may arrive during this wait. With
+          # cancel-in-progress=true it replaces this run and becomes the next
+          # heartbeat. If cron stays silent, workflow_dispatch creates the next
+          # watcher pass without depending on GitHub schedule liveness.
+          sleep 270
           code=$(curl -sS -o /tmp/dispatch-response -w '%{http_code}' \
             -X POST \
             -H 'Accept: application/vnd.github+json' \
