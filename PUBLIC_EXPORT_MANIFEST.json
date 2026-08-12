@@ -4,8 +4,16 @@
   "allowlist": [
     ".github/workflows/command-center-runtime.yml",
     ".github/workflows/runtime-self-test.yml",
+    ".github/workflows/utility-search-self-test.yml",
     "runtime/secure_runner.py",
     "runtime/bridge-trigger.txt",
+    "plugin/utility-search/package.json",
+    "plugin/utility-search/server.js",
+    "plugin/utility-search/lib/catalog.js",
+    "plugin/utility-search/schemas/utility-catalog.schema.json",
+    "plugin/utility-search/tests/catalog.test.js",
+    "plugin/utility-search/tests/fixtures/catalog.json",
+    "plugin/utility-search/README.md",
     "README.md",
     "SECURITY.md"
   ],

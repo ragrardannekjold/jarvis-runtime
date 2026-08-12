@@ -1,0 +1,48 @@
+name: Utility Search Self-Test
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - "plugin/utility-search/**"
+      - ".github/workflows/utility-search-self-test.yml"
+      - "PUBLIC_EXPORT_MANIFEST.json"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: utility-search-self-test-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Install minimal MCP dependencies
+        working-directory: plugin/utility-search
+        run: npm install --ignore-scripts --no-audit --no-fund
+      - name: Static and unit checks
+        working-directory: plugin/utility-search
+        run: npm run check
+      - name: MCP health smoke test
+        working-directory: plugin/utility-search
+        env:
+          UTILITY_CATALOG_PATH: tests/fixtures/catalog.json
+        run: |
+          node server.js > /tmp/utility-search.log 2>&1 &
+          pid=$!
+          trap 'kill "$pid" 2>/dev/null || true' EXIT
+          for i in {1..20}; do
+            if curl --fail --silent http://127.0.0.1:8787/ | grep -q '"status":"ok"'; then
+              exit 0
+            fi
+            sleep 0.25
+          done
+          cat /tmp/utility-search.log
+          exit 1
