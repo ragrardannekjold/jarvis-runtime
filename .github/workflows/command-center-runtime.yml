@@ -7,7 +7,7 @@ on:
     paths:
       - 'runtime/bridge-trigger.txt'
   schedule:
-    - cron: '17,47 * * * *'
+    - cron: '31,51 * * * *'
 
 permissions:
   contents: read
