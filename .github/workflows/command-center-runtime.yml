@@ -2,6 +2,10 @@ name: Command Center Public Runtime
 
 on:
   workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'runtime/bridge-trigger.txt'
 
 permissions:
   contents: read
