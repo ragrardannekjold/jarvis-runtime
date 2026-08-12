@@ -1,0 +1,102 @@
+name: Intelligence Support Public Runtime
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '7 * * * *'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: intelligence-support-public-runtime
+  cancel-in-progress: false
+
+jobs:
+  passive-intelligence:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout sanitized public runtime
+        uses: actions/checkout@v4
+
+      - name: Require private bridge token
+        shell: bash
+        env:
+          COMMAND_CENTER_TOKEN: ${{ secrets.COMMAND_CENTER_TOKEN }}
+        run: |
+          set -euo pipefail
+          test -n "$COMMAND_CENTER_TOKEN" || { echo "Private bridge token is not configured"; exit 2; }
+
+      - name: Checkout private command center ephemerally
+        uses: actions/checkout@v4
+        with:
+          repository: ragrardannekjold/jarvis-command-center
+          token: ${{ secrets.COMMAND_CENTER_TOKEN }}
+          ref: main
+          path: command-center
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Checkout private runtime state
+        uses: actions/checkout@v4
+        with:
+          repository: ragrardannekjold/jarvis-command-center
+          token: ${{ secrets.COMMAND_CENTER_TOKEN }}
+          ref: jarvis-runtime-state
+          path: state
+          fetch-depth: 1
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Run private intelligence regression gate
+        shell: bash
+        env:
+          PYTHONPATH: command-center/src
+        run: |
+          set -euo pipefail
+          if ! python -m unittest command-center/tests/test_intelligence_support.py -q >/tmp/intelligence-test.log 2>&1; then
+            echo "Private intelligence regression gate failed; details intentionally suppressed."
+            exit 3
+          fi
+
+      - name: Process bounded passive intelligence queue
+        shell: bash
+        env:
+          PYTHONPATH: command-center/src
+        run: |
+          set -euo pipefail
+          mkdir -p state/runtime/intelligence/records
+          if ! python command-center/scripts/intelligence_support_cycle.py \
+            --queue command-center/intelligence/queue.jsonl \
+            --output-dir state/runtime/intelligence/records \
+            --max-jobs 20 \
+            --timeout 12 \
+            >/tmp/intelligence-summary.log 2>/tmp/intelligence-error.log; then
+            echo "Private intelligence cycle failed; details intentionally suppressed."
+            exit 4
+          fi
+
+      - name: Persist results only to private state branch
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd state
+          if git status --porcelain -- runtime/intelligence/records | grep -q .; then
+            git config user.name 'jarvis-intelligence-runtime'
+            git config user.email 'jarvis-intelligence-runtime@users.noreply.github.com'
+            git add runtime/intelligence/records
+            git commit -m 'runtime: persist passive intelligence snapshot' >/tmp/intelligence-git.log 2>&1
+            git push origin HEAD:jarvis-runtime-state >>/tmp/intelligence-git.log 2>&1
+            echo "Private intelligence state updated."
+          else
+            echo "No private intelligence state change."
+          fi
+
+      - name: Public-safe summary
+        if: always()
+        run: echo "CYBINT public runtime completed; private queue, evidence and command output were not published."
