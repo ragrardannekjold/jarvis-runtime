@@ -1,0 +1,74 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/ragrardannekjold/jarvis-runtime/plugin/utility-search/schemas/utility-catalog.schema.json",
+  "title": "Jarvis Utility Catalog",
+  "type": "object",
+  "required": ["schema_version", "utilities"],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": { "const": 1 },
+    "updated_at": { "type": "string" },
+    "utilities": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/utility" }
+    }
+  },
+  "$defs": {
+    "utility": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "name", "description", "url", "aliases", "intents", "capabilities", "launch", "cost", "risk", "status", "visibility"],
+      "properties": {
+        "id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9._-]{2,127}$" },
+        "name": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "description": { "type": "string", "minLength": 1, "maxLength": 1000 },
+        "url": { "type": "string", "format": "uri" },
+        "aliases": { "type": "array", "items": { "type": "string" }, "maxItems": 32 },
+        "intents": { "type": "array", "items": { "type": "string" }, "minItems": 1, "maxItems": 32 },
+        "capabilities": { "type": "array", "items": { "type": "string" }, "minItems": 1, "maxItems": 64 },
+        "launch": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "target"],
+          "properties": {
+            "kind": { "enum": ["chat_plugin", "chat_capability", "mcp_tool", "github_action", "url", "internal"] },
+            "target": { "type": "string", "minLength": 1, "maxLength": 240 },
+            "tool": { "type": "string", "maxLength": 160 },
+            "repository": { "type": "string", "maxLength": 200 },
+            "workflow": { "type": "string", "maxLength": 200 },
+            "notes": { "type": "string", "maxLength": 1000 }
+          }
+        },
+        "cost": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["class", "max_usd_per_run"],
+          "properties": {
+            "class": { "enum": ["free", "included", "metered", "paid", "unknown"] },
+            "max_usd_per_run": { "type": "number", "minimum": 0 }
+          }
+        },
+        "risk": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["mode", "confirmation_required"],
+          "properties": {
+            "mode": { "enum": ["read_only", "controlled_write", "external_effect"] },
+            "confirmation_required": { "type": "boolean" }
+          }
+        },
+        "status": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["enabled", "health"],
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "health": { "enum": ["healthy", "degraded", "unknown", "disabled"] }
+          }
+        },
+        "visibility": { "enum": ["plugin", "internal"] },
+        "priority": { "type": "integer", "minimum": 0, "maximum": 100 }
+      }
+    }
+  }
+}
