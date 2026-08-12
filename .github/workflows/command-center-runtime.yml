@@ -55,6 +55,12 @@ jobs:
           COMMAND_CENTER_PATH: command-center
         run: python runtime/secure_runner.py
 
+      - name: Persist private chat recovery snapshot
+        env:
+          COMMAND_CENTER_REPO: ragrardannekjold/jarvis-command-center
+          COMMAND_CENTER_TOKEN: ${{ secrets.COMMAND_CENTER_TOKEN }}
+        run: python runtime/persist_recovery_snapshot.py --queue /tmp/jarvis-public-runtime/queue.json
+
       - name: Public-safe summary
         if: always()
         run: |
