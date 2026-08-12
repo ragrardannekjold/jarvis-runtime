@@ -1,0 +1,35 @@
+name: Public Runtime Self-Test
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'runtime/**'
+      - '.github/workflows/runtime-self-test.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  self-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Compile runtime
+        run: python -m py_compile runtime/secure_runner.py
+      - name: Verify fail-closed heartbeat semantics
+        run: |
+          python - <<'PY'
+          from runtime import secure_runner
+          heartbeat = secure_runner.build_heartbeat([], {'queue_total': 0, 'selected_total': 0})
+          assert heartbeat['status'] == 'FAIL'
+          assert heartbeat['local_project_executor_dispatch'] == 'NOT_YET_ENABLED'
+          assert heartbeat['private_data_exposed_to_public_artifacts'] is False
+          assert heartbeat['private_output_logged'] is False
+          print('PUBLIC_RUNTIME_SELF_TEST_PASS')
+          PY
