@@ -1,0 +1,62 @@
+name: Kyiv Early Warning Fast Watch
+
+on:
+  workflow_dispatch:
+  schedule:
+    # Offset from the top of the hour to reduce GitHub scheduler congestion.
+    - cron: '2-59/5 * * * *'
+  push:
+    paths:
+      - '.github/workflows/kyiv-fast-watch.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: kyiv-early-warning-fast-watch
+  cancel-in-progress: false
+
+jobs:
+  fast-watch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 4
+    steps:
+      - name: Require private bridge token
+        shell: bash
+        env:
+          COMMAND_CENTER_TOKEN: ${{ secrets.COMMAND_CENTER_TOKEN }}
+        run: |
+          test -n "$COMMAND_CENTER_TOKEN" || {
+            echo 'COMMAND_CENTER_TOKEN is missing' >&2
+            exit 1
+          }
+
+      - name: Checkout private command center
+        uses: actions/checkout@v4
+        with:
+          repository: ragrardannekjold/jarvis-command-center
+          ref: main
+          token: ${{ secrets.COMMAND_CENTER_TOKEN }}
+          path: command-center
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Syntax check fast watcher
+        run: python -m py_compile command-center/scripts/runtime_kyiv_fast_watch.py
+
+      - name: Run Kyiv fast watcher
+        shell: bash
+        env:
+          COMMAND_CENTER_TOKEN: ${{ secrets.COMMAND_CENTER_TOKEN }}
+          COMMAND_CENTER_REPO: ragrardannekjold/jarvis-command-center
+        run: |
+          extra=()
+          if [[ "${{ github.event_name }}" == "push" ]]; then
+            extra+=(--test-once)
+          fi
+          python command-center/scripts/runtime_kyiv_fast_watch.py "${extra[@]}"
