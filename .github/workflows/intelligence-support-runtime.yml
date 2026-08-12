@@ -55,11 +55,9 @@ jobs:
 
       - name: Run private intelligence regression gate
         shell: bash
-        env:
-          PYTHONPATH: command-center/src
         run: |
           set -euo pipefail
-          if ! python -m unittest command-center/tests/test_intelligence_support.py -q >/tmp/intelligence-test.log 2>&1; then
+          if ! (cd command-center && PYTHONPATH=src python -m unittest tests.test_intelligence_support -q) >/tmp/intelligence-test.log 2>&1; then
             echo "Private intelligence regression gate failed; details intentionally suppressed."
             exit 3
           fi
