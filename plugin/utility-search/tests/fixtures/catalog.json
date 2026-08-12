@@ -1,0 +1,36 @@
+{
+  "schema_version": 1,
+  "updated_at": "2026-08-13T00:00:00Z",
+  "utilities": [
+    {
+      "id": "github.repo_ops",
+      "name": "GitHub Repository Operations",
+      "description": "Search repositories and work with issues and pull requests through the connected GitHub plugin.",
+      "url": "https://github.com/",
+      "aliases": ["github", "git", "repository"],
+      "intents": ["repository", "code", "pull request"],
+      "capabilities": ["search repository", "read pull request", "write issue"],
+      "launch": { "kind": "chat_plugin", "target": "GitHub", "tool": "search" },
+      "cost": { "class": "included", "max_usd_per_run": 0 },
+      "risk": { "mode": "controlled_write", "confirmation_required": true },
+      "status": { "enabled": true, "health": "healthy" },
+      "visibility": "plugin",
+      "priority": 80
+    },
+    {
+      "id": "metered.example",
+      "name": "Metered Example",
+      "description": "A deliberately blocked metered utility used to verify the zero-cost gate.",
+      "url": "https://example.com/",
+      "aliases": ["paid"],
+      "intents": ["example"],
+      "capabilities": ["example"],
+      "launch": { "kind": "url", "target": "https://example.com/" },
+      "cost": { "class": "metered", "max_usd_per_run": 0.01 },
+      "risk": { "mode": "read_only", "confirmation_required": false },
+      "status": { "enabled": true, "health": "healthy" },
+      "visibility": "plugin",
+      "priority": 100
+    }
+  ]
+}
