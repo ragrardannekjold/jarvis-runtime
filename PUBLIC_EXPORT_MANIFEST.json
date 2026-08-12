@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "public_repository_name": "jarvis-runtime",
+  "allowlist": [
+    ".github/workflows/command-center-runtime.yml",
+    ".github/workflows/runtime-self-test.yml",
+    "runtime/secure_runner.py",
+    "README.md",
+    "SECURITY.md"
+  ],
+  "deny_private_paths": [
+    "projects/",
+    "payments/",
+    "research/",
+    "archive/",
+    "checkpoints/",
+    "registry/",
+    "config/",
+    "geodata/",
+    "automation/",
+    "storefront/"
+  ],
+  "runtime_state_branch_private": "jarvis-runtime-state",
+  "status": "DEPLOYED_SELF_TEST_PENDING",
+  "bridge_schedule_enabled": false
+}
