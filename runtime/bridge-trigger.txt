@@ -1,1 +1,1 @@
-bridge-test-2026-08-12T07:31+03:00
+system-wide-gate-test-2026-08-12T07:34+03:00
