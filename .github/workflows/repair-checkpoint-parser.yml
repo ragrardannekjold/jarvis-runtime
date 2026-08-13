@@ -47,13 +47,19 @@ jobs:
           from pathlib import Path
           path = Path('src/jarvis/oversight.py')
           text = path.read_text(encoding='utf-8')
-          old = 'r"^## Primary WIP\\s*$.*?^\\*\\*(?P<task_id>[A-Z0-9_-]+)\\s+[—-]"'
-          new = 'r"^## (?:Current )?Primary WIP\\s*$.*?^\\*\\*(?P<task_id>[A-Z0-9_-]+)\\s+[—-]"'
-          if old in text:
-              text = text.replace(old, new, 1)
-              path.write_text(text, encoding='utf-8')
-          elif new not in text:
-              raise SystemExit('checkpoint primary regex not in expected state')
+          candidates = [
+              'r"^## Primary WIP\\s*$.*?^\\*\\*(?P<task_id>[A-Z0-9_-]+)\\s+[—-]"',
+              'r"^## (?:Current )?Primary WIP\\s*$.*?^\\*\\*(?P<task_id>[A-Z0-9_-]+)\\s+[—-]"',
+          ]
+          new = 'r"^## (?:Current )?[Pp]rimary WIP\\s*$.*?^\\*\\*(?P<task_id>[A-Z0-9_-]+)\\s+[—-]"'
+          if new not in text:
+              for old in candidates:
+                  if old in text:
+                      text = text.replace(old, new, 1)
+                      path.write_text(text, encoding='utf-8')
+                      break
+              else:
+                  raise SystemExit('checkpoint primary regex not in expected state')
           PY
           PYTHONPATH=src python - <<'PY'
           from pathlib import Path
