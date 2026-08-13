@@ -1,4 +1,5 @@
 import { readFileSync } from "node:fs";
+import { PUBLIC_CATALOG } from "./public-catalog.js";
 
 const ALLOWED_COST_CLASSES = new Set(["free", "included"]);
 
@@ -57,7 +58,7 @@ export function loadCatalog(env = process.env) {
   if (env.UTILITY_CATALOG_PATH) {
     return validateCatalog(JSON.parse(readFileSync(env.UTILITY_CATALOG_PATH, "utf8")));
   }
-  throw new Error("Set UTILITY_CATALOG_PATH or UTILITY_CATALOG_JSON. Production catalog data is intentionally not stored in the public runtime repository.");
+  return validateCatalog(structuredClone(PUBLIC_CATALOG));
 }
 
 export function isZeroIncrementalCost(utility) {
