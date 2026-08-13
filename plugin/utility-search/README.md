@@ -1,6 +1,6 @@
 # Jarvis Utility Search Plugin
 
-Tool-only MCP server for finding an appropriate utility/plugin from the private Jarvis utility catalog and returning a zero-incremental-cost launch descriptor.
+Tool-only MCP server for finding an appropriate utility/plugin and returning a zero-incremental-cost launch descriptor.
 
 ## Contracts
 
@@ -12,7 +12,9 @@ The plugin never executes a paid action itself. A result with cost class `metere
 
 ## Catalog boundary
 
-Production catalog data is intentionally **not stored in this public repository**. Supply it at runtime using one of:
+The public runtime contains only a sanitized plugin-visible fallback catalog. This lets the service start without secrets and makes serverless deployment deterministic.
+
+The private command center remains authoritative. A private or larger catalog can override the fallback at runtime:
 
 ```bash
 export UTILITY_CATALOG_PATH=/path/to/jarvis-command-center/registry/utility_registry.v1.json
@@ -20,12 +22,18 @@ export UTILITY_CATALOG_PATH=/path/to/jarvis-command-center/registry/utility_regi
 export UTILITY_CATALOG_JSON='{"schema_version":1,"utilities":[]}'
 ```
 
-Only catalog entries with `visibility: "plugin"` are exposed by `search`/`fetch`.
+Only catalog entries with `visibility: "plugin"` are exposed by `search` and `fetch`.
 
 ## Local run
 
 ```bash
 npm install
+npm start
+```
+
+Optional private-catalog test:
+
+```bash
 UTILITY_CATALOG_PATH=tests/fixtures/catalog.json npm start
 ```
 
@@ -38,4 +46,13 @@ Run checks:
 npm run check
 ```
 
-For ChatGPT developer-mode testing, expose the local MCP endpoint through an HTTPS tunnel and connect the HTTPS `/mcp` URL as a plugin. Production hosting must provide a stable HTTPS `/mcp` endpoint; GitHub remains the source of truth, not the always-on application server.
+## Vercel deployment
+
+Use `plugin/utility-search` as the Vercel project root. The included `vercel.json` exposes:
+
+- `/` and `/health` — read-only health JSON;
+- `/mcp` — stateless Streamable HTTP MCP endpoint.
+
+The Vercel package uses the sanitized public catalog by default and requires no API key, database, paid model, cron, or always-on process. GitHub remains the source of truth; Vercel is only the HTTPS execution surface.
+
+A deployment is not considered healthy until an external `/health` request and an MCP initialize/tool call both succeed.
