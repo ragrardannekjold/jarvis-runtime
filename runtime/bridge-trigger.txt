@@ -1,1 +1,1 @@
-generation-9-stable-fallback-canary-2-2026-08-13
+assistant-operated-service-manifest-canary-2026-08-13T20:35:00+03:00
