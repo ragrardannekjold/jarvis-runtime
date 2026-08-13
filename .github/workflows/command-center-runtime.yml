@@ -48,6 +48,12 @@ jobs:
         with:
           python-version: '3.12'
 
+      - name: Validate generation-9 stable baseline
+        run: |
+          set -euo pipefail
+          python command-center/scripts/validate_recovery_floor.py
+          python command-center/scripts/validate_stable_operating_state.py
+
       - name: Execute fail-closed control-plane checks
         env:
           COMMAND_CENTER_REPO: ragrardannekjold/jarvis-command-center
