@@ -49,10 +49,11 @@ jobs:
           python-version: '3.12'
 
       - name: Validate generation-9 stable baseline
+        working-directory: command-center
         run: |
           set -euo pipefail
-          python command-center/scripts/validate_recovery_floor.py
-          python command-center/scripts/validate_stable_operating_state.py
+          python scripts/validate_recovery_floor.py
+          python scripts/validate_stable_operating_state.py
 
       - name: Execute fail-closed control-plane checks
         env:
