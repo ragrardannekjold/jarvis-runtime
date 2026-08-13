@@ -30,10 +30,11 @@ jobs:
       - name: Static and unit checks
         working-directory: plugin/utility-search
         run: npm run check
+      - name: Load Vercel MCP handler
+        working-directory: plugin/utility-search
+        run: node -e "import('./api/server.js').then(() => console.log('vercel-handler-ok'))"
       - name: MCP health smoke test
         working-directory: plugin/utility-search
-        env:
-          UTILITY_CATALOG_PATH: tests/fixtures/catalog.json
         run: |
           node server.js > /tmp/utility-search.log 2>&1 &
           pid=$!
