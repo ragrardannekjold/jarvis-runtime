@@ -1,1 +1,1 @@
-assistant-operated-service-manifest-canary-2026-08-13T20:35:00+03:00
+continuity-fallback-2026-08-13T17:43:57Z-nonce-7
