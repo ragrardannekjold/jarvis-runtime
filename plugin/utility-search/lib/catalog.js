@@ -2,6 +2,8 @@ import { readFileSync } from "node:fs";
 import { PUBLIC_CATALOG } from "./public-catalog.js";
 
 const ALLOWED_COST_CLASSES = new Set(["free", "included"]);
+const ALLOWED_HEALTH = new Set(["healthy", "degraded", "not_deployed", "disabled", "unknown"]);
+const SHA256_RE = /^[0-9a-f]{64}$/;
 
 export function normalizeText(value) {
   return String(value ?? "")
@@ -13,6 +15,37 @@ export function normalizeText(value) {
 
 function asTokens(value) {
   return new Set(normalizeText(value).split(/\s+/).filter(Boolean));
+}
+
+function isHttpsDeploymentUrl(value) {
+  if (typeof value !== "string" || !value.trim()) return false;
+  try {
+    const url = new URL(value);
+    return (
+      url.protocol === "https:" &&
+      !new Set(["github.com", "www.github.com", "raw.githubusercontent.com"]).has(url.hostname.toLowerCase())
+    );
+  } catch {
+    return false;
+  }
+}
+
+export function hasVerifiedMcpDeployment(utility) {
+  const deployment = utility?.deployment;
+  return Boolean(
+    deployment &&
+      isHttpsDeploymentUrl(deployment.health_url) &&
+      isHttpsDeploymentUrl(deployment.mcp_url) &&
+      typeof deployment.verified_at === "string" &&
+      !Number.isNaN(Date.parse(deployment.verified_at)) &&
+      deployment.external_health_verified === true &&
+      deployment.mcp_initialize_verified === true &&
+      deployment.tool_call_verified === true &&
+      typeof deployment.readback_sha256 === "string" &&
+      SHA256_RE.test(deployment.readback_sha256) &&
+      typeof deployment.evidence_source === "string" &&
+      deployment.evidence_source.trim().length > 0
+  );
 }
 
 export function validateCatalog(catalog) {
@@ -44,8 +77,22 @@ export function validateCatalog(catalog) {
     if (!utility.status || typeof utility.status.enabled !== "boolean") {
       throw new Error(`${utility.id}: status.enabled is required`);
     }
+    if (typeof utility.status.health !== "string" || !ALLOWED_HEALTH.has(utility.status.health)) {
+      throw new Error(`${utility.id}: status.health is invalid`);
+    }
+    if (utility.status.health === "healthy" && utility.status.enabled !== true) {
+      throw new Error(`${utility.id}: a disabled utility cannot claim healthy`);
+    }
     if (!utility.risk || typeof utility.risk.confirmation_required !== "boolean") {
       throw new Error(`${utility.id}: risk.confirmation_required is required`);
+    }
+    if (utility.launch.kind === "mcp_tool") {
+      if (utility.status.enabled === true && utility.status.health === "healthy" && !hasVerifiedMcpDeployment(utility)) {
+        throw new Error(`${utility.id}: READY MCP claim requires verified external deployment readback`);
+      }
+      if (utility.status.health === "not_deployed" && utility.status.enabled !== false) {
+        throw new Error(`${utility.id}: not_deployed MCP utility must be disabled`);
+      }
     }
   }
   return catalog;
@@ -65,13 +112,23 @@ export function isZeroIncrementalCost(utility) {
   return ALLOWED_COST_CLASSES.has(utility?.cost?.class) && utility?.cost?.max_usd_per_run === 0;
 }
 
+export function launchReadiness(utility) {
+  if (utility?.visibility !== "plugin") return { ok: false, reason: "not_plugin_visible" };
+  if (utility?.status?.enabled !== true) return { ok: false, reason: "disabled" };
+  if (utility?.status?.health !== "healthy") {
+    return { ok: false, reason: "unhealthy", health: utility?.status?.health ?? "unknown" };
+  }
+  if (utility?.launch?.kind === "mcp_tool" && !hasVerifiedMcpDeployment(utility)) {
+    return { ok: false, reason: "deployment_unverified" };
+  }
+  if (!isZeroIncrementalCost(utility)) {
+    return { ok: false, reason: "zero_cost_gate", cost: utility?.cost };
+  }
+  return { ok: true };
+}
+
 export function isLaunchable(utility) {
-  return Boolean(
-    utility?.visibility === "plugin" &&
-      utility?.status?.enabled === true &&
-      utility?.status?.health !== "disabled" &&
-      isZeroIncrementalCost(utility)
-  );
+  return launchReadiness(utility).ok;
 }
 
 function scoreField(query, queryTokens, value, weight) {
@@ -119,13 +176,8 @@ export function getUtility(catalog, id) {
 export function resolveLaunch(catalog, id) {
   const utility = getUtility(catalog, id);
   if (!utility) return { ok: false, reason: "not_found", id };
-  if (utility.visibility !== "plugin") return { ok: false, reason: "not_plugin_visible", id };
-  if (!utility.status.enabled || utility.status.health === "disabled") {
-    return { ok: false, reason: "disabled", id };
-  }
-  if (!isZeroIncrementalCost(utility)) {
-    return { ok: false, reason: "zero_cost_gate", id, cost: utility.cost };
-  }
+  const readiness = launchReadiness(utility);
+  if (!readiness.ok) return { ok: false, id, ...readiness };
   return {
     ok: true,
     id: utility.id,
