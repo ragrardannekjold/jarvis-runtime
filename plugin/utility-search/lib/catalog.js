@@ -4,6 +4,7 @@ import { PUBLIC_CATALOG } from "./public-catalog.js";
 const ALLOWED_COST_CLASSES = new Set(["free", "included"]);
 const ALLOWED_HEALTH = new Set(["healthy", "degraded", "not_deployed", "disabled", "unknown"]);
 const SHA256_RE = /^[0-9a-f]{64}$/;
+const TIMEZONE_SUFFIX_RE = /(?:[zZ]|[+-]\d{2}:\d{2})$/;
 
 export function normalizeText(value) {
   return String(value ?? "")
@@ -28,6 +29,15 @@ function isHttpsDeploymentUrl(value) {
   } catch {
     return false;
   }
+}
+
+function parseCatalogTimestamp(value) {
+  if (typeof value !== "string" || !value.trim() || !TIMEZONE_SUFFIX_RE.test(value.trim())) {
+    throw new Error("Catalog updated_at must be a timezone-aware timestamp");
+  }
+  const timestamp = Date.parse(value);
+  if (Number.isNaN(timestamp)) throw new Error("Catalog updated_at must be a valid timestamp");
+  return timestamp;
 }
 
 export function hasVerifiedMcpDeployment(utility) {
@@ -55,6 +65,7 @@ export function validateCatalog(catalog) {
   if (catalog.schema_version !== 1 || !Array.isArray(catalog.utilities)) {
     throw new Error("Catalog schema_version=1 and utilities[] are required");
   }
+  parseCatalogTimestamp(catalog.updated_at);
 
   const ids = new Set();
   for (const utility of catalog.utilities) {
@@ -131,6 +142,23 @@ export function isLaunchable(utility) {
   return launchReadiness(utility).ok;
 }
 
+export function catalogDiagnostics(catalog, now = new Date()) {
+  const updatedAtMs = parseCatalogTimestamp(catalog?.updated_at);
+  const nowDate = now instanceof Date ? now : new Date(now);
+  if (Number.isNaN(nowDate.getTime())) throw new Error("Diagnostics now must be a valid timestamp");
+  const ageSeconds = Math.max(0, Math.floor((nowDate.getTime() - updatedAtMs) / 1000));
+  const utilities = Array.isArray(catalog?.utilities) ? catalog.utilities : [];
+  return {
+    catalog_updated_at: catalog.updated_at,
+    catalog_age_seconds: ageSeconds,
+    utility_count: utilities.length,
+    launchable_utility_count: utilities.filter(isLaunchable).length,
+    zero_incremental_cost_utility_count: utilities.filter(isZeroIncrementalCost).length,
+    degraded_utility_count: utilities.filter((utility) => utility?.status?.health === "degraded").length,
+    not_deployed_utility_count: utilities.filter((utility) => utility?.status?.health === "not_deployed").length,
+  };
+}
+
 function scoreField(query, queryTokens, value, weight) {
   const normalized = normalizeText(value);
   if (!normalized) return 0;
@@ -140,6 +168,14 @@ function scoreField(query, queryTokens, value, weight) {
   let overlap = 0;
   for (const token of queryTokens) if (tokens.has(token)) overlap += 1;
   return queryTokens.size ? weight * (overlap / queryTokens.size) : 0;
+}
+
+function structuredInterfaceBonus(utility) {
+  if (!isLaunchable(utility)) return 0;
+  if (utility?.launch?.kind === "mcp_tool") return 12;
+  if (utility?.launch?.kind === "chat_plugin") return 8;
+  if (utility?.launch?.kind === "chat_capability") return 4;
+  return 0;
 }
 
 export function scoreUtility(utility, rawQuery) {
@@ -154,6 +190,7 @@ export function scoreUtility(utility, rawQuery) {
   score += scoreField(query, queryTokens, utility.description, 10);
   score += Number(utility.priority ?? 50) / 20;
   if (utility.status?.health === "healthy") score += 4;
+  score += structuredInterfaceBonus(utility);
   if (!isLaunchable(utility)) score -= 1000;
   return score;
 }
