@@ -33,7 +33,7 @@ jobs:
       - name: Load Vercel MCP handler
         working-directory: plugin/utility-search
         run: node -e "import('./api/server.js').then(() => console.log('vercel-handler-ok'))"
-      - name: MCP health smoke test
+      - name: MCP health and protocol smoke test
         working-directory: plugin/utility-search
         run: |
           node server.js > /tmp/utility-search.log 2>&1 &
@@ -41,9 +41,51 @@ jobs:
           trap 'kill "$pid" 2>/dev/null || true' EXIT
           for i in {1..20}; do
             if curl --fail --silent http://127.0.0.1:8787/ | grep -q '"status":"ok"'; then
-              exit 0
+              break
+            fi
+            if [ "$i" -eq 20 ]; then
+              cat /tmp/utility-search.log
+              exit 1
             fi
             sleep 0.25
           done
-          cat /tmp/utility-search.log
-          exit 1
+          node --input-type=module <<'NODE'
+          import { Client } from '@modelcontextprotocol/sdk/client/index.js';
+          import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
+
+          const client = new Client({ name: 'utility-search-ci', version: '1.0.0' });
+          const transport = new StreamableHTTPClientTransport(new URL('http://127.0.0.1:8787/mcp'));
+          await client.connect(transport);
+
+          const listed = await client.listTools();
+          const names = new Set(listed.tools.map((tool) => tool.name));
+          for (const required of ['search', 'fetch', 'prepare_launch']) {
+            if (!names.has(required)) throw new Error(`missing MCP tool: ${required}`);
+          }
+
+          const search = await client.callTool({
+            name: 'search',
+            arguments: { query: 'github repository' },
+          });
+          const searchText = search.content?.find((item) => item.type === 'text')?.text ?? '';
+          const searchJson = JSON.parse(searchText);
+          if (!searchJson.results?.some((item) => item.id === 'github.repo_ops')) {
+            throw new Error('MCP search did not return github.repo_ops');
+          }
+
+          const launch = await client.callTool({
+            name: 'prepare_launch',
+            arguments: { id: 'jarvis.utility_search' },
+          });
+          const launchText = launch.content?.find((item) => item.type === 'text')?.text ?? '';
+          const launchJson = JSON.parse(launchText);
+          if (launchJson.requested_id !== 'jarvis.utility_search') {
+            throw new Error('prepare_launch lost requested utility identity');
+          }
+          if (launchJson.fallback_used !== true || launchJson.ok !== true) {
+            throw new Error('undeployed Utility Search did not fail closed to a verified fallback');
+          }
+
+          await client.close();
+          console.log('mcp-protocol-ok');
+          NODE
