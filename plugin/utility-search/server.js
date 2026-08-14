@@ -2,7 +2,13 @@ import { createServer } from "node:http";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { z } from "zod";
-import { catalogDiagnostics, getUtility, loadCatalog, resolveLaunch, searchCatalog } from "./lib/catalog.js";
+import {
+  catalogDiagnostics,
+  getUtility,
+  loadCatalog,
+  resolveLaunchWithFallback,
+  searchCatalog,
+} from "./lib/catalog.js";
 
 const port = Number(process.env.PORT ?? 8787);
 const MCP_PATH = "/mcp";
@@ -25,6 +31,7 @@ function fetchedUtility(utility) {
       cost: utility.cost,
       risk: utility.risk,
       status: utility.status,
+      fallback_ids: utility.fallback_ids ?? [],
       launch_kind: utility.launch.kind,
       launch_target: utility.launch.target,
       launch_tool: utility.launch.tool ?? null,
@@ -34,10 +41,10 @@ function fetchedUtility(utility) {
 
 export function createUtilitySearchServer() {
   const server = new McpServer(
-    { name: "jarvis-utility-search", version: "0.1.0" },
+    { name: "jarvis-utility-search", version: "0.2.0" },
     {
       instructions:
-        "Search the utility catalog first. Only plugin-visible, enabled utilities with zero incremental cost are launchable. Prefer structured MCP/plugin interfaces when relevance is otherwise comparable. Use fetch for details and prepare_launch before selecting a target.",
+        "Search the utility catalog first. Only plugin-visible, enabled utilities with zero incremental cost are launchable. Prefer structured MCP/plugin interfaces when relevance is otherwise comparable. Use fetch for details and prepare_launch before selecting a target. prepare_launch may return a verified connected fallback when the requested utility is unavailable.",
     }
   );
 
@@ -80,22 +87,26 @@ export function createUtilitySearchServer() {
     "prepare_launch",
     {
       title: "Prepare utility launch",
-      description: "Use this when a utility id has been selected and ChatGPT needs a zero-cost-gated invocation descriptor for the next tool or plugin call.",
+      description: "Use this when a utility id has been selected and ChatGPT needs a zero-cost-gated invocation descriptor. If the primary surface is unavailable, an explicitly configured connected fallback may be selected.",
       inputSchema: { id: z.string().min(1).max(128) },
       outputSchema: {
         ok: z.boolean(),
         reason: z.string().optional(),
         id: z.string(),
+        requested_id: z.string().optional(),
+        fallback_used: z.boolean().optional(),
+        primary_reason: z.string().nullable().optional(),
         name: z.string().optional(),
         launch: z.record(z.any()).optional(),
         risk: z.record(z.any()).optional(),
         cost: z.record(z.any()).optional(),
         url: z.string().optional(),
+        attempted: z.array(z.record(z.any())).optional(),
       },
       annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false, idempotentHint: true },
     },
     async ({ id }) => {
-      const result = resolveLaunch(catalog, id);
+      const result = resolveLaunchWithFallback(catalog, id);
       return {
         structuredContent: result,
         content: [{ type: "text", text: JSON.stringify(result) }],
