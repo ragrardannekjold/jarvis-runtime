@@ -22,6 +22,8 @@ on:
     paths:
       - 'runtime/generate_daily_main_report.py'
       - 'runtime/test_generate_daily_main_report.py'
+      - 'runtime/resilient_daily_report_runner.py'
+      - 'runtime/test_resilient_daily_report_runner.py'
       - 'runtime/select_daily_report_mode.py'
       - 'runtime/test_select_daily_report_mode.py'
       - 'runtime/daily-report-verify-trigger.txt'
@@ -32,6 +34,8 @@ on:
     paths:
       - 'runtime/generate_daily_main_report.py'
       - 'runtime/test_generate_daily_main_report.py'
+      - 'runtime/resilient_daily_report_runner.py'
+      - 'runtime/test_resilient_daily_report_runner.py'
       - 'runtime/select_daily_report_mode.py'
       - 'runtime/test_select_daily_report_mode.py'
       - 'runtime/daily-report-verify-trigger.txt'
@@ -87,6 +91,7 @@ jobs:
           set -euo pipefail
           python -m py_compile \
             runtime/generate_daily_main_report.py \
+            runtime/resilient_daily_report_runner.py \
             runtime/select_daily_report_mode.py
           python -m unittest discover -s runtime -p 'test_*.py' -v
 
@@ -104,6 +109,8 @@ jobs:
         env:
           COMMAND_CENTER_REPO: ragrardannekjold/jarvis-command-center
           COMMAND_CENTER_TOKEN: ${{ secrets.COMMAND_CENTER_TOKEN }}
+          DAILY_REPORT_READBACK_ATTEMPTS: '7'
+          DAILY_REPORT_READBACK_BASE_DELAY_SECONDS: '0.5'
         run: |
           set -euo pipefail
           FORCE_ARGS=()
@@ -122,7 +129,7 @@ jobs:
           fi
 
           echo "SELECTED_REPORT_MODE=$MODE"
-          python runtime/generate_daily_main_report.py \
+          python runtime/resilient_daily_report_runner.py \
             --command-center command-center \
             --mode "$MODE" \
             "${FORCE_ARGS[@]}"
