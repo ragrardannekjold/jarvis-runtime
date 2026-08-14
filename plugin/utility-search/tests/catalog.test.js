@@ -18,8 +18,8 @@ test("metered utility is excluded from search", () => {
 test("zero-cost gate blocks metered launch", () => {
   assert.deepEqual(resolveLaunch(catalog, "metered.example"), {
     ok: false,
-    reason: "zero_cost_gate",
     id: "metered.example",
+    reason: "zero_cost_gate",
     cost: { class: "metered", max_usd_per_run: 0.01 },
   });
 });
@@ -34,4 +34,48 @@ test("server can boot from the bundled public catalog without secrets", () => {
   const bundled = loadCatalog({});
   assert.ok(bundled.utilities.length >= 4);
   assert.equal(searchCatalog(bundled, "openai plugin")[0].id, "openai.developers");
+});
+
+test("bundled Utility Search is not launchable before external deployment proof", () => {
+  const bundled = loadCatalog({});
+  assert.deepEqual(resolveLaunch(bundled, "jarvis.utility_search"), {
+    ok: false,
+    id: "jarvis.utility_search",
+    reason: "disabled",
+  });
+});
+
+test("catalog rejects a healthy MCP claim without complete external evidence", () => {
+  const candidate = structuredClone(loadCatalog({}));
+  const utility = candidate.utilities.find((item) => item.id === "jarvis.utility_search");
+  utility.status = { enabled: true, health: "healthy" };
+  utility.deployment = {
+    health_url: "https://utility.example.com/health",
+    mcp_url: "https://utility.example.com/mcp",
+    verified_at: "2026-08-14T09:15:18Z",
+    external_health_verified: true,
+    mcp_initialize_verified: true,
+    tool_call_verified: false,
+    readback_sha256: "a".repeat(64),
+    evidence_source: "synthetic"
+  };
+  assert.throws(() => validateCatalog(candidate), /verified external deployment readback/);
+});
+
+test("catalog accepts a healthy MCP claim only with complete external evidence", () => {
+  const candidate = structuredClone(loadCatalog({}));
+  const utility = candidate.utilities.find((item) => item.id === "jarvis.utility_search");
+  utility.status = { enabled: true, health: "healthy" };
+  utility.deployment = {
+    health_url: "https://utility.example.com/health",
+    mcp_url: "https://utility.example.com/mcp",
+    verified_at: "2026-08-14T09:15:18Z",
+    external_health_verified: true,
+    mcp_initialize_verified: true,
+    tool_call_verified: true,
+    readback_sha256: "b".repeat(64),
+    evidence_source: "external-production-canary"
+  };
+  const validated = validateCatalog(candidate);
+  assert.equal(resolveLaunch(validated, "jarvis.utility_search").ok, true);
 });

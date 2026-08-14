@@ -1,6 +1,6 @@
 export const PUBLIC_CATALOG = {
   schema_version: 1,
-  updated_at: "2026-08-13T16:40:00Z",
+  updated_at: "2026-08-14T09:25:00Z",
   utilities: [
     {
       id: "jarvis.utility_search",
@@ -14,11 +14,21 @@ export const PUBLIC_CATALOG = {
         kind: "mcp_tool",
         target: "Jarvis Utility Search",
         tool: "search",
-        notes: "Use search, then fetch, then prepare_launch."
+        notes: "Use search, then fetch, then prepare_launch after deployment evidence passes."
       },
       cost: { class: "included", max_usd_per_run: 0 },
       risk: { mode: "read_only", confirmation_required: false },
-      status: { enabled: true, health: "healthy" },
+      status: { enabled: false, health: "not_deployed", lifecycle: "TESTED_NOT_DEPLOYED" },
+      deployment: {
+        health_url: null,
+        mcp_url: null,
+        verified_at: null,
+        external_health_verified: false,
+        mcp_initialize_verified: false,
+        tool_call_verified: false,
+        readback_sha256: null,
+        evidence_source: "GitHub Actions run 31787055691 proves local tests and local health only; no Vercel project is present."
+      },
       visibility: "plugin",
       priority: 100
     },
