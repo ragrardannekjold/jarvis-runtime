@@ -44,7 +44,7 @@
     "storefront/"
   ],
   "runtime_state_branch_private": "jarvis-runtime-state",
-  "status": "MAIN_AUTHORITY_VERIFIED_DAILY_REPORT_PRIVATE_READBACK_PENDING",
+  "status": "MAIN_AUTHORITY_AND_DAILY_REPORT_PRIVATE_READBACK_VERIFIED",
   "bridge_secret_required": "COMMAND_CENTER_TOKEN",
   "command_center_runtime_schedule_enabled": true,
   "daily_report_schedule": {
@@ -65,6 +65,17 @@
       "transient_404_recovery_tested": true,
       "stale_content_recovery_tested": true,
       "fail_closed_on_non_convergence": true
+    },
+    "verified_readback": {
+      "workflow_run_id": 31786849492,
+      "workflow_run_number": 8,
+      "verified_utc": "2026-08-14T09:08:59.351977+00:00",
+      "report_status": "VERIFICATION_ONLY",
+      "report_id": "main-2026-08-14-64ebd781-f6f401d0",
+      "authority_sha256": "f6f401d0037be21d2e8240fef7fd6e71d801dd00edbd65502931c4f1114e7239",
+      "policy_sha256": "64ebd781dd2fb0111d187c319096f3ec3fca2a6b5af69f4e583c5f4e6185d400",
+      "json_readback_pending": false,
+      "private_json_and_markdown_present": true
     }
   },
   "public_output_policy": {
