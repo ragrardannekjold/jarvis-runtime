@@ -17,18 +17,6 @@ on:
         required: false
         default: false
         type: boolean
-  pull_request:
-    branches: [main]
-    paths:
-      - 'runtime/generate_daily_main_report.py'
-      - 'runtime/test_generate_daily_main_report.py'
-      - 'runtime/resilient_daily_report_runner.py'
-      - 'runtime/test_resilient_daily_report_runner.py'
-      - 'runtime/select_daily_report_mode.py'
-      - 'runtime/test_select_daily_report_mode.py'
-      - 'runtime/daily-report-verify-trigger.txt'
-      - '.github/workflows/main-daily-report.yml'
-      - 'PUBLIC_EXPORT_MANIFEST.json'
   push:
     branches: [main]
     paths:
@@ -38,6 +26,8 @@ on:
       - 'runtime/test_resilient_daily_report_runner.py'
       - 'runtime/select_daily_report_mode.py'
       - 'runtime/test_select_daily_report_mode.py'
+      - 'runtime/validate_public_runtime_inventory.py'
+      - 'runtime/test_validate_public_runtime_inventory.py'
       - 'runtime/daily-report-verify-trigger.txt'
       - '.github/workflows/main-daily-report.yml'
       - 'PUBLIC_EXPORT_MANIFEST.json'
@@ -81,6 +71,25 @@ jobs:
           fetch-depth: 100
           persist-credentials: false
 
+      - name: Checkout private accepted-result ledger
+        uses: actions/checkout@v4
+        with:
+          repository: ragrardannekjold/jarvis-command-center
+          token: ${{ secrets.COMMAND_CENTER_TOKEN }}
+          ref: jarvis-results
+          path: results-state
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Use the durable accepted-result ledger
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -d results-state/archive/results/records
+          rm -rf command-center/archive/results/records
+          mkdir -p command-center/archive/results/records
+          cp -a results-state/archive/results/records/. command-center/archive/results/records/
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
@@ -92,13 +101,18 @@ jobs:
           python -m py_compile \
             runtime/generate_daily_main_report.py \
             runtime/resilient_daily_report_runner.py \
-            runtime/select_daily_report_mode.py
+            runtime/select_daily_report_mode.py \
+            runtime/validate_public_runtime_inventory.py
           python -m unittest discover -s runtime -p 'test_*.py' -v
 
-      - name: Validate private command-center contracts
+      - name: Validate private and public control contracts
         run: |
           set -euo pipefail
           python command-center/scripts/validate_repo.py
+          python command-center/scripts/validate_module_registry.py
+          python runtime/validate_public_runtime_inventory.py \
+            --public-root . \
+            --command-center command-center
           PYTHONPATH=command-center/src python -m unittest discover \
             -s command-center/tests \
             -p 'test_daily_control_report.py' \
