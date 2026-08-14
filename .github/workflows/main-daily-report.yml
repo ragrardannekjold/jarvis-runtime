@@ -22,6 +22,8 @@ on:
     paths:
       - 'runtime/generate_daily_main_report.py'
       - 'runtime/test_generate_daily_main_report.py'
+      - 'runtime/select_daily_report_mode.py'
+      - 'runtime/test_select_daily_report_mode.py'
       - 'runtime/daily-report-verify-trigger.txt'
       - '.github/workflows/main-daily-report.yml'
       - 'PUBLIC_EXPORT_MANIFEST.json'
@@ -30,6 +32,8 @@ on:
     paths:
       - 'runtime/generate_daily_main_report.py'
       - 'runtime/test_generate_daily_main_report.py'
+      - 'runtime/select_daily_report_mode.py'
+      - 'runtime/test_select_daily_report_mode.py'
       - 'runtime/daily-report-verify-trigger.txt'
       - '.github/workflows/main-daily-report.yml'
       - 'PUBLIC_EXPORT_MANIFEST.json'
@@ -81,7 +85,9 @@ jobs:
       - name: Compile and test public daily-report runtime
         run: |
           set -euo pipefail
-          python -m py_compile runtime/generate_daily_main_report.py
+          python -m py_compile \
+            runtime/generate_daily_main_report.py \
+            runtime/select_daily_report_mode.py
           python -m unittest discover -s runtime -p 'test_*.py' -v
 
       - name: Validate private command-center contracts
@@ -100,27 +106,22 @@ jobs:
           COMMAND_CENTER_TOKEN: ${{ secrets.COMMAND_CENTER_TOKEN }}
         run: |
           set -euo pipefail
-          MODE="dry-run"
           FORCE_ARGS=()
+          MODE="$(python runtime/select_daily_report_mode.py \
+            --event-name "${{ github.event_name }}" \
+            --event-json "$GITHUB_EVENT_PATH" \
+            --dispatch-mode "${{ inputs.mode }}")"
 
-          if [[ "${{ github.event_name }}" == "schedule" ]]; then
-            MODE="final"
-          elif [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
-            MODE="${{ inputs.mode }}"
-            if [[ "${{ inputs.force }}" == "true" ]]; then
-              FORCE_ARGS+=(--force)
-            fi
-          elif [[ "${{ github.event_name }}" == "push" ]]; then
-            if jq -e '
-              ((.head_commit.added // []) +
-               (.head_commit.modified // []) +
-               (.head_commit.removed // [])) |
-              index("runtime/daily-report-verify-trigger.txt") != null
-            ' "$GITHUB_EVENT_PATH" >/dev/null; then
-              MODE="verification"
-            fi
+          case "$MODE" in
+            dry-run|verification|final) ;;
+            *) echo "Unexpected report mode: $MODE"; exit 3 ;;
+          esac
+
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" && "${{ inputs.force }}" == "true" ]]; then
+            FORCE_ARGS+=(--force)
           fi
 
+          echo "SELECTED_REPORT_MODE=$MODE"
           python runtime/generate_daily_main_report.py \
             --command-center command-center \
             --mode "$MODE" \
