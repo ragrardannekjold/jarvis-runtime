@@ -7,6 +7,14 @@ on:
     paths:
       - 'runtime/**'
       - '.github/workflows/runtime-self-test.yml'
+      - 'PUBLIC_EXPORT_MANIFEST.json'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'runtime/**'
+      - '.github/workflows/**'
+      - 'PUBLIC_EXPORT_MANIFEST.json'
+      - 'README.md'
 
 permissions:
   contents: read
@@ -14,14 +22,24 @@ permissions:
 jobs:
   self-test:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 8
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - name: Compile runtime
-        run: python -m py_compile runtime/secure_runner.py
+      - name: Compile public runtime
+        run: |
+          set -euo pipefail
+          python -m py_compile \
+            runtime/secure_runner.py \
+            runtime/persist_recovery_snapshot.py \
+            runtime/generate_daily_main_report.py \
+            runtime/resilient_daily_report_runner.py \
+            runtime/select_daily_report_mode.py \
+            runtime/validate_public_runtime_inventory.py
+      - name: Run public runtime unit tests
+        run: python -m unittest discover -s runtime -p 'test_*.py' -v
       - name: Verify fail-closed heartbeat semantics
         run: |
           python - <<'PY'
