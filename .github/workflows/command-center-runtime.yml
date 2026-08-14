@@ -6,6 +6,9 @@ on:
     branches: [main]
     paths:
       - 'runtime/bridge-trigger.txt'
+      - 'runtime/persist_recovery_snapshot.py'
+      - 'runtime/test_persist_recovery_snapshot.py'
+      - '.github/workflows/command-center-runtime.yml'
   schedule:
     - cron: '31,51 * * * *'
 
@@ -47,6 +50,9 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+
+      - name: Test public runtime recovery contracts
+        run: python -m unittest discover -s runtime -p 'test_*.py' -v
 
       - name: Validate generation-9 stable baseline
         working-directory: command-center
