@@ -1,41 +1,42 @@
 # JARVIS Public Runtime
 
-This repository is the **sanitized public runtime** for the private command center. It intentionally contains no project data, client data, checkpoints, research, payment records, result ledgers, coordinates, or private history.
+This repository is the **sanitized execution shell** for the private canonical command center. It contains no private project data, client data, checkpoints, research, payment records, result ledgers, coordinates, credentials or private history.
 
-## Purpose
+## Authority
 
-Use standard GitHub-hosted runners in a public repository while keeping the authoritative command center private.
+The private repository `ragrardannekjold/jarvis-command-center@main` is the only canonical control plane. Public workflows are executors, safety paths or self-tests; they do not become parallel orchestrators.
 
-The public runner is designed to:
-1. check out this public runtime;
-2. use one repository secret: `COMMAND_CENTER_TOKEN`;
-3. ephemerally check out the private `ragrardannekjold/jarvis-command-center` repository;
-4. run a strict allowlist of control-plane validation/regression commands with private stdout/stderr captured rather than printed;
-5. write a minimal heartbeat back to the private `jarvis-runtime-state` branch;
-6. upload no private artifacts.
+Every public workflow must have an exact binding in the private `config/module_registry.json`. Unknown workflows fail closed. The complete public allowlist is `PUBLIC_EXPORT_MANIFEST.json`.
+
+## Active runtime paths
+
+- `command-center-runtime.yml` — validates private contracts, applies the module switch, executes the bounded allowlisted local executors, writes the private heartbeat and recovery snapshot.
+- `kyiv-fast-watch.yml` — separate safety-critical fast path with deduplication and private state.
+- `main-daily-report.yml` — creates at most one evidence-first private `main` report per Kyiv local date, with fallback scheduling and readback.
+- `relay-a7.yml` — bounded A7 execution to a private state branch.
+- `runtime-self-test.yml` — public runtime regression checks.
+- `utility-search-self-test.yml` — SHADOW-only validation; it does not admit the search adapter to production routing.
+
+The last verified pre-candidate runtime heartbeat on 2026-08-14 was `PASS`, and both registered local executors returned `PASS`. This is technical runtime evidence only. Credited spendable revenue remains zero until direct payment evidence exists.
+
+## Removed paths
+
+The failed legacy Liski bridge, the one-off checkpoint-parser workflow that pushed directly to private `main`, and the redundant standalone scheduler probe are removed from active runtime. Their paths are forbidden by the private registry and checked on every canonical runtime cycle.
 
 ## Security boundary
 
-- Do not add `pull_request` or `pull_request_target` triggers to workflows that receive bridge secrets.
-- Do not upload the private checkout or `/tmp/jarvis-public-runtime` as artifacts.
-- Do not print private command output.
-- Do not copy project files, registry content, checkpoints, research, payment data, geodata, or result records into this public repository.
-- `COMMAND_CENTER_TOKEN` should be a fine-grained GitHub token limited to the single private command-center repository and only the permissions required by the runtime.
-- External pull requests must never receive bridge secrets.
-- Runtime state belongs in the private `jarvis-runtime-state` branch.
+- Workflows receiving bridge secrets must not use `pull_request` or `pull_request_target`.
+- Private checkouts, `/tmp` runtime state and report inputs must not be uploaded as public artifacts.
+- Private command output must remain captured or suppressed.
+- `COMMAND_CENTER_TOKEN` should be fine-grained and limited to the private command-center repository and required branches.
+- External pull requests never receive bridge secrets.
+- Runtime state and daily reports remain on private branches.
+- A public workflow may not push directly to private `main`.
 
-## Current capability
+## Daily report boundary
 
-The secret-free public runner self-test is verified working. The authenticated private bridge remains disabled until `COMMAND_CENTER_TOKEN` is configured and a manual bridge test passes.
+The system guarantees a durable private report with readback, not an unsolicited ChatGPT message or an unverified Google Drive write. The requested logical chat name is `main`; the available backend does not control the visible ChatGPT title or pin state.
 
-Phase 1 restores **independent control-plane validation** outside the private repository's billing-blocked GitHub-hosted Actions.
+## Deployment truth
 
-It does **not yet** execute project-native workflows locally. The heartbeat therefore explicitly reports:
-
-`local_project_executor_dispatch = NOT_YET_ENABLED`
-
-That state must not be described as full runtime recovery.
-
-## Export allowlist
-
-Only the files listed in `PUBLIC_EXPORT_MANIFEST.json` are intended for this public repository.
+Changes on a feature branch are candidates. Production status requires merge to `main`, successful public self-tests, runtime canary and private readback. A green workflow proves only the workflow surface it tested.
