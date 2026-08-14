@@ -2,7 +2,7 @@ import { createServer } from "node:http";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { z } from "zod";
-import { getUtility, loadCatalog, resolveLaunch, searchCatalog } from "./lib/catalog.js";
+import { catalogDiagnostics, getUtility, loadCatalog, resolveLaunch, searchCatalog } from "./lib/catalog.js";
 
 const port = Number(process.env.PORT ?? 8787);
 const MCP_PATH = "/mcp";
@@ -37,7 +37,7 @@ export function createUtilitySearchServer() {
     { name: "jarvis-utility-search", version: "0.1.0" },
     {
       instructions:
-        "Search the utility catalog first. Only plugin-visible, enabled utilities with zero incremental cost are launchable. Use fetch for details and prepare_launch before selecting a target.",
+        "Search the utility catalog first. Only plugin-visible, enabled utilities with zero incremental cost are launchable. Prefer structured MCP/plugin interfaces when relevance is otherwise comparable. Use fetch for details and prepare_launch before selecting a target.",
     }
   );
 
@@ -124,7 +124,15 @@ const httpServer = createServer(async (req, res) => {
 
   if (req.method === "GET" && url.pathname === "/") {
     res.writeHead(200, { "content-type": "application/json" });
-    res.end(JSON.stringify({ service: "jarvis-utility-search", status: "ok", mcp: MCP_PATH }));
+    res.end(
+      JSON.stringify({
+        service: "jarvis-utility-search",
+        status: "ok",
+        mcp: MCP_PATH,
+        zero_incremental_cost: true,
+        ...catalogDiagnostics(catalog),
+      })
+    );
     return;
   }
 
