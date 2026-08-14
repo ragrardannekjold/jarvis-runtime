@@ -1,0 +1,3 @@
+verification_requested_utc=2026-08-14T08:58:00Z
+purpose=prove_private_daily_report_write_and_readback_without_creating_a_final_20_00_report
+mode=verification
