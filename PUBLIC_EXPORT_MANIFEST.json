@@ -11,6 +11,7 @@
     "runtime/test_persist_recovery_snapshot.py",
     "runtime/generate_daily_main_report.py",
     "runtime/test_generate_daily_main_report.py",
+    "runtime/daily-report-verify-trigger.txt",
     "runtime/bridge-trigger.txt",
     "plugin/utility-search/package.json",
     "plugin/utility-search/server.js",
@@ -39,7 +40,7 @@
     "storefront/"
   ],
   "runtime_state_branch_private": "jarvis-runtime-state",
-  "status": "MAIN_AUTHORITY_VERIFIED_DAILY_REPORT_RUNTIME_PENDING",
+  "status": "MAIN_AUTHORITY_VERIFIED_DAILY_REPORT_PRIVATE_READBACK_PENDING",
   "bridge_secret_required": "COMMAND_CENTER_TOKEN",
   "command_center_runtime_schedule_enabled": true,
   "daily_report_schedule": {
@@ -49,7 +50,8 @@
     "primary_local_time": "20:07",
     "fallback_local_time": "20:27",
     "one_final_report_per_local_date": true,
-    "private_readback_required": true
+    "private_readback_required": true,
+    "commit_triggered_verification_available": true
   },
   "public_output_policy": {
     "private_report_content_logged": false,
