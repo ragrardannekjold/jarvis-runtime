@@ -25,6 +25,7 @@ jobs:
           python -m py_compile runtime/secure_runner.py
           python -m py_compile runtime/persist_recovery_snapshot.py
           python -m py_compile runtime/daily_report_runner.py
+          python -m py_compile runtime/validate_public_runtime_inventory.py
       - name: Run public runtime unit tests
         run: python -m unittest discover -s runtime -p 'test_*.py' -v
       - name: Verify fail-closed heartbeat semantics
