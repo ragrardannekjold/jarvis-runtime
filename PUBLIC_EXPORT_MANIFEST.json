@@ -11,6 +11,8 @@
     "runtime/test_persist_recovery_snapshot.py",
     "runtime/generate_daily_main_report.py",
     "runtime/test_generate_daily_main_report.py",
+    "runtime/resilient_daily_report_runner.py",
+    "runtime/test_resilient_daily_report_runner.py",
     "runtime/select_daily_report_mode.py",
     "runtime/test_select_daily_report_mode.py",
     "runtime/daily-report-verify-trigger.txt",
@@ -55,7 +57,15 @@
     "private_readback_required": true,
     "commit_triggered_verification_available": true,
     "verification_marker": "[main-daily-report:verification]",
-    "mode_selector_regression_tested": true
+    "mode_selector_regression_tested": true,
+    "readback_retry": {
+      "attempts": 7,
+      "base_delay_seconds": 0.5,
+      "exact_content_required": true,
+      "transient_404_recovery_tested": true,
+      "stale_content_recovery_tested": true,
+      "fail_closed_on_non_convergence": true
+    }
   },
   "public_output_policy": {
     "private_report_content_logged": false,
