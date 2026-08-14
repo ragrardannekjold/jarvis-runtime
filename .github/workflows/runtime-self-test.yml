@@ -7,6 +7,13 @@ on:
     paths:
       - 'runtime/**'
       - '.github/workflows/runtime-self-test.yml'
+  pull_request:
+    paths:
+      - 'runtime/**'
+      - '.github/workflows/runtime-self-test.yml'
+      - '.github/workflows/main-daily-report.yml'
+      - '.github/workflows/command-center-runtime.yml'
+      - 'PUBLIC_EXPORT_MANIFEST.json'
 
 permissions:
   contents: read
