@@ -8,9 +8,10 @@ on:
       - 'runtime/bridge-trigger.txt'
       - 'runtime/persist_recovery_snapshot.py'
       - 'runtime/test_persist_recovery_snapshot.py'
-      - 'runtime/daily_report_runner.py'
-      - 'runtime/test_daily_report_runner.py'
+      - 'runtime/validate_public_runtime_inventory.py'
+      - 'runtime/test_validate_public_runtime_inventory.py'
       - '.github/workflows/command-center-runtime.yml'
+      - 'PUBLIC_EXPORT_MANIFEST.json'
   schedule:
     - cron: '31,51 * * * *'
 
@@ -64,6 +65,12 @@ jobs:
           python scripts/validate_stable_operating_state.py
           python scripts/validate_module_registry.py
 
+      - name: Validate complete public runtime inventory
+        run: |
+          python runtime/validate_public_runtime_inventory.py \
+            --public-root . \
+            --command-center command-center
+
       - name: Apply fail-closed module switch to ephemeral executor registry
         working-directory: command-center
         run: |
@@ -83,16 +90,6 @@ jobs:
           COMMAND_CENTER_REPO: ragrardannekjold/jarvis-command-center
           COMMAND_CENTER_TOKEN: ${{ secrets.COMMAND_CENTER_TOKEN }}
         run: python runtime/persist_recovery_snapshot.py --queue /tmp/jarvis-public-runtime/queue.json
-
-      - name: Publish the single daily system report when due
-        env:
-          COMMAND_CENTER_REPO: ragrardannekjold/jarvis-command-center
-          COMMAND_CENTER_TOKEN: ${{ secrets.COMMAND_CENTER_TOKEN }}
-          COMMAND_CENTER_PATH: command-center
-        run: |
-          python runtime/daily_report_runner.py \
-            --command-center command-center \
-            --queue /tmp/jarvis-public-runtime/queue.json
 
       - name: Public-safe summary
         if: always()
