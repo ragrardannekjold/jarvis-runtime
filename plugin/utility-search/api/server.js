@@ -1,6 +1,6 @@
 import { createMcpHandler } from "mcp-handler";
 import { z } from "zod";
-import { getUtility, loadCatalog, resolveLaunch, searchCatalog } from "../lib/catalog.js";
+import { getUtility, loadCatalog, resolveLaunchWithFallback, searchCatalog } from "../lib/catalog.js";
 
 const catalog = loadCatalog();
 
@@ -21,6 +21,7 @@ function fetchedUtility(utility) {
       cost: utility.cost,
       risk: utility.risk,
       status: utility.status,
+      fallback_ids: utility.fallback_ids ?? [],
       launch_kind: utility.launch.kind,
       launch_target: utility.launch.target,
       launch_tool: utility.launch.tool ?? null,
@@ -65,10 +66,10 @@ const handler = createMcpHandler((server) => {
 
   server.tool(
     "prepare_launch",
-    "Use this when a utility id has been selected and a zero-cost-gated invocation descriptor is required.",
+    "Use this when a utility id has been selected and a zero-cost-gated invocation descriptor is required. An explicitly configured connected fallback may be returned when the primary surface is unavailable.",
     { id: z.string().min(1).max(128) },
     async ({ id }) => {
-      const result = resolveLaunch(catalog, id);
+      const result = resolveLaunchWithFallback(catalog, id);
       return {
         content: [{ type: "text", text: JSON.stringify(result) }],
         isError: !result.ok,
