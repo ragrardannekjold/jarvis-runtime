@@ -1,11 +1,16 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "public_repository_name": "jarvis-runtime",
   "allowlist": [
     ".github/workflows/command-center-runtime.yml",
+    ".github/workflows/main-daily-report.yml",
     ".github/workflows/runtime-self-test.yml",
     ".github/workflows/utility-search-self-test.yml",
     "runtime/secure_runner.py",
+    "runtime/persist_recovery_snapshot.py",
+    "runtime/test_persist_recovery_snapshot.py",
+    "runtime/generate_daily_main_report.py",
+    "runtime/test_generate_daily_main_report.py",
     "runtime/bridge-trigger.txt",
     "plugin/utility-search/package.json",
     "plugin/utility-search/server.js",
@@ -34,10 +39,22 @@
     "storefront/"
   ],
   "runtime_state_branch_private": "jarvis-runtime-state",
-  "status": "SELF_TEST_PASS_BRIDGE_TOKEN_REQUIRED",
-  "self_test_run_id": 31561080370,
-  "self_test_conclusion": "success",
+  "status": "MAIN_AUTHORITY_VERIFIED_DAILY_REPORT_RUNTIME_PENDING",
   "bridge_secret_required": "COMMAND_CENTER_TOKEN",
-  "bridge_schedule_enabled": false,
-  "bridge_activation_trigger": "trusted main push changing runtime/bridge-trigger.txt"
+  "command_center_runtime_schedule_enabled": true,
+  "daily_report_schedule": {
+    "enabled": true,
+    "timezone": "Europe/Kyiv",
+    "report_label_local_time": "20:00",
+    "primary_local_time": "20:07",
+    "fallback_local_time": "20:27",
+    "one_final_report_per_local_date": true,
+    "private_readback_required": true
+  },
+  "public_output_policy": {
+    "private_report_content_logged": false,
+    "private_report_artifact_uploaded": false,
+    "automatic_chat_push_claimed": false,
+    "automatic_google_drive_delivery_claimed": false
+  }
 }
