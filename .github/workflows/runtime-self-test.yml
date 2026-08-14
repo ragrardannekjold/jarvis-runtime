@@ -21,7 +21,12 @@ jobs:
         with:
           python-version: '3.12'
       - name: Compile runtime
-        run: python -m py_compile runtime/secure_runner.py
+        run: |
+          python -m py_compile runtime/secure_runner.py
+          python -m py_compile runtime/persist_recovery_snapshot.py
+          python -m py_compile runtime/daily_report_runner.py
+      - name: Run public runtime unit tests
+        run: python -m unittest discover -s runtime -p 'test_*.py' -v
       - name: Verify fail-closed heartbeat semantics
         run: |
           python - <<'PY'
