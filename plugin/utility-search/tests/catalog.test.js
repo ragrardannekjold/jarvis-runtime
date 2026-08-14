@@ -5,6 +5,7 @@ import {
   catalogDiagnostics,
   loadCatalog,
   resolveLaunch,
+  resolveLaunchWithFallback,
   scoreUtility,
   searchCatalog,
   validateCatalog,
@@ -31,6 +32,15 @@ test("zero-cost gate blocks metered launch", () => {
   });
 });
 
+test("fallback resolver can route a blocked primary to a safe connected utility", () => {
+  const result = resolveLaunchWithFallback(catalog, "metered.example");
+  assert.equal(result.ok, true);
+  assert.equal(result.requested_id, "metered.example");
+  assert.equal(result.fallback_used, true);
+  assert.equal(result.primary_reason, "zero_cost_gate");
+  assert.equal(result.id, "github.repo_ops");
+});
+
 test("zero-cost gate permits included plugin utility", () => {
   const result = resolveLaunch(catalog, "github.repo_ops");
   assert.equal(result.ok, true);
@@ -39,7 +49,7 @@ test("zero-cost gate permits included plugin utility", () => {
 
 test("server can boot from the bundled public catalog without secrets", () => {
   const bundled = loadCatalog({});
-  assert.ok(bundled.utilities.length >= 4);
+  assert.ok(bundled.utilities.length >= 5);
   assert.equal(searchCatalog(bundled, "openai plugin")[0].id, "openai.developers");
 });
 
@@ -50,6 +60,17 @@ test("bundled Utility Search is not launchable before external deployment proof"
     id: "jarvis.utility_search",
     reason: "disabled",
   });
+});
+
+test("bundled Utility Search has an independent connected fallback path", () => {
+  const bundled = loadCatalog({});
+  const result = resolveLaunchWithFallback(bundled, "jarvis.utility_search");
+  assert.equal(result.ok, true);
+  assert.equal(result.requested_id, "jarvis.utility_search");
+  assert.equal(result.fallback_used, true);
+  assert.equal(result.primary_reason, "disabled");
+  assert.equal(result.id, "google_drive.search");
+  assert.equal(result.launch.target, "Google Drive");
 });
 
 test("catalog rejects a healthy MCP claim without complete external evidence", () => {
@@ -87,6 +108,18 @@ test("catalog accepts a healthy MCP claim only with complete external evidence",
   assert.equal(resolveLaunch(validated, "jarvis.utility_search").ok, true);
 });
 
+test("catalog rejects unknown fallback ids", () => {
+  const candidate = structuredClone(loadCatalog({}));
+  candidate.utilities[0].fallback_ids = ["missing.utility"];
+  assert.throws(() => validateCatalog(candidate), /unknown fallback id/);
+});
+
+test("catalog rejects fallback cycles", () => {
+  const candidate = structuredClone(loadCatalog({}));
+  candidate.utilities.find((item) => item.id === "google_drive.search").fallback_ids = ["jarvis.utility_search"];
+  assert.throws(() => validateCatalog(candidate), /Fallback cycle/);
+});
+
 test("catalog updated_at must be timezone-aware", () => {
   const candidate = structuredClone(loadCatalog({}));
   candidate.updated_at = "2026-08-14T09:25:00";
@@ -95,11 +128,11 @@ test("catalog updated_at must be timezone-aware", () => {
 
 test("diagnostics expose catalog freshness and launchable counts", () => {
   const bundled = loadCatalog({});
-  const diagnostics = catalogDiagnostics(bundled, new Date("2026-08-14T10:25:00Z"));
-  assert.equal(diagnostics.catalog_updated_at, "2026-08-14T09:25:00Z");
+  const diagnostics = catalogDiagnostics(bundled, new Date("2026-08-15T01:00:00Z"));
+  assert.equal(diagnostics.catalog_updated_at, "2026-08-15T00:00:00Z");
   assert.equal(diagnostics.catalog_age_seconds, 3600);
   assert.equal(diagnostics.utility_count, bundled.utilities.length);
-  assert.equal(diagnostics.launchable_utility_count, 3);
+  assert.equal(diagnostics.launchable_utility_count, 4);
   assert.equal(diagnostics.not_deployed_utility_count, 1);
 });
 
