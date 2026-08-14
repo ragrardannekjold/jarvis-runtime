@@ -37,7 +37,7 @@ def _request(
             "Accept": "application/vnd.github+json",
             "Authorization": f"Bearer {token}",
             "X-GitHub-Api-Version": "2022-11-28",
-            "User-Agent": "jarvis-recovery-snapshot/1.0",
+            "User-Agent": "jarvis-recovery-snapshot/1.1",
         },
     )
     try:
@@ -54,6 +54,47 @@ def _request(
         return exc.code, parsed
 
 
+def _validated_control_authority(
+    payload: dict[str, Any], queue: list[object]
+) -> dict[str, Any]:
+    control = payload.get("control_chat_authority")
+    if not isinstance(control, dict):
+        raise ValueError("queue payload missing control_chat_authority")
+    if control.get("logical_name") != "main":
+        raise ValueError("canonical control chat logical_name must remain main")
+    if control.get("status") != "ACTIVE_CANONICAL":
+        raise ValueError("canonical main authority must remain ACTIVE_CANONICAL")
+
+    authority = control.get("authority")
+    if not isinstance(authority, dict):
+        raise ValueError("control_chat_authority missing authority rules")
+    if authority.get("canonical_control_chat_count") != 1:
+        raise ValueError("exactly one canonical main control chat is required")
+    if authority.get("parallel_control_centers_forbidden") is not True:
+        raise ValueError("parallel control centers must remain forbidden")
+    if authority.get("archive_chats_may_issue_system_changes") is not False:
+        raise ValueError("archive chats must not issue system-wide changes")
+    if authority.get("old_next_actions_require_revalidation") is not True:
+        raise ValueError("archive next actions must require revalidation")
+    if authority.get("system_wide_change_requires_readback") is not True:
+        raise ValueError("system-wide changes must require readback")
+
+    binding = control.get("binding")
+    if not isinstance(binding, dict) or binding.get("predecessor_role") != "ARCHIVE_CONTEXT_ONLY":
+        raise ValueError("predecessor control chat must remain ARCHIVE_CONTEXT_ONLY")
+
+    authority_sha = control.get("authority_sha256")
+    if not isinstance(authority_sha, str) or len(authority_sha) != 64:
+        raise ValueError("control chat authority requires SHA-256 binding")
+    for index, item in enumerate(queue):
+        if not isinstance(item, dict):
+            raise ValueError(f"queue item {index} must be an object")
+        if item.get("required_control_chat_authority_sha256") != authority_sha:
+            raise ValueError(f"queue item {index} is not bound to canonical main authority")
+
+    return control
+
+
 def _build_snapshot(queue_path: Path) -> dict[str, Any]:
     raw_bytes = queue_path.read_bytes()
     payload = json.loads(raw_bytes.decode("utf-8"))
@@ -62,7 +103,7 @@ def _build_snapshot(queue_path: Path) -> dict[str, Any]:
 
     queue = payload.get("queue", [])
     if not isinstance(queue, list):
-        queue = []
+        raise ValueError("queue payload requires queue list")
     top_dispatch = queue[0] if queue and isinstance(queue[0], dict) else None
 
     recovery = payload.get("chat_session_recovery")
@@ -79,18 +120,26 @@ def _build_snapshot(queue_path: Path) -> dict[str, Any]:
     if rules.get("stream_error_requires_automatic_restore_and_resume") is not True:
         raise ValueError("automatic restore/resume rule is not enforced")
 
+    control_authority = _validated_control_authority(payload, queue)
+
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "generated_utc": utc_now(),
         "private_only": True,
         "source": "command-center-public-runtime",
         "queue_sha256": hashlib.sha256(raw_bytes).hexdigest(),
+        "control_chat_authority": control_authority,
         "chat_session_recovery": recovery,
         "top_dispatch": top_dispatch,
         "oversight": payload.get("oversight"),
         "runnable_count": payload.get("runnable_count"),
         "oversight_action_count": payload.get("oversight_action_count"),
         "recovery_contract": {
+            "single_main_control_authority": True,
+            "parallel_control_centers_forbidden": True,
+            "predecessor_chat_is_archive_context_only": True,
+            "archive_next_actions_require_revalidation": True,
+            "system_wide_change_requires_durable_readback": True,
             "message_stream_error_is_transport_event": True,
             "job_failure_from_stream_disconnect_forbidden": True,
             "automatic_restore_and_resume": True,
