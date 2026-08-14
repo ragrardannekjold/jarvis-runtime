@@ -1,6 +1,6 @@
 export const PUBLIC_CATALOG = {
   schema_version: 1,
-  updated_at: "2026-08-14T09:25:00Z",
+  updated_at: "2026-08-15T00:00:00Z",
   utilities: [
     {
       id: "jarvis.utility_search",
@@ -16,6 +16,7 @@ export const PUBLIC_CATALOG = {
         tool: "search",
         notes: "Use search, then fetch, then prepare_launch after deployment evidence passes."
       },
+      fallback_ids: ["google_drive.search", "github.repo_ops", "chatgpt.web_search"],
       cost: { class: "included", max_usd_per_run: 0 },
       risk: { mode: "read_only", confirmation_required: false },
       status: { enabled: false, health: "not_deployed", lifecycle: "TESTED_NOT_DEPLOYED" },
@@ -27,7 +28,7 @@ export const PUBLIC_CATALOG = {
         mcp_initialize_verified: false,
         tool_call_verified: false,
         readback_sha256: null,
-        evidence_source: "GitHub Actions run 31787055691 proves local tests and local health only; no Vercel project is present."
+        evidence_source: "GitHub Actions run 31787055691 proves local tests and local health only; no verified Vercel project is currently visible."
       },
       visibility: "plugin",
       priority: 100
@@ -51,6 +52,26 @@ export const PUBLIC_CATALOG = {
       status: { enabled: true, health: "healthy" },
       visibility: "plugin",
       priority: 95
+    },
+    {
+      id: "google_drive.search",
+      name: "Google Drive Search",
+      description: "Searches connected Google Drive files and durable registry or recovery snapshots when a primary utility-search execution surface is unavailable.",
+      url: "https://drive.google.com/",
+      aliases: ["google drive", "drive search", "диск", "google диск", "registry snapshot", "recovery snapshot"],
+      intents: ["find file", "search registry snapshot", "search recovery snapshot", "fallback utility discovery", "пошук файлу"],
+      capabilities: ["file search", "document discovery", "registry snapshot search", "recovery snapshot search"],
+      launch: {
+        kind: "chat_plugin",
+        target: "Google Drive",
+        tool: "search",
+        notes: "Use connected Drive search as an independent read-only fallback; do not infer file contents from metadata-only hits."
+      },
+      cost: { class: "included", max_usd_per_run: 0 },
+      risk: { mode: "read_only", confirmation_required: false },
+      status: { enabled: true, health: "healthy" },
+      visibility: "plugin",
+      priority: 92
     },
     {
       id: "openai.developers",
