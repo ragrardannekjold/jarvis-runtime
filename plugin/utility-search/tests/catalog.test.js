@@ -1,7 +1,14 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
-import { loadCatalog, resolveLaunch, searchCatalog, validateCatalog } from "../lib/catalog.js";
+import {
+  catalogDiagnostics,
+  loadCatalog,
+  resolveLaunch,
+  scoreUtility,
+  searchCatalog,
+  validateCatalog,
+} from "../lib/catalog.js";
 
 const catalog = validateCatalog(JSON.parse(readFileSync(new URL("./fixtures/catalog.json", import.meta.url), "utf8")));
 
@@ -78,4 +85,44 @@ test("catalog accepts a healthy MCP claim only with complete external evidence",
   };
   const validated = validateCatalog(candidate);
   assert.equal(resolveLaunch(validated, "jarvis.utility_search").ok, true);
+});
+
+test("catalog updated_at must be timezone-aware", () => {
+  const candidate = structuredClone(loadCatalog({}));
+  candidate.updated_at = "2026-08-14T09:25:00";
+  assert.throws(() => validateCatalog(candidate), /timezone-aware/);
+});
+
+test("diagnostics expose catalog freshness and launchable counts", () => {
+  const bundled = loadCatalog({});
+  const diagnostics = catalogDiagnostics(bundled, new Date("2026-08-14T10:25:00Z"));
+  assert.equal(diagnostics.catalog_updated_at, "2026-08-14T09:25:00Z");
+  assert.equal(diagnostics.catalog_age_seconds, 3600);
+  assert.equal(diagnostics.utility_count, bundled.utilities.length);
+  assert.equal(diagnostics.launchable_utility_count, 3);
+  assert.equal(diagnostics.not_deployed_utility_count, 1);
+});
+
+test("structured connected tool wins an otherwise equivalent routing tie", () => {
+  const base = {
+    id: "example.base",
+    name: "Example Utility",
+    description: "shared exact task",
+    url: "https://example.com/",
+    aliases: ["shared exact task"],
+    intents: ["shared exact task"],
+    capabilities: ["shared exact task"],
+    cost: { class: "included", max_usd_per_run: 0 },
+    risk: { mode: "read_only", confirmation_required: false },
+    status: { enabled: true, health: "healthy" },
+    visibility: "plugin",
+    priority: 50,
+  };
+  const plugin = { ...structuredClone(base), id: "example.plugin", launch: { kind: "chat_plugin", target: "Plugin" } };
+  const capability = {
+    ...structuredClone(base),
+    id: "example.capability",
+    launch: { kind: "chat_capability", target: "Capability" },
+  };
+  assert.ok(scoreUtility(plugin, "shared exact task") > scoreUtility(capability, "shared exact task"));
 });
