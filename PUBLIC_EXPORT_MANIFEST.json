@@ -11,6 +11,8 @@
     "runtime/test_persist_recovery_snapshot.py",
     "runtime/generate_daily_main_report.py",
     "runtime/test_generate_daily_main_report.py",
+    "runtime/select_daily_report_mode.py",
+    "runtime/test_select_daily_report_mode.py",
     "runtime/daily-report-verify-trigger.txt",
     "runtime/bridge-trigger.txt",
     "plugin/utility-search/package.json",
@@ -51,7 +53,9 @@
     "fallback_local_time": "20:27",
     "one_final_report_per_local_date": true,
     "private_readback_required": true,
-    "commit_triggered_verification_available": true
+    "commit_triggered_verification_available": true,
+    "verification_marker": "[main-daily-report:verification]",
+    "mode_selector_regression_tested": true
   },
   "public_output_policy": {
     "private_report_content_logged": false,
