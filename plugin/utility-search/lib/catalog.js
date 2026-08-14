@@ -58,6 +58,38 @@ export function hasVerifiedMcpDeployment(utility) {
   );
 }
 
+function validateFallbackGraph(catalog) {
+  const utilitiesById = new Map(catalog.utilities.map((utility) => [utility.id, utility]));
+  for (const utility of catalog.utilities) {
+    if (utility.fallback_ids === undefined) continue;
+    if (!Array.isArray(utility.fallback_ids)) {
+      throw new Error(`${utility.id}: fallback_ids must be an array`);
+    }
+    const seen = new Set();
+    for (const fallbackId of utility.fallback_ids) {
+      if (typeof fallbackId !== "string" || !fallbackId.trim()) {
+        throw new Error(`${utility.id}: fallback_ids must contain non-empty strings`);
+      }
+      if (fallbackId === utility.id) throw new Error(`${utility.id}: fallback_ids cannot reference self`);
+      if (seen.has(fallbackId)) throw new Error(`${utility.id}: duplicate fallback id: ${fallbackId}`);
+      if (!utilitiesById.has(fallbackId)) throw new Error(`${utility.id}: unknown fallback id: ${fallbackId}`);
+      seen.add(fallbackId);
+    }
+  }
+
+  const visiting = new Set();
+  const visited = new Set();
+  function visit(id) {
+    if (visited.has(id)) return;
+    if (visiting.has(id)) throw new Error(`Fallback cycle detected at utility: ${id}`);
+    visiting.add(id);
+    for (const fallbackId of utilitiesById.get(id)?.fallback_ids ?? []) visit(fallbackId);
+    visiting.delete(id);
+    visited.add(id);
+  }
+  for (const id of utilitiesById.keys()) visit(id);
+}
+
 export function validateCatalog(catalog) {
   if (!catalog || typeof catalog !== "object" || Array.isArray(catalog)) {
     throw new Error("Catalog must be a JSON object");
@@ -106,6 +138,7 @@ export function validateCatalog(catalog) {
       }
     }
   }
+  validateFallbackGraph(catalog);
   return catalog;
 }
 
@@ -223,5 +256,46 @@ export function resolveLaunch(catalog, id) {
     risk: utility.risk,
     cost: utility.cost,
     url: utility.url,
+  };
+}
+
+export function resolveLaunchWithFallback(catalog, id) {
+  const requested = getUtility(catalog, id);
+  if (!requested) return { ok: false, reason: "not_found", id };
+
+  const attempted = [];
+  const visited = new Set();
+  let primaryFailure = null;
+
+  function tryId(candidateId) {
+    if (visited.has(candidateId)) return null;
+    visited.add(candidateId);
+    const result = resolveLaunch(catalog, candidateId);
+    attempted.push({ id: candidateId, ok: result.ok, reason: result.ok ? undefined : result.reason });
+    if (result.ok) return result;
+    if (candidateId === id) primaryFailure = result;
+    const candidate = getUtility(catalog, candidateId);
+    for (const fallbackId of candidate?.fallback_ids ?? []) {
+      const fallbackResult = tryId(fallbackId);
+      if (fallbackResult?.ok) return fallbackResult;
+    }
+    return null;
+  }
+
+  const selected = tryId(id);
+  if (selected?.ok) {
+    return {
+      ...selected,
+      requested_id: id,
+      fallback_used: selected.id !== id,
+      primary_reason: selected.id !== id ? primaryFailure?.reason ?? null : null,
+      attempted,
+    };
+  }
+  return {
+    ...(primaryFailure ?? { ok: false, id, reason: "unavailable" }),
+    requested_id: id,
+    fallback_used: false,
+    attempted,
   };
 }
