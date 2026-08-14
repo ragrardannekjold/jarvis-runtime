@@ -1,0 +1,101 @@
+name: Main Daily Control Report
+
+on:
+  workflow_dispatch:
+    inputs:
+      force:
+        description: 'Explicitly rebuild today report even after verified readback'
+        required: false
+        type: boolean
+        default: false
+  push:
+    branches: [main]
+    paths:
+      - 'runtime/daily_report_runner.py'
+      - 'runtime/test_daily_report_runner.py'
+      - '.github/workflows/main-daily-report.yml'
+  schedule:
+    # 20:07/20:27 Europe/Kyiv across UTC+2 and UTC+3.
+    # Off-season UTC pair exits NOT_DUE or ALREADY_PUBLISHED.
+    - cron: '7,27 17,18 * * *'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: main-daily-control-report
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout public runtime
+        uses: actions/checkout@v4
+
+      - name: Require private bridge token
+        shell: bash
+        env:
+          COMMAND_CENTER_TOKEN: ${{ secrets.COMMAND_CENTER_TOKEN }}
+        run: |
+          set -euo pipefail
+          test -n "$COMMAND_CENTER_TOKEN" || { echo "COMMAND_CENTER_TOKEN secret is missing"; exit 2; }
+
+      - name: Checkout canonical command center
+        uses: actions/checkout@v4
+        with:
+          repository: ragrardannekjold/jarvis-command-center
+          token: ${{ secrets.COMMAND_CENTER_TOKEN }}
+          ref: main
+          path: command-center
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Checkout private result ledger
+        uses: actions/checkout@v4
+        with:
+          repository: ragrardannekjold/jarvis-command-center
+          token: ${{ secrets.COMMAND_CENTER_TOKEN }}
+          ref: jarvis-results
+          path: results-state
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Validate report, module and public inventory contracts
+        shell: bash
+        run: |
+          set -euo pipefail
+          (cd command-center && python scripts/validate_repo.py)
+          (cd command-center && python scripts/validate_module_registry.py)
+          python runtime/validate_public_runtime_inventory.py \
+            --public-root . \
+            --command-center command-center
+          python -m unittest runtime.test_daily_report_runner -v
+
+      - name: Publish once with private readback
+        env:
+          COMMAND_CENTER_REPO: ragrardannekjold/jarvis-command-center
+          COMMAND_CENTER_TOKEN: ${{ secrets.COMMAND_CENTER_TOKEN }}
+          COMMAND_CENTER_PATH: command-center
+        shell: bash
+        run: |
+          set -euo pipefail
+          extra=()
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" && "${{ inputs.force }}" == "true" ]]; then
+            extra+=(--force)
+          fi
+          python runtime/daily_report_runner.py \
+            --command-center command-center \
+            --records-dir results-state/archive/results/records \
+            "${extra[@]}"
+
+      - name: Public-safe summary
+        if: always()
+        run: echo "Daily report cycle completed. Report content and private state are not printed publicly."
