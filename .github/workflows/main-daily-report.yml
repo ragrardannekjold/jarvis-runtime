@@ -17,6 +17,13 @@ on:
         required: false
         default: false
         type: boolean
+  pull_request:
+    branches: [main]
+    paths:
+      - 'runtime/generate_daily_main_report.py'
+      - 'runtime/test_generate_daily_main_report.py'
+      - '.github/workflows/main-daily-report.yml'
+      - 'PUBLIC_EXPORT_MANIFEST.json'
   push:
     branches: [main]
     paths:
