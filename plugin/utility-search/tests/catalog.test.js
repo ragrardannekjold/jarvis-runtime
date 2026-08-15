@@ -54,8 +54,19 @@ test("zero-cost gate permits included plugin utility", () => {
 
 test("server can boot from the bundled public catalog without secrets", () => {
   const bundled = loadCatalog({});
-  assert.ok(bundled.utilities.length >= 5);
+  assert.ok(bundled.utilities.length >= 6);
   assert.equal(searchCatalog(bundled, "openai plugin")[0].id, "openai.developers");
+});
+
+test("bundled catalog routes Vercel deployment inspection to the read-only connector", () => {
+  const bundled = loadCatalog({});
+  const results = searchCatalog(bundled, "vercel deployment logs");
+  assert.equal(results[0].id, "vercel.project_ops");
+  const launch = resolveLaunch(bundled, "vercel.project_ops");
+  assert.equal(launch.ok, true);
+  assert.equal(launch.launch.target, "Vercel");
+  assert.equal(launch.launch.tool, "list_projects");
+  assert.equal(launch.risk.mode, "read_only");
 });
 
 test("bundled Utility Search is not launchable before external deployment proof", () => {
@@ -296,7 +307,7 @@ test("diagnostics expose catalog freshness and launchable counts", () => {
   assert.equal(diagnostics.catalog_updated_at, bundled.updated_at);
   assert.equal(diagnostics.catalog_age_seconds, 3600);
   assert.equal(diagnostics.utility_count, bundled.utilities.length);
-  assert.equal(diagnostics.launchable_utility_count, 4);
+  assert.equal(diagnostics.launchable_utility_count, 5);
   assert.equal(diagnostics.not_deployed_utility_count, 1);
 });
 
