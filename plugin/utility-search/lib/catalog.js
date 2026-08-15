@@ -3,6 +3,7 @@ import { PUBLIC_CATALOG } from "./public-catalog.js";
 
 const ALLOWED_COST_CLASSES = new Set(["free", "included"]);
 const ALLOWED_HEALTH = new Set(["healthy", "degraded", "not_deployed", "disabled", "unknown"]);
+const ALLOWED_EXTERNAL_EVIDENCE_SOURCES = new Set(["external-live-canary"]);
 const SHA256_RE = /^[0-9a-f]{64}$/;
 const TIMEZONE_SUFFIX_RE = /(?:[zZ]|[+-]\d{2}:\d{2})$/;
 
@@ -18,17 +19,46 @@ function asTokens(value) {
   return new Set(normalizeText(value).split(/\s+/).filter(Boolean));
 }
 
-function isHttpsDeploymentUrl(value) {
-  if (typeof value !== "string" || !value.trim()) return false;
+function isNonPublicHostname(value) {
+  const hostname = String(value ?? "")
+    .trim()
+    .toLowerCase()
+    .replace(/^\[/, "")
+    .replace(/\]$/, "");
+  if (!hostname) return true;
+  if (hostname === "localhost" || hostname === "0.0.0.0" || hostname === "::" || hostname === "::1") return true;
+  if (hostname.endsWith(".localhost") || hostname.endsWith(".local")) return true;
+  if (/^127\./.test(hostname) || /^10\./.test(hostname) || /^192\.168\./.test(hostname) || /^169\.254\./.test(hostname)) return true;
+  const match172 = hostname.match(/^172\.(\d{1,3})\./);
+  if (match172 && Number(match172[1]) >= 16 && Number(match172[1]) <= 31) return true;
+  if (/^(?:fc|fd)[0-9a-f]{2}:/i.test(hostname) || /^fe[89ab][0-9a-f]:/i.test(hostname)) return true;
+  return false;
+}
+
+function parseExternalHttpsUrl(value) {
+  if (typeof value !== "string" || !value.trim()) return null;
   try {
     const url = new URL(value);
-    return (
-      url.protocol === "https:" &&
-      !new Set(["github.com", "www.github.com", "raw.githubusercontent.com"]).has(url.hostname.toLowerCase())
-    );
+    if (url.protocol !== "https:") return null;
+    if (url.username || url.password) return null;
+    const hostname = url.hostname.toLowerCase();
+    if (isNonPublicHostname(hostname)) return null;
+    if (new Set(["github.com", "www.github.com", "raw.githubusercontent.com"]).has(hostname)) return null;
+    return url;
   } catch {
-    return false;
+    return null;
   }
+}
+
+function hasCanonicalExternalEndpoints(deployment) {
+  const health = parseExternalHttpsUrl(deployment?.health_url);
+  const mcp = parseExternalHttpsUrl(deployment?.mcp_url);
+  if (!health || !mcp) return false;
+  if (health.origin !== mcp.origin) return false;
+  if (health.pathname.replace(/\/+$/, "") !== "/health") return false;
+  if (mcp.pathname.replace(/\/+$/, "") !== "/mcp") return false;
+  if (health.search || health.hash || mcp.search || mcp.hash) return false;
+  return true;
 }
 
 function parseCatalogTimestamp(value) {
@@ -44,9 +74,9 @@ export function hasVerifiedMcpDeployment(utility) {
   const deployment = utility?.deployment;
   return Boolean(
     deployment &&
-      isHttpsDeploymentUrl(deployment.health_url) &&
-      isHttpsDeploymentUrl(deployment.mcp_url) &&
+      hasCanonicalExternalEndpoints(deployment) &&
       typeof deployment.verified_at === "string" &&
+      TIMEZONE_SUFFIX_RE.test(deployment.verified_at.trim()) &&
       !Number.isNaN(Date.parse(deployment.verified_at)) &&
       deployment.external_health_verified === true &&
       deployment.mcp_initialize_verified === true &&
@@ -54,7 +84,7 @@ export function hasVerifiedMcpDeployment(utility) {
       typeof deployment.readback_sha256 === "string" &&
       SHA256_RE.test(deployment.readback_sha256) &&
       typeof deployment.evidence_source === "string" &&
-      deployment.evidence_source.trim().length > 0
+      ALLOWED_EXTERNAL_EVIDENCE_SOURCES.has(deployment.evidence_source.trim())
   );
 }
 
