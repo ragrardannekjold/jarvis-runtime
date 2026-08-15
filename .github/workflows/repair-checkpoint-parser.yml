@@ -1,11 +1,8 @@
 name: Repair command-center checkpoint parser
 
+# EMERGENCY CONTAINMENT 2026-08-16: cross-system repair writes are manual-only.
 on:
   workflow_dispatch:
-  push:
-    branches: [main]
-    paths:
-      - 'runtime/repair-checkpoint-parser-trigger.txt'
 
 permissions:
   contents: read
