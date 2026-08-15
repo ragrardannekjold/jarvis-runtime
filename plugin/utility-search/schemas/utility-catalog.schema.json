@@ -3,7 +3,7 @@
   "$id": "https://github.com/ragrardannekjold/jarvis-runtime/plugin/utility-search/schemas/utility-catalog.schema.json",
   "title": "Jarvis Utility Catalog",
   "type": "object",
-  "required": ["schema_version", "utilities"],
+  "required": ["schema_version", "updated_at", "utilities"],
   "additionalProperties": false,
   "properties": {
     "schema_version": { "const": 1 },
@@ -14,6 +14,58 @@
     }
   },
   "$defs": {
+    "internalReserve": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "kind", "failure_domain"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "kind": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "failure_domain": { "type": "string", "minLength": 1, "maxLength": 120 }
+      }
+    },
+    "resilience": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "criticality",
+        "min_external_failure_domains",
+        "min_internal_reserves",
+        "freshness_required",
+        "freshness_max_seconds",
+        "readback_required",
+        "internal_reserves"
+      ],
+      "properties": {
+        "criticality": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "min_external_failure_domains": { "type": "integer", "minimum": 1 },
+        "min_internal_reserves": { "type": "integer", "minimum": 1 },
+        "freshness_required": { "const": true },
+        "freshness_max_seconds": { "type": "integer", "minimum": 1 },
+        "readback_required": { "const": true },
+        "internal_reserves": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/internalReserve" }
+        }
+      }
+    },
+    "deployment": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "health_url": { "type": ["string", "null"], "format": "uri" },
+        "mcp_url": { "type": ["string", "null"], "format": "uri" },
+        "verified_at": { "type": ["string", "null"] },
+        "external_health_verified": { "type": "boolean" },
+        "mcp_initialize_verified": { "type": "boolean" },
+        "tool_call_verified": { "type": "boolean" },
+        "readback_sha256": {
+          "type": ["string", "null"],
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "evidence_source": { "type": ["string", "null"], "maxLength": 4000 }
+      }
+    },
     "utility": {
       "type": "object",
       "additionalProperties": false,
@@ -26,6 +78,15 @@
         "aliases": { "type": "array", "items": { "type": "string" }, "maxItems": 32 },
         "intents": { "type": "array", "items": { "type": "string" }, "minItems": 1, "maxItems": 32 },
         "capabilities": { "type": "array", "items": { "type": "string" }, "minItems": 1, "maxItems": 64 },
+        "fallback_ids": {
+          "type": "array",
+          "items": { "type": "string", "pattern": "^[a-z0-9][a-z0-9._-]{2,127}$" },
+          "uniqueItems": true,
+          "maxItems": 32
+        },
+        "failure_domain": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "failure_scope": { "enum": ["external", "internal"] },
+        "resilience": { "$ref": "#/$defs/resilience" },
         "launch": {
           "type": "object",
           "additionalProperties": false,
@@ -63,9 +124,11 @@
           "required": ["enabled", "health"],
           "properties": {
             "enabled": { "type": "boolean" },
-            "health": { "enum": ["healthy", "degraded", "unknown", "disabled"] }
+            "health": { "enum": ["healthy", "degraded", "not_deployed", "unknown", "disabled"] },
+            "lifecycle": { "type": "string", "minLength": 1, "maxLength": 120 }
           }
         },
+        "deployment": { "$ref": "#/$defs/deployment" },
         "visibility": { "enum": ["plugin", "internal"] },
         "priority": { "type": "integer", "minimum": 0, "maximum": 100 }
       }
