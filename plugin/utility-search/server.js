@@ -9,9 +9,10 @@ import {
   searchCatalog,
 } from "./lib/catalog.js";
 import {
-  preparePolicyAwareLaunch,
-  RESTRICTED_CAPABILITY_CLASSES,
-} from "./lib/policy-router.js";
+  EXECUTION_CONTEXTS,
+  prepareContextAwareLaunch,
+} from "./lib/context-router.js";
+import { RESTRICTED_CAPABILITY_CLASSES } from "./lib/policy-router.js";
 
 const port = Number(process.env.PORT ?? 8787);
 const MCP_PATH = "/mcp";
@@ -34,6 +35,7 @@ function fetchedUtility(utility) {
       cost: utility.cost,
       risk: utility.risk,
       status: utility.status,
+      execution_context: utility.execution_context ?? null,
       fallback_ids: utility.fallback_ids ?? [],
       launch_kind: utility.launch.kind,
       launch_target: utility.launch.target,
@@ -47,7 +49,7 @@ export function createUtilitySearchServer() {
     { name: "jarvis-utility-search", version: "0.3.0" },
     {
       instructions:
-        "Search the utility catalog first. Only plugin-visible, enabled utilities with zero incremental cost are launchable. Prefer structured MCP/plugin interfaces when relevance is otherwise comparable. Use fetch for details and prepare_launch before selecting a target. prepare_launch always runs policy-aware preflight: it can infer a small set of high-signal restricted cyber techniques from the legitimate objective or accept an explicit restricted_capability_class, then reroutes to a lawful safe substitute without retrying the restricted route. Explicit classification remains available when inference is insufficient. prepare_launch may also return a verified connected fallback when the requested utility is unavailable.",
+        "Search the utility catalog first. Only plugin-visible, enabled utilities with zero incremental cost are launchable. Prefer structured MCP/plugin interfaces when relevance is otherwise comparable. Use fetch for details and prepare_launch before selecting a target. prepare_launch always runs policy-aware preflight and can also enforce execution-context compatibility. For scheduled/non-interactive work, pass execution_context=noninteractive so interactive-only or unknown-context routes fail closed or fall through to a verified compatible fallback without being misclassified as global outages. Restricted techniques are safely rerouted without retrying the restricted route.",
     }
   );
 
@@ -90,11 +92,12 @@ export function createUtilitySearchServer() {
     "prepare_launch",
     {
       title: "Prepare utility launch",
-      description: "Use this when a utility id has been selected and ChatGPT needs a zero-cost-gated invocation descriptor. Policy-aware preflight always runs: high-signal restricted cyber techniques may be inferred from objective and safely rerouted; callers can also provide restricted_capability_class explicitly. If the primary surface is unavailable, an explicitly configured connected fallback may be selected.",
+      description: "Use this when a utility id has been selected and ChatGPT needs a zero-cost-gated invocation descriptor. Policy-aware preflight always runs. Pass execution_context=noninteractive for scheduled/background work so context-incompatible routes fail closed or use a verified compatible fallback without becoming false global outages.",
       inputSchema: {
         id: z.string().min(1).max(128),
         objective: z.string().max(1000).optional(),
         restricted_capability_class: z.enum([...RESTRICTED_CAPABILITY_CLASSES]).optional(),
+        execution_context: z.enum([...EXECUTION_CONTEXTS]).optional(),
       },
       outputSchema: {
         ok: z.boolean(),
@@ -116,14 +119,19 @@ export function createUtilitySearchServer() {
         objective: z.string().optional(),
         safe_substitute: z.string().nullable().optional(),
         restricted_route_not_retried: z.boolean().optional(),
+        execution_context: z.string().optional(),
+        context_state: z.string().optional(),
+        context_reroute_used: z.boolean().optional(),
+        data_access_started: z.boolean().optional(),
       },
       annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false, idempotentHint: true },
     },
-    async ({ id, objective, restricted_capability_class }) => {
-      const result = preparePolicyAwareLaunch(catalog, {
+    async ({ id, objective, restricted_capability_class, execution_context }) => {
+      const result = prepareContextAwareLaunch(catalog, {
         id,
         objective,
         restricted_capability_class,
+        execution_context,
       });
       return {
         structuredContent: result,
@@ -160,6 +168,7 @@ const httpServer = createServer(async (req, res) => {
         mcp: MCP_PATH,
         zero_incremental_cost: true,
         policy_aware_safe_reroute: true,
+        execution_context_aware: true,
         ...catalogDiagnostics(catalog),
       })
     );
