@@ -1,6 +1,6 @@
 import { createMcpHandler } from "mcp-handler";
 import { z } from "zod";
-import { getUtility, loadCatalog, resolveLaunchWithFallback, searchCatalog } from "../lib/catalog.js";
+import { getUtility, loadCatalog, searchCatalog } from "../lib/catalog.js";
 import {
   preparePolicyAwareLaunch,
   RESTRICTED_CAPABILITY_CLASSES,
@@ -34,21 +34,11 @@ function fetchedUtility(utility) {
 }
 
 export function prepareApiLaunch({ id, objective, restricted_capability_class }) {
-  if (restricted_capability_class) {
-    return preparePolicyAwareLaunch(catalog, {
-      id,
-      objective,
-      restricted_capability_class,
-    });
-  }
-  return {
-    ...resolveLaunchWithFallback(catalog, id),
-    policy_route_rewritten: false,
-    objective:
-      typeof objective === "string" && objective.trim()
-        ? objective.trim().slice(0, 1000)
-        : undefined,
-  };
+  return preparePolicyAwareLaunch(catalog, {
+    id,
+    objective,
+    restricted_capability_class,
+  });
 }
 
 const handler = createMcpHandler((server) => {
@@ -88,7 +78,7 @@ const handler = createMcpHandler((server) => {
 
   server.tool(
     "prepare_launch",
-    "Use this after selecting a utility. For a restricted requested technique, provide the legitimate objective and restricted_capability_class so the handler safe-reroutes to a lawful substitute without retrying the restricted route.",
+    "Use this after selecting a utility. Policy-aware preflight always runs: high-signal restricted cyber techniques may be inferred from the legitimate objective and safe-rerouted automatically, while restricted_capability_class remains available for explicit classification when inference is insufficient.",
     {
       id: z.string().min(1).max(128),
       objective: z.string().max(1000).optional(),
