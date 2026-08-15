@@ -8,9 +8,6 @@ on:
       - 'runtime/bridge-trigger.txt'
       - 'runtime/persist_recovery_snapshot.py'
       - 'runtime/test_persist_recovery_snapshot.py'
-      - '.github/workflows/command-center-runtime.yml'
-  schedule:
-    - cron: '31,51 * * * *'
 
 permissions:
   contents: read
