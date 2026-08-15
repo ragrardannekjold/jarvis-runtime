@@ -19,6 +19,7 @@ const VERIFIED_NONINTERACTIVE_IDS = new Set([
   "vercel.project_ops",
   "google_drive.search",
   "gmail.message_search",
+  "canva.design_search",
   "chatgpt.web_search",
 ]);
 
