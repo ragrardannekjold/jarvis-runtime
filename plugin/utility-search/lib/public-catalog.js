@@ -1,6 +1,6 @@
 export const PUBLIC_CATALOG = {
   schema_version: 1,
-  updated_at: "2026-08-15T04:47:00Z",
+  updated_at: "2026-08-15T06:04:55Z",
   utilities: [
     {
       id: "jarvis.utility_search",
@@ -17,6 +17,23 @@ export const PUBLIC_CATALOG = {
         notes: "Use search, then fetch, then prepare_launch after deployment evidence passes. prepare_launch always runs policy-aware preflight; it can infer a bounded set of high-signal restricted cyber techniques from the legitimate objective and safe-reroute automatically, while explicit classification remains available when inference is insufficient."
       },
       fallback_ids: ["google_drive.search", "github.repo_ops", "chatgpt.web_search"],
+      failure_domain: "jarvis_runtime",
+      failure_scope: "internal",
+      resilience: {
+        criticality: "research",
+        min_external_failure_domains: 3,
+        min_internal_reserves: 1,
+        freshness_required: true,
+        freshness_max_seconds: 21600,
+        readback_required: true,
+        internal_reserves: [
+          {
+            id: "bundled_public_catalog",
+            kind: "bundled_snapshot",
+            failure_domain: "local_runtime"
+          }
+        ]
+      },
       cost: { class: "included", max_usd_per_run: 0 },
       risk: { mode: "read_only", confirmation_required: false },
       status: { enabled: false, health: "not_deployed", lifecycle: "TESTED_NOT_DEPLOYED" },
@@ -47,6 +64,8 @@ export const PUBLIC_CATALOG = {
         tool: "search",
         notes: "Use the connected GitHub plugin; write actions remain explicit and scoped."
       },
+      failure_domain: "github",
+      failure_scope: "external",
       cost: { class: "included", max_usd_per_run: 0 },
       risk: { mode: "controlled_write", confirmation_required: true },
       status: { enabled: true, health: "healthy" },
@@ -68,6 +87,8 @@ export const PUBLIC_CATALOG = {
         notes: "Default to read-only discovery/search. Resolve base/table identifiers through connected metadata tools before record search; writes require a separate scoped capability and explicit state ownership."
       },
       fallback_ids: ["google_drive.search", "github.repo_ops"],
+      failure_domain: "airtable",
+      failure_scope: "external",
       cost: { class: "included", max_usd_per_run: 0 },
       risk: { mode: "read_only", confirmation_required: false },
       status: { enabled: true, health: "healthy" },
@@ -89,6 +110,8 @@ export const PUBLIC_CATALOG = {
         notes: "Default to read-only project/deployment inspection. Do not use the context-bound zero-argument deploy action unless the intended project/source binding is independently proven."
       },
       fallback_ids: ["github.repo_ops", "chatgpt.web_search"],
+      failure_domain: "vercel",
+      failure_scope: "external",
       cost: { class: "included", max_usd_per_run: 0 },
       risk: { mode: "read_only", confirmation_required: false },
       status: { enabled: true, health: "healthy" },
@@ -109,6 +132,8 @@ export const PUBLIC_CATALOG = {
         tool: "search",
         notes: "Use connected Drive search as an independent read-only fallback; do not infer file contents from metadata-only hits."
       },
+      failure_domain: "google",
+      failure_scope: "external",
       cost: { class: "included", max_usd_per_run: 0 },
       risk: { mode: "read_only", confirmation_required: false },
       status: { enabled: true, health: "healthy" },
@@ -129,6 +154,8 @@ export const PUBLIC_CATALOG = {
         tool: "search_emails",
         notes: "Default to read-only Gmail search. Search operators belong in the Gmail query; any send, draft, archive, delete or label mutation remains a separate explicitly scoped action and is not implied by this adapter."
       },
+      failure_domain: "google",
+      failure_scope: "external",
       cost: { class: "included", max_usd_per_run: 0 },
       risk: { mode: "read_only", confirmation_required: false },
       status: { enabled: true, health: "healthy" },
@@ -149,6 +176,8 @@ export const PUBLIC_CATALOG = {
         tool: "build-chatgpt-app",
         notes: "Prefer current official OpenAI documentation before code changes."
       },
+      failure_domain: "openai",
+      failure_scope: "external",
       cost: { class: "included", max_usd_per_run: 0 },
       risk: { mode: "read_only", confirmation_required: false },
       status: { enabled: true, health: "healthy" },
@@ -168,6 +197,8 @@ export const PUBLIC_CATALOG = {
         target: "Web Search",
         notes: "Use when current or externally verifiable information is required, including lawful passive public-source safe-reroute work."
       },
+      failure_domain: "openai",
+      failure_scope: "external",
       cost: { class: "included", max_usd_per_run: 0 },
       risk: { mode: "read_only", confirmation_required: false },
       status: { enabled: true, health: "healthy" },
