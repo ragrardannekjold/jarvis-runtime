@@ -54,7 +54,7 @@ test("zero-cost gate permits included plugin utility", () => {
 
 test("server can boot from the bundled public catalog without secrets", () => {
   const bundled = loadCatalog({});
-  assert.ok(bundled.utilities.length >= 7);
+  assert.ok(bundled.utilities.length >= 8);
   assert.equal(searchCatalog(bundled, "openai plugin")[0].id, "openai.developers");
 });
 
@@ -78,6 +78,18 @@ test("bundled catalog routes Vercel deployment inspection to the read-only conne
   assert.equal(launch.launch.target, "Vercel");
   assert.equal(launch.launch.tool, "list_projects");
   assert.equal(launch.risk.mode, "read_only");
+});
+
+test("bundled catalog routes Gmail lookup to read-only message search", () => {
+  const bundled = loadCatalog({});
+  const results = searchCatalog(bundled, "gmail inbox message search");
+  assert.equal(results[0].id, "gmail.message_search");
+  const launch = resolveLaunch(bundled, "gmail.message_search");
+  assert.equal(launch.ok, true);
+  assert.equal(launch.launch.target, "Gmail");
+  assert.equal(launch.launch.tool, "search_emails");
+  assert.equal(launch.risk.mode, "read_only");
+  assert.equal(launch.risk.confirmation_required, false);
 });
 
 test("bundled Utility Search is not launchable before external deployment proof", () => {
@@ -318,7 +330,7 @@ test("diagnostics expose catalog freshness and launchable counts", () => {
   assert.equal(diagnostics.catalog_updated_at, bundled.updated_at);
   assert.equal(diagnostics.catalog_age_seconds, 3600);
   assert.equal(diagnostics.utility_count, bundled.utilities.length);
-  assert.equal(diagnostics.launchable_utility_count, 6);
+  assert.equal(diagnostics.launchable_utility_count, 7);
   assert.equal(diagnostics.not_deployed_utility_count, 1);
 });
 
