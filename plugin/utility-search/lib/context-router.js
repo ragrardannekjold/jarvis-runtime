@@ -20,6 +20,7 @@ const VERIFIED_NONINTERACTIVE_IDS = new Set([
   "google_drive.search",
   "gmail.message_search",
   "canva.design_search",
+  "wix.site_list",
   "chatgpt.web_search",
 ]);
 
