@@ -49,6 +49,7 @@ jobs:
             fi
             sleep 0.25
           done
+          curl --fail --silent http://127.0.0.1:8787/ | grep -q '"policy_aware_safe_reroute":true'
           node --input-type=module <<'NODE'
           import { Client } from '@modelcontextprotocol/sdk/client/index.js';
           import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
@@ -84,6 +85,26 @@ jobs:
           }
           if (launchJson.fallback_used !== true || launchJson.ok !== true) {
             throw new Error('undeployed Utility Search did not fail closed to a verified fallback');
+          }
+
+          const policyLaunch = await client.callTool({
+            name: 'prepare_launch',
+            arguments: {
+              id: 'restricted.exploitation',
+              objective: 'Find hidden relationships and related public documents',
+              restricted_capability_class: 'exploitation',
+            },
+          });
+          const policyText = policyLaunch.content?.find((item) => item.type === 'text')?.text ?? '';
+          const policyJson = JSON.parse(policyText);
+          if (policyJson.ok !== true || policyJson.policy_route_rewritten !== true) {
+            throw new Error('policy-aware prepare_launch did not produce a safe rewritten route');
+          }
+          if (policyJson.id !== 'chatgpt.web_search' || policyJson.selected_safe_id !== 'chatgpt.web_search') {
+            throw new Error('policy-aware prepare_launch selected the wrong safe route');
+          }
+          if (policyJson.restricted_route_not_retried !== true) {
+            throw new Error('policy-aware prepare_launch did not guarantee restricted-route suppression');
           }
 
           await client.close();
