@@ -17,6 +17,7 @@ const VERIFIED_NONINTERACTIVE_IDS = new Set([
   "github.repo_ops",
   "airtable.record_search",
   "vercel.project_ops",
+  "google_drive.search",
   "gmail.message_search",
   "chatgpt.web_search",
 ]);
