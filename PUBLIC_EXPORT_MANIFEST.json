@@ -23,6 +23,7 @@
     "plugin/utility-search/api/server.js",
     "plugin/utility-search/api/health.js",
     "plugin/utility-search/lib/catalog.js",
+    "plugin/utility-search/lib/policy-router.js",
     "plugin/utility-search/lib/public-catalog.js",
     "plugin/utility-search/schemas/utility-catalog.schema.json",
     "plugin/utility-search/tests/catalog.test.js",
