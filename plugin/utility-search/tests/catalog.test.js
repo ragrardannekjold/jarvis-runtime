@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
+import { prepareApiLaunch } from "../api/server.js";
 import {
   catalogDiagnostics,
   loadCatalog,
@@ -89,6 +90,29 @@ test("policy-aware preflight reroutes a restricted technique without retrying it
   assert.equal(result.restricted_route_not_retried, true);
   assert.match(result.safe_substitute, /Passive public-source OSINT\/CYBINT/);
   assert.equal(result.objective, "Find hidden relationships and related public documents");
+});
+
+test("Vercel API launch path has the same policy-aware safe reroute", () => {
+  const result = prepareApiLaunch({
+    id: "restricted.exploitation",
+    objective: "Find hidden relationships and related public documents",
+    restricted_capability_class: "exploitation",
+  });
+  assert.equal(result.ok, true);
+  assert.equal(result.policy_route_rewritten, true);
+  assert.equal(result.requested_id, "restricted.exploitation");
+  assert.equal(result.selected_safe_id, "chatgpt.web_search");
+  assert.equal(result.restricted_route_not_retried, true);
+  assert.equal(result.objective, "Find hidden relationships and related public documents");
+});
+
+test("Vercel API launch path preserves normal fallback behavior", () => {
+  const result = prepareApiLaunch({ id: "jarvis.utility_search" });
+  assert.equal(result.ok, true);
+  assert.equal(result.policy_route_rewritten, false);
+  assert.equal(result.requested_id, "jarvis.utility_search");
+  assert.equal(result.fallback_used, true);
+  assert.equal(result.id, "google_drive.search");
 });
 
 test("policy-aware preflight fails closed when no safe mapping exists", () => {
