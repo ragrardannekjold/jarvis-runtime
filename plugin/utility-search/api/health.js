@@ -10,6 +10,7 @@ export default function handler(_request, response) {
     mcp: "/mcp",
     catalog: "sanitized-public-fallback",
     zero_incremental_cost: true,
+    policy_aware_safe_reroute: true,
     ...catalogDiagnostics(catalog),
   });
 }
