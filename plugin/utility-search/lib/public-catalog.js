@@ -1,6 +1,6 @@
 export const PUBLIC_CATALOG = {
   schema_version: 1,
-  updated_at: "2026-08-15T04:16:00Z",
+  updated_at: "2026-08-15T04:19:00Z",
   utilities: [
     {
       id: "jarvis.utility_search",
@@ -28,7 +28,7 @@ export const PUBLIC_CATALOG = {
         mcp_initialize_verified: false,
         tool_call_verified: false,
         readback_sha256: null,
-        evidence_source: "GitHub Actions Utility Search Self-Test run 31863850243 succeeded on main commit 009b223fba679637b281136854d23bd9f703002f and verifies local/runtime-CI search, fallback, local/Vercel policy-preflight parity, automatic high-signal policy-risk inference, safe reroute without restricted-route retry, deploy-contract checks, and the external-E2E verifier contract. Dedicated external E2E still has zero runs; external health/MCP/tool-call readback remains unverified."
+        evidence_source: "GitHub Actions Utility Search Self-Test run 31863971774 succeeded on main commit 4d5ebe5f58b4ff6b0d41877721a86ad6f6e4d02d and verifies local/runtime-CI search, fallback, local/Vercel policy-preflight parity, automatic high-signal policy-risk inference, safe reroute without restricted-route retry, deploy-contract checks, external-E2E verifier contract, and Vercel read-only routing. Dedicated external E2E still has zero runs; external health/MCP/tool-call readback remains unverified."
       },
       visibility: "plugin",
       priority: 100
@@ -52,6 +52,27 @@ export const PUBLIC_CATALOG = {
       status: { enabled: true, health: "healthy" },
       visibility: "plugin",
       priority: 95
+    },
+    {
+      id: "airtable.record_search",
+      name: "Airtable Record Search",
+      description: "Searches records and inspects structured tables in connected Airtable bases through native connector tools.",
+      url: "https://airtable.com/",
+      aliases: ["airtable", "record search", "task queue", "structured records", "ейр тейбл", "таблиця задач"],
+      intents: ["search records", "inspect task queue", "structured state lookup", "find table data", "пошук записів"],
+      capabilities: ["base discovery", "table schema inspection", "record search", "structured filters", "read-only state lookup"],
+      launch: {
+        kind: "chat_plugin",
+        target: "Airtable",
+        tool: "search_records",
+        notes: "Default to read-only discovery/search. Resolve base/table identifiers through connected metadata tools before record search; writes require a separate scoped capability and explicit state ownership."
+      },
+      fallback_ids: ["google_drive.search", "github.repo_ops"],
+      cost: { class: "included", max_usd_per_run: 0 },
+      risk: { mode: "read_only", confirmation_required: false },
+      status: { enabled: true, health: "healthy" },
+      visibility: "plugin",
+      priority: 94
     },
     {
       id: "vercel.project_ops",
