@@ -330,7 +330,7 @@ test("diagnostics expose catalog freshness and launchable counts", () => {
   assert.equal(diagnostics.catalog_updated_at, bundled.updated_at);
   assert.equal(diagnostics.catalog_age_seconds, 3600);
   assert.equal(diagnostics.utility_count, bundled.utilities.length);
-  assert.equal(diagnostics.launchable_utility_count, 8);
+  assert.equal(diagnostics.launchable_utility_count, 9);
   assert.equal(diagnostics.not_deployed_utility_count, 1);
 });
 
