@@ -39,13 +39,7 @@ on:
       - 'runtime/select_daily_report_mode.py'
       - 'runtime/test_select_daily_report_mode.py'
       - 'runtime/daily-report-verify-trigger.txt'
-      - '.github/workflows/main-daily-report.yml'
       - 'PUBLIC_EXPORT_MANIFEST.json'
-  schedule:
-    - cron: '7 20 * * *'
-      timezone: 'Europe/Kyiv'
-    - cron: '27 20 * * *'
-      timezone: 'Europe/Kyiv'
 
 permissions:
   contents: read
