@@ -1,5 +1,6 @@
 import { readFileSync } from "node:fs";
 import { PUBLIC_CATALOG } from "./public-catalog.js";
+import { validateCriticalFallbackResilience } from "./resilience.js";
 
 const ALLOWED_COST_CLASSES = new Set(["free", "included"]);
 const ALLOWED_HEALTH = new Set(["healthy", "degraded", "not_deployed", "disabled", "unknown"]);
@@ -169,6 +170,7 @@ export function validateCatalog(catalog) {
     }
   }
   validateFallbackGraph(catalog);
+  validateCriticalFallbackResilience(catalog);
   return catalog;
 }
 
