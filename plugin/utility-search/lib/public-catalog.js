@@ -1,6 +1,6 @@
 export const PUBLIC_CATALOG = {
   schema_version: 1,
-  updated_at: "2026-08-15T04:12:00Z",
+  updated_at: "2026-08-15T04:16:00Z",
   utilities: [
     {
       id: "jarvis.utility_search",
@@ -28,7 +28,7 @@ export const PUBLIC_CATALOG = {
         mcp_initialize_verified: false,
         tool_call_verified: false,
         readback_sha256: null,
-        evidence_source: "GitHub Actions Utility Search Self-Test run 31863763571 succeeded on main commit 412ca9291da9f5bded81efc34d0ee05458420856 and verifies local/runtime-CI search, fallback, local/Vercel policy-preflight parity, automatic high-signal policy-risk inference, safe reroute without restricted-route retry, deploy-contract checks, and the external-E2E verifier contract. Dedicated external E2E still has zero runs; external health/MCP/tool-call readback remains unverified."
+        evidence_source: "GitHub Actions Utility Search Self-Test run 31863850243 succeeded on main commit 009b223fba679637b281136854d23bd9f703002f and verifies local/runtime-CI search, fallback, local/Vercel policy-preflight parity, automatic high-signal policy-risk inference, safe reroute without restricted-route retry, deploy-contract checks, and the external-E2E verifier contract. Dedicated external E2E still has zero runs; external health/MCP/tool-call readback remains unverified."
       },
       visibility: "plugin",
       priority: 100
@@ -52,6 +52,27 @@ export const PUBLIC_CATALOG = {
       status: { enabled: true, health: "healthy" },
       visibility: "plugin",
       priority: 95
+    },
+    {
+      id: "vercel.project_ops",
+      name: "Vercel Project Operations",
+      description: "Inspects connected Vercel projects, deployments, build/runtime logs, and platform documentation through structured connector tools.",
+      url: "https://vercel.com/",
+      aliases: ["vercel", "deployment", "hosting", "deploy logs", "vercel project", "верцель", "деплой"],
+      intents: ["inspect deployment", "find hosting project", "deployment logs", "vercel documentation", "перевірити деплой"],
+      capabilities: ["project discovery", "deployment inspection", "build logs", "runtime logs", "platform documentation"],
+      launch: {
+        kind: "chat_plugin",
+        target: "Vercel",
+        tool: "list_projects",
+        notes: "Default to read-only project/deployment inspection. Do not use the context-bound zero-argument deploy action unless the intended project/source binding is independently proven."
+      },
+      fallback_ids: ["github.repo_ops", "chatgpt.web_search"],
+      cost: { class: "included", max_usd_per_run: 0 },
+      risk: { mode: "read_only", confirmation_required: false },
+      status: { enabled: true, health: "healthy" },
+      visibility: "plugin",
+      priority: 93
     },
     {
       id: "google_drive.search",
