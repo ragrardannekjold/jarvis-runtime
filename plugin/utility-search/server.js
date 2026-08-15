@@ -9,6 +9,10 @@ import {
   resolveLaunchWithFallback,
   searchCatalog,
 } from "./lib/catalog.js";
+import {
+  preparePolicyAwareLaunch,
+  RESTRICTED_CAPABILITY_CLASSES,
+} from "./lib/policy-router.js";
 
 const port = Number(process.env.PORT ?? 8787);
 const MCP_PATH = "/mcp";
@@ -41,10 +45,10 @@ function fetchedUtility(utility) {
 
 export function createUtilitySearchServer() {
   const server = new McpServer(
-    { name: "jarvis-utility-search", version: "0.2.0" },
+    { name: "jarvis-utility-search", version: "0.3.0" },
     {
       instructions:
-        "Search the utility catalog first. Only plugin-visible, enabled utilities with zero incremental cost are launchable. Prefer structured MCP/plugin interfaces when relevance is otherwise comparable. Use fetch for details and prepare_launch before selecting a target. prepare_launch may return a verified connected fallback when the requested utility is unavailable.",
+        "Search the utility catalog first. Only plugin-visible, enabled utilities with zero incremental cost are launchable. Prefer structured MCP/plugin interfaces when relevance is otherwise comparable. Use fetch for details and prepare_launch before selecting a target. If a requested technique is restricted but the legitimate objective can be materially preserved by a lawful safe substitute, pass restricted_capability_class and objective to prepare_launch; it will reroute rather than retry the restricted route. prepare_launch may also return a verified connected fallback when the requested utility is unavailable.",
     }
   );
 
@@ -87,8 +91,12 @@ export function createUtilitySearchServer() {
     "prepare_launch",
     {
       title: "Prepare utility launch",
-      description: "Use this when a utility id has been selected and ChatGPT needs a zero-cost-gated invocation descriptor. If the primary surface is unavailable, an explicitly configured connected fallback may be selected.",
-      inputSchema: { id: z.string().min(1).max(128) },
+      description: "Use this when a utility id has been selected and ChatGPT needs a zero-cost-gated invocation descriptor. If the primary surface is unavailable, an explicitly configured connected fallback may be selected. If the requested technique is restricted, provide the legitimate objective plus restricted_capability_class so the router can choose a lawful safe substitute without retrying the restricted route.",
+      inputSchema: {
+        id: z.string().min(1).max(128),
+        objective: z.string().max(1000).optional(),
+        restricted_capability_class: z.enum([...RESTRICTED_CAPABILITY_CLASSES]).optional(),
+      },
       outputSchema: {
         ok: z.boolean(),
         reason: z.string().optional(),
@@ -102,11 +110,23 @@ export function createUtilitySearchServer() {
         cost: z.record(z.any()).optional(),
         url: z.string().optional(),
         attempted: z.array(z.record(z.any())).optional(),
+        selected_safe_id: z.string().optional(),
+        policy_route_rewritten: z.boolean().optional(),
+        restricted_capability_class: z.string().optional(),
+        objective: z.string().optional(),
+        safe_substitute: z.string().nullable().optional(),
+        restricted_route_not_retried: z.boolean().optional(),
       },
       annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false, idempotentHint: true },
     },
-    async ({ id }) => {
-      const result = resolveLaunchWithFallback(catalog, id);
+    async ({ id, objective, restricted_capability_class }) => {
+      const result = restricted_capability_class
+        ? preparePolicyAwareLaunch(catalog, { id, objective, restricted_capability_class })
+        : {
+            ...resolveLaunchWithFallback(catalog, id),
+            policy_route_rewritten: false,
+            objective: typeof objective === "string" && objective.trim() ? objective.trim().slice(0, 1000) : undefined,
+          };
       return {
         structuredContent: result,
         content: [{ type: "text", text: JSON.stringify(result) }],
@@ -141,6 +161,7 @@ const httpServer = createServer(async (req, res) => {
         status: "ok",
         mcp: MCP_PATH,
         zero_incremental_cost: true,
+        policy_aware_safe_reroute: true,
         ...catalogDiagnostics(catalog),
       })
     );
