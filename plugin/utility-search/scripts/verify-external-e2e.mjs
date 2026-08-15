@@ -50,7 +50,8 @@ async function main() {
   const health = await fetchJson(healthUrl, "health");
   if (health.service !== "jarvis-utility-search") fail("health: unexpected service identity");
   if (health.status !== "ok") fail("health: service status is not ok");
-  if (health.transport !== "streamable-http") fail("health: unexpected transport");
+  if (!local && health.transport !== "streamable-http") fail("health: unexpected transport");
+  if (health.mcp !== "/mcp") fail("health: unexpected MCP path");
   if (health.policy_aware_safe_reroute !== true) fail("health: policy-aware safe reroute is not asserted");
 
   const client = new Client({ name: "utility-search-e2e-verifier", version: "1.0.0" });
