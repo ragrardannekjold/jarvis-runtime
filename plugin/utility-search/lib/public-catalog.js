@@ -1,6 +1,6 @@
 export const PUBLIC_CATALOG = {
   schema_version: 1,
-  updated_at: "2026-08-15T06:04:55Z",
+  updated_at: "2026-08-15T08:45:00Z",
   utilities: [
     {
       id: "jarvis.utility_search",
@@ -161,6 +161,28 @@ export const PUBLIC_CATALOG = {
       status: { enabled: true, health: "healthy" },
       visibility: "plugin",
       priority: 91
+    },
+    {
+      id: "canva.design_search",
+      name: "Canva Design Search",
+      description: "Searches the user's existing Canva designs through a structured read-only design lookup without creating or editing designs.",
+      url: "https://www.canva.com/",
+      aliases: ["canva", "canva search", "design search", "presentation search", "пошук canva", "пошук дизайнів"],
+      intents: ["find canva design", "search existing design", "find presentation", "design lookup", "знайти дизайн"],
+      capabilities: ["existing design search", "presentation discovery", "owned/shared design lookup", "read-only design metadata search"],
+      launch: {
+        kind: "chat_plugin",
+        target: "Canva",
+        tool: "search-designs",
+        notes: "Read-only lookup of existing designs only. Do not use this adapter for templates, generation, autofill, copying, creation, or editing; those require separately scoped Canva actions."
+      },
+      failure_domain: "canva",
+      failure_scope: "external",
+      cost: { class: "included", max_usd_per_run: 0 },
+      risk: { mode: "read_only", confirmation_required: false },
+      status: { enabled: true, health: "healthy" },
+      visibility: "plugin",
+      priority: 90.5
     },
     {
       id: "openai.developers",
