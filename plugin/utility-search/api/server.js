@@ -2,9 +2,10 @@ import { createMcpHandler } from "mcp-handler";
 import { z } from "zod";
 import { getUtility, loadCatalog, searchCatalog } from "../lib/catalog.js";
 import {
-  preparePolicyAwareLaunch,
-  RESTRICTED_CAPABILITY_CLASSES,
-} from "../lib/policy-router.js";
+  EXECUTION_CONTEXTS,
+  prepareContextAwareLaunch,
+} from "../lib/context-router.js";
+import { RESTRICTED_CAPABILITY_CLASSES } from "../lib/policy-router.js";
 
 const catalog = loadCatalog();
 
@@ -25,6 +26,7 @@ function fetchedUtility(utility) {
       cost: utility.cost,
       risk: utility.risk,
       status: utility.status,
+      execution_context: utility.execution_context ?? null,
       fallback_ids: utility.fallback_ids ?? [],
       launch_kind: utility.launch.kind,
       launch_target: utility.launch.target,
@@ -33,11 +35,12 @@ function fetchedUtility(utility) {
   };
 }
 
-export function prepareApiLaunch({ id, objective, restricted_capability_class }) {
-  return preparePolicyAwareLaunch(catalog, {
+export function prepareApiLaunch({ id, objective, restricted_capability_class, execution_context }) {
+  return prepareContextAwareLaunch(catalog, {
     id,
     objective,
     restricted_capability_class,
+    execution_context,
   });
 }
 
@@ -78,14 +81,20 @@ const handler = createMcpHandler((server) => {
 
   server.tool(
     "prepare_launch",
-    "Use this after selecting a utility. Policy-aware preflight always runs: high-signal restricted cyber techniques may be inferred from the legitimate objective and safe-rerouted automatically, while restricted_capability_class remains available for explicit classification when inference is insufficient.",
+    "Use this after selecting a utility. Policy-aware preflight always runs. Pass execution_context=noninteractive for scheduled/background work so interactive-only or unknown-context routes fail closed or use a verified compatible fallback without being misclassified as global outages.",
     {
       id: z.string().min(1).max(128),
       objective: z.string().max(1000).optional(),
       restricted_capability_class: z.enum([...RESTRICTED_CAPABILITY_CLASSES]).optional(),
+      execution_context: z.enum([...EXECUTION_CONTEXTS]).optional(),
     },
-    async ({ id, objective, restricted_capability_class }) => {
-      const result = prepareApiLaunch({ id, objective, restricted_capability_class });
+    async ({ id, objective, restricted_capability_class, execution_context }) => {
+      const result = prepareApiLaunch({
+        id,
+        objective,
+        restricted_capability_class,
+        execution_context,
+      });
       return {
         content: [{ type: "text", text: JSON.stringify(result) }],
         isError: !result.ok,
