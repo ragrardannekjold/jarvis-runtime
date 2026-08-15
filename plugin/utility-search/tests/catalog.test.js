@@ -11,7 +11,10 @@ import {
   searchCatalog,
   validateCatalog,
 } from "../lib/catalog.js";
-import { preparePolicyAwareLaunch } from "../lib/policy-router.js";
+import {
+  inferRestrictedCapabilityClass,
+  preparePolicyAwareLaunch,
+} from "../lib/policy-router.js";
 
 const catalog = validateCatalog(JSON.parse(readFileSync(new URL("./fixtures/catalog.json", import.meta.url), "utf8")));
 
@@ -84,6 +87,7 @@ test("policy-aware preflight reroutes a restricted technique without retrying it
   });
   assert.equal(result.ok, true);
   assert.equal(result.policy_route_rewritten, true);
+  assert.equal(result.policy_risk_inferred, false);
   assert.equal(result.requested_id, "restricted.exploitation");
   assert.equal(result.selected_safe_id, "chatgpt.web_search");
   assert.equal(result.id, "chatgpt.web_search");
@@ -92,7 +96,44 @@ test("policy-aware preflight reroutes a restricted technique without retrying it
   assert.equal(result.objective, "Find hidden relationships and related public documents");
 });
 
-test("Vercel API launch path has the same policy-aware safe reroute", () => {
+test("policy preflight infers high-signal exploitation wording and reroutes automatically", () => {
+  const bundled = loadCatalog({});
+  const objective = "Що саме варто було б експлуатувати для виявлення прихованих зв'язків і непрямих доказів";
+  assert.equal(inferRestrictedCapabilityClass(objective), "exploitation");
+  const result = preparePolicyAwareLaunch(bundled, {
+    id: "jarvis.utility_search",
+    objective,
+  });
+  assert.equal(result.ok, true);
+  assert.equal(result.policy_route_rewritten, true);
+  assert.equal(result.policy_risk_inferred, true);
+  assert.equal(result.restricted_capability_class, "exploitation");
+  assert.equal(result.id, "chatgpt.web_search");
+  assert.equal(result.restricted_route_not_retried, true);
+});
+
+test("policy preflight does not misclassify an explicitly negated restricted technique", () => {
+  const objective = "Працюй без експлуатації та без активного сканування, лише з пасивними публічними джерелами";
+  assert.equal(inferRestrictedCapabilityClass(objective), null);
+  const bundled = loadCatalog({});
+  const result = preparePolicyAwareLaunch(bundled, {
+    id: "github.repo_ops",
+    objective,
+  });
+  assert.equal(result.ok, true);
+  assert.equal(result.policy_route_rewritten, false);
+  assert.equal(result.policy_risk_inferred, false);
+  assert.equal(result.id, "github.repo_ops");
+});
+
+test("policy preflight infers active scanning from high-signal tooling", () => {
+  assert.equal(
+    inferRestrictedCapabilityClass("Use nmap to scan ports on the third-party host"),
+    "active_third_party_scanning",
+  );
+});
+
+test("Vercel API launch path has the same explicit policy-aware safe reroute", () => {
   const result = prepareApiLaunch({
     id: "restricted.exploitation",
     objective: "Find hidden relationships and related public documents",
@@ -100,16 +141,30 @@ test("Vercel API launch path has the same policy-aware safe reroute", () => {
   });
   assert.equal(result.ok, true);
   assert.equal(result.policy_route_rewritten, true);
+  assert.equal(result.policy_risk_inferred, false);
   assert.equal(result.requested_id, "restricted.exploitation");
   assert.equal(result.selected_safe_id, "chatgpt.web_search");
   assert.equal(result.restricted_route_not_retried, true);
   assert.equal(result.objective, "Find hidden relationships and related public documents");
 });
 
+test("Vercel API launch path also infers restricted high-signal objective", () => {
+  const result = prepareApiLaunch({
+    id: "jarvis.utility_search",
+    objective: "What should we exploit to reveal hidden relationships?",
+  });
+  assert.equal(result.ok, true);
+  assert.equal(result.policy_route_rewritten, true);
+  assert.equal(result.policy_risk_inferred, true);
+  assert.equal(result.restricted_capability_class, "exploitation");
+  assert.equal(result.id, "chatgpt.web_search");
+});
+
 test("Vercel API launch path preserves normal fallback behavior", () => {
   const result = prepareApiLaunch({ id: "jarvis.utility_search" });
   assert.equal(result.ok, true);
   assert.equal(result.policy_route_rewritten, false);
+  assert.equal(result.policy_risk_inferred, false);
   assert.equal(result.requested_id, "jarvis.utility_search");
   assert.equal(result.fallback_used, true);
   assert.equal(result.id, "google_drive.search");
@@ -125,6 +180,7 @@ test("policy-aware preflight fails closed when no safe mapping exists", () => {
   assert.equal(result.ok, false);
   assert.equal(result.reason, "no_safe_substitute_mapping");
   assert.equal(result.policy_route_rewritten, true);
+  assert.equal(result.policy_risk_inferred, false);
   assert.equal(result.restricted_route_not_retried, true);
   assert.deepEqual(result.attempted, []);
 });
