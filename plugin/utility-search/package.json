@@ -1,9 +1,9 @@
 {
   "name": "jarvis-utility-search-plugin",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "private": true,
   "type": "module",
-  "description": "Zero-incremental-cost utility search and launch resolver for ChatGPT/Codex plugins.",
+  "description": "Zero-incremental-cost utility search and policy-aware launch resolver for ChatGPT/Codex plugins.",
   "engines": {
     "node": ">=20"
   },
