@@ -6,7 +6,6 @@ import {
   catalogDiagnostics,
   getUtility,
   loadCatalog,
-  resolveLaunchWithFallback,
   searchCatalog,
 } from "./lib/catalog.js";
 import {
@@ -48,7 +47,7 @@ export function createUtilitySearchServer() {
     { name: "jarvis-utility-search", version: "0.3.0" },
     {
       instructions:
-        "Search the utility catalog first. Only plugin-visible, enabled utilities with zero incremental cost are launchable. Prefer structured MCP/plugin interfaces when relevance is otherwise comparable. Use fetch for details and prepare_launch before selecting a target. If a requested technique is restricted but the legitimate objective can be materially preserved by a lawful safe substitute, pass restricted_capability_class and objective to prepare_launch; it will reroute rather than retry the restricted route. prepare_launch may also return a verified connected fallback when the requested utility is unavailable.",
+        "Search the utility catalog first. Only plugin-visible, enabled utilities with zero incremental cost are launchable. Prefer structured MCP/plugin interfaces when relevance is otherwise comparable. Use fetch for details and prepare_launch before selecting a target. prepare_launch always runs policy-aware preflight: it can infer a small set of high-signal restricted cyber techniques from the legitimate objective or accept an explicit restricted_capability_class, then reroutes to a lawful safe substitute without retrying the restricted route. Explicit classification remains available when inference is insufficient. prepare_launch may also return a verified connected fallback when the requested utility is unavailable.",
     }
   );
 
@@ -91,7 +90,7 @@ export function createUtilitySearchServer() {
     "prepare_launch",
     {
       title: "Prepare utility launch",
-      description: "Use this when a utility id has been selected and ChatGPT needs a zero-cost-gated invocation descriptor. If the primary surface is unavailable, an explicitly configured connected fallback may be selected. If the requested technique is restricted, provide the legitimate objective plus restricted_capability_class so the router can choose a lawful safe substitute without retrying the restricted route.",
+      description: "Use this when a utility id has been selected and ChatGPT needs a zero-cost-gated invocation descriptor. Policy-aware preflight always runs: high-signal restricted cyber techniques may be inferred from objective and safely rerouted; callers can also provide restricted_capability_class explicitly. If the primary surface is unavailable, an explicitly configured connected fallback may be selected.",
       inputSchema: {
         id: z.string().min(1).max(128),
         objective: z.string().max(1000).optional(),
@@ -112,6 +111,7 @@ export function createUtilitySearchServer() {
         attempted: z.array(z.record(z.any())).optional(),
         selected_safe_id: z.string().optional(),
         policy_route_rewritten: z.boolean().optional(),
+        policy_risk_inferred: z.boolean().optional(),
         restricted_capability_class: z.string().optional(),
         objective: z.string().optional(),
         safe_substitute: z.string().nullable().optional(),
@@ -120,13 +120,11 @@ export function createUtilitySearchServer() {
       annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false, idempotentHint: true },
     },
     async ({ id, objective, restricted_capability_class }) => {
-      const result = restricted_capability_class
-        ? preparePolicyAwareLaunch(catalog, { id, objective, restricted_capability_class })
-        : {
-            ...resolveLaunchWithFallback(catalog, id),
-            policy_route_rewritten: false,
-            objective: typeof objective === "string" && objective.trim() ? objective.trim().slice(0, 1000) : undefined,
-          };
+      const result = preparePolicyAwareLaunch(catalog, {
+        id,
+        objective,
+        restricted_capability_class,
+      });
       return {
         structuredContent: result,
         content: [{ type: "text", text: JSON.stringify(result) }],
