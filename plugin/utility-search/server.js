@@ -8,10 +8,8 @@ import {
   loadCatalog,
   searchCatalog,
 } from "./lib/catalog.js";
-import {
-  EXECUTION_CONTEXTS,
-  prepareContextAwareLaunch,
-} from "./lib/context-router.js";
+import { EXECUTION_CONTEXTS } from "./lib/context-router.js";
+import { prepareLaunchWithFeedback } from "./lib/feedback-router.js";
 import { RESTRICTED_CAPABILITY_CLASSES } from "./lib/policy-router.js";
 
 const port = Number(process.env.PORT ?? 8787);
@@ -49,7 +47,7 @@ export function createUtilitySearchServer() {
     { name: "jarvis-utility-search", version: "0.3.0" },
     {
       instructions:
-        "Search the utility catalog first. Only plugin-visible, enabled utilities with zero incremental cost are launchable. Prefer structured MCP/plugin interfaces when relevance is otherwise comparable. Use fetch for details and prepare_launch before selecting a target. prepare_launch always runs policy-aware preflight and can also enforce execution-context compatibility. For scheduled/non-interactive work, pass execution_context=noninteractive so interactive-only or unknown-context routes fail closed or fall through to a verified compatible fallback without being misclassified as global outages. Restricted techniques are safely rerouted without retrying the restricted route.",
+        "Search the utility catalog first. Only plugin-visible, enabled utilities with zero incremental cost are launchable. Prefer structured MCP/plugin interfaces when relevance is otherwise comparable. Use fetch for details and prepare_launch before selecting a target. prepare_launch always runs policy-aware preflight and can also enforce execution-context compatibility. For scheduled/non-interactive work, pass execution_context=noninteractive so interactive-only or unknown-context routes fail closed or fall through to a verified compatible fallback without being misclassified as global outages. After a live connector/API readback failure, pass its provider failure_domain in failed_failure_domains; prepare_launch will suppress that domain and deterministically select the next configured independent domain. Restricted techniques are safely rerouted without retrying the restricted route.",
     }
   );
 
@@ -92,12 +90,13 @@ export function createUtilitySearchServer() {
     "prepare_launch",
     {
       title: "Prepare utility launch",
-      description: "Use this when a utility id has been selected and ChatGPT needs a zero-cost-gated invocation descriptor. Policy-aware preflight always runs. Pass execution_context=noninteractive for scheduled/background work so context-incompatible routes fail closed or use a verified compatible fallback without becoming false global outages.",
+      description: "Use this when a utility id has been selected and ChatGPT needs a zero-cost-gated invocation descriptor. Policy-aware preflight always runs. Pass execution_context=noninteractive for scheduled/background work. After a live adapter failure, pass the failed provider domain in failed_failure_domains so that domain is suppressed and the next configured independent failure domain is selected without a false global outage.",
       inputSchema: {
         id: z.string().min(1).max(128),
         objective: z.string().max(1000).optional(),
         restricted_capability_class: z.enum([...RESTRICTED_CAPABILITY_CLASSES]).optional(),
         execution_context: z.enum([...EXECUTION_CONTEXTS]).optional(),
+        failed_failure_domains: z.array(z.string().min(1).max(128)).max(16).optional(),
       },
       outputSchema: {
         ok: z.boolean(),
@@ -123,15 +122,19 @@ export function createUtilitySearchServer() {
         context_state: z.string().optional(),
         context_reroute_used: z.boolean().optional(),
         data_access_started: z.boolean().optional(),
+        failed_failure_domains: z.array(z.string()).optional(),
+        feedback_reroute_used: z.boolean().optional(),
+        feedback_attempted: z.array(z.record(z.any())).optional(),
       },
       annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false, idempotentHint: true },
     },
-    async ({ id, objective, restricted_capability_class, execution_context }) => {
-      const result = prepareContextAwareLaunch(catalog, {
+    async ({ id, objective, restricted_capability_class, execution_context, failed_failure_domains }) => {
+      const result = prepareLaunchWithFeedback(catalog, {
         id,
         objective,
         restricted_capability_class,
         execution_context,
+        failed_failure_domains,
       });
       return {
         structuredContent: result,
