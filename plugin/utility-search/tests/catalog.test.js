@@ -10,6 +10,7 @@ import {
   searchCatalog,
   validateCatalog,
 } from "../lib/catalog.js";
+import { preparePolicyAwareLaunch } from "../lib/policy-router.js";
 
 const catalog = validateCatalog(JSON.parse(readFileSync(new URL("./fixtures/catalog.json", import.meta.url), "utf8")));
 
@@ -71,6 +72,37 @@ test("bundled Utility Search has an independent connected fallback path", () => 
   assert.equal(result.primary_reason, "disabled");
   assert.equal(result.id, "google_drive.search");
   assert.equal(result.launch.target, "Google Drive");
+});
+
+test("policy-aware preflight reroutes a restricted technique without retrying it", () => {
+  const bundled = loadCatalog({});
+  const result = preparePolicyAwareLaunch(bundled, {
+    id: "restricted.exploitation",
+    objective: "Find hidden relationships and related public documents",
+    restricted_capability_class: "exploitation",
+  });
+  assert.equal(result.ok, true);
+  assert.equal(result.policy_route_rewritten, true);
+  assert.equal(result.requested_id, "restricted.exploitation");
+  assert.equal(result.selected_safe_id, "chatgpt.web_search");
+  assert.equal(result.id, "chatgpt.web_search");
+  assert.equal(result.restricted_route_not_retried, true);
+  assert.match(result.safe_substitute, /Passive public-source OSINT\/CYBINT/);
+  assert.equal(result.objective, "Find hidden relationships and related public documents");
+});
+
+test("policy-aware preflight fails closed when no safe mapping exists", () => {
+  const bundled = loadCatalog({});
+  const result = preparePolicyAwareLaunch(bundled, {
+    id: "restricted.unknown",
+    objective: "Preserve the legitimate objective",
+    restricted_capability_class: "not_mapped",
+  });
+  assert.equal(result.ok, false);
+  assert.equal(result.reason, "no_safe_substitute_mapping");
+  assert.equal(result.policy_route_rewritten, true);
+  assert.equal(result.restricted_route_not_retried, true);
+  assert.deepEqual(result.attempted, []);
 });
 
 test("catalog rejects a healthy MCP claim without complete external evidence", () => {
