@@ -2,8 +2,6 @@ name: Scheduler Liveness Probe
 
 on:
   workflow_dispatch:
-  schedule:
-    - cron: '37,57 * * * *'
 
 permissions:
   contents: read
