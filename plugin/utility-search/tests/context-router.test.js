@@ -6,7 +6,7 @@ import {
   prepareContextAwareLaunch,
 } from "../lib/context-router.js";
 
-test("noninteractive launch skips unknown-context fallback and selects verified compatible fallback", () => {
+test("noninteractive launch selects freshly verified Google Drive fallback", () => {
   const catalog = loadCatalog({});
   const result = prepareContextAwareLaunch(catalog, {
     id: "jarvis.utility_search",
@@ -14,13 +14,26 @@ test("noninteractive launch skips unknown-context fallback and selects verified 
   });
   assert.equal(result.ok, true);
   assert.equal(result.requested_id, "jarvis.utility_search");
-  assert.equal(result.id, "github.repo_ops");
+  assert.equal(result.id, "google_drive.search");
   assert.equal(result.fallback_used, true);
   assert.equal(result.execution_context, "noninteractive");
   assert.equal(result.context_state, "COMPATIBLE_NONINTERACTIVE");
-  assert.equal(result.context_reroute_used, true);
+  assert.equal(result.context_reroute_used, false);
   assert.equal(result.data_access_started, false);
-  assert.ok(result.attempted.some((item) => item.id === "google_drive.search" && item.reason === "unknown_context"));
+  assert.ok(result.attempted.some((item) => item.id === "google_drive.search" && item.ok === true));
+});
+
+test("verified Google Drive connector is compatible with noninteractive routing", () => {
+  const catalog = loadCatalog({});
+  const result = prepareContextAwareLaunch(catalog, {
+    id: "google_drive.search",
+    execution_context: "noninteractive",
+  });
+  assert.equal(result.ok, true);
+  assert.equal(result.id, "google_drive.search");
+  assert.equal(result.context_state, "COMPATIBLE_NONINTERACTIVE");
+  assert.equal(result.context_reroute_used, false);
+  assert.equal(result.data_access_started, false);
 });
 
 test("verified Gmail connector is compatible with noninteractive routing", () => {
@@ -38,7 +51,7 @@ test("verified Gmail connector is compatible with noninteractive routing", () =>
 test("unknown noninteractive compatibility is not misreported as global outage", () => {
   const catalog = loadCatalog({});
   const result = prepareContextAwareLaunch(catalog, {
-    id: "google_drive.search",
+    id: "openai.developers",
     execution_context: "noninteractive",
   });
   assert.equal(result.ok, false);
@@ -48,7 +61,7 @@ test("unknown noninteractive compatibility is not misreported as global outage",
   assert.notEqual(result.reason, "global_unavailable");
 });
 
-test("declared interactive-only context fails closed before protected data access", () => {
+test("declared interactive-only context overrides previously verified compatibility and fails closed", () => {
   const catalog = loadCatalog({});
   const utility = catalog.utilities.find((item) => item.id === "google_drive.search");
   utility.execution_context = { noninteractive: "INTERACTIVE_ONLY_FOR_CONTEXT" };
