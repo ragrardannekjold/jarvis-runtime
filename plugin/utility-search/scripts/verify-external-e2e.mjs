@@ -40,8 +40,10 @@ async function fetchJson(url, label) {
 
 async function main() {
   const base = normalizeBaseUrl(process.argv[2] ?? process.env.UTILITY_SEARCH_BASE_URL);
-  const healthUrl = new URL("health", base.href.endsWith("/") ? base : new URL(`${base.href}/`));
-  const mcpUrl = new URL("mcp", base.href.endsWith("/") ? base : new URL(`${base.href}/`));
+  const local = ["127.0.0.1", "localhost", "::1"].includes(base.hostname);
+  const root = base.href.endsWith("/") ? base : new URL(`${base.href}/`);
+  const healthUrl = local ? new URL(".", root) : new URL("health", root);
+  const mcpUrl = new URL("mcp", root);
 
   if (healthUrl.origin !== mcpUrl.origin) fail("health and MCP endpoints must share one origin");
 
@@ -123,7 +125,7 @@ async function main() {
     policy_route_rewritten: true,
     safe_substitute_probe: policyJson.id,
     catalog_updated_at: health.catalog_updated_at ?? null,
-    evidence_source: base.hostname === "127.0.0.1" || base.hostname === "localhost" ? "local-ci-smoke" : "external-live-canary",
+    evidence_source: local ? "local-ci-smoke" : "external-live-canary",
   };
   const readback_sha256 = createHash("sha256").update(JSON.stringify(evidence)).digest("hex");
   console.log(JSON.stringify({ ...evidence, readback_sha256 }, null, 2));
