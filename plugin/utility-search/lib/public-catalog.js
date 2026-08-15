@@ -1,6 +1,6 @@
 export const PUBLIC_CATALOG = {
   schema_version: 1,
-  updated_at: "2026-08-15T08:45:00Z",
+  updated_at: "2026-08-15T10:44:50Z",
   utilities: [
     {
       id: "jarvis.utility_search",
@@ -183,6 +183,28 @@ export const PUBLIC_CATALOG = {
       status: { enabled: true, health: "healthy" },
       visibility: "plugin",
       priority: 90.5
+    },
+    {
+      id: "wix.site_list",
+      name: "Wix Site List",
+      description: "Lists the user's existing Wix sites through the dedicated structured read-only site-listing connector without creating, publishing, or mutating sites.",
+      url: "https://www.wix.com/",
+      aliases: ["wix", "wix sites", "site list", "website list", "список wix", "сайти wix"],
+      intents: ["list wix sites", "find wix site", "inspect wix sites", "site lookup", "знайти сайт wix"],
+      capabilities: ["existing site listing", "site metadata lookup", "account site discovery", "read-only site inventory"],
+      launch: {
+        kind: "chat_plugin",
+        target: "Wix",
+        tool: "ListWixSites",
+        notes: "Read-only listing of existing Wix sites only. Do not use this adapter for site creation, publication, content mutation, settings changes, uploads, or any write operation; those require separately scoped Wix actions."
+      },
+      failure_domain: "wix",
+      failure_scope: "external",
+      cost: { class: "included", max_usd_per_run: 0 },
+      risk: { mode: "read_only", confirmation_required: false },
+      status: { enabled: true, health: "healthy" },
+      visibility: "plugin",
+      priority: 90.25
     },
     {
       id: "openai.developers",
