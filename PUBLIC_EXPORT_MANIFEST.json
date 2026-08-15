@@ -33,6 +33,7 @@
     "plugin/utility-search/tests/catalog.test.js",
     "plugin/utility-search/tests/deploy-contract.test.js",
     "plugin/utility-search/tests/resilience.test.js",
+    "plugin/utility-search/tests/schema-contract.test.js",
     "plugin/utility-search/tests/fixtures/catalog.json",
     "plugin/utility-search/README.md",
     "README.md",
@@ -80,7 +81,7 @@
       "report_status": "VERIFICATION_ONLY",
       "report_id": "main-2026-08-14-64ebd781-f6f401d0",
       "authority_sha256": "f6f401d0037be21d2e8240fef7fd6e71d801dd00edbd65502931c4f1114e7239",
-      "policy_sha256": "64ebd781dd2fb0111d187c319096f3ec3fca2a6b5af69f4e583c5f4e6185d400",
+      "policy_sha256": "64ebd781dd2fb0111d187c319096f3ecfca2a6b5af69f4e583c5f4e6185d400",
       "json_readback_pending": false,
       "private_json_and_markdown_present": true
     }
