@@ -92,6 +92,40 @@ jobs:
             throw new Error('undeployed Utility Search did not fail closed to a verified fallback');
           }
 
+          const googleFailed = await client.callTool({
+            name: 'prepare_launch',
+            arguments: {
+              id: 'jarvis.utility_search',
+              execution_context: 'noninteractive',
+              failed_failure_domains: ['google'],
+            },
+          });
+          const googleFailedText = googleFailed.content?.find((item) => item.type === 'text')?.text ?? '';
+          const googleFailedJson = JSON.parse(googleFailedText);
+          if (googleFailedJson.ok !== true || googleFailedJson.id !== 'github.repo_ops') {
+            throw new Error('failed Google domain did not reroute prepare_launch to GitHub');
+          }
+          if (googleFailedJson.feedback_reroute_used !== true) {
+            throw new Error('failed-domain reroute was not recorded');
+          }
+
+          const googleAndGithubFailed = await client.callTool({
+            name: 'prepare_launch',
+            arguments: {
+              id: 'jarvis.utility_search',
+              execution_context: 'noninteractive',
+              failed_failure_domains: ['google', 'github'],
+            },
+          });
+          const googleAndGithubFailedText = googleAndGithubFailed.content?.find((item) => item.type === 'text')?.text ?? '';
+          const googleAndGithubFailedJson = JSON.parse(googleAndGithubFailedText);
+          if (googleAndGithubFailedJson.ok !== true || googleAndGithubFailedJson.id !== 'chatgpt.web_search') {
+            throw new Error('failed Google+GitHub domains did not reroute prepare_launch to OpenAI Web Search');
+          }
+          if (googleAndGithubFailedJson.launch?.failure_domain !== 'openai') {
+            throw new Error('second failed-domain reroute selected the wrong failure domain');
+          }
+
           const policyLaunch = await client.callTool({
             name: 'prepare_launch',
             arguments: {
