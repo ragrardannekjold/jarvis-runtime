@@ -48,6 +48,19 @@ test("verified Gmail connector is compatible with noninteractive routing", () =>
   assert.equal(result.context_reroute_used, false);
 });
 
+test("verified Canva design search is compatible with noninteractive routing", () => {
+  const catalog = loadCatalog({});
+  const result = prepareContextAwareLaunch(catalog, {
+    id: "canva.design_search",
+    execution_context: "noninteractive",
+  });
+  assert.equal(result.ok, true);
+  assert.equal(result.id, "canva.design_search");
+  assert.equal(result.context_state, "COMPATIBLE_NONINTERACTIVE");
+  assert.equal(result.context_reroute_used, false);
+  assert.equal(result.data_access_started, false);
+});
+
 test("unknown noninteractive compatibility is not misreported as global outage", () => {
   const catalog = loadCatalog({});
   const result = prepareContextAwareLaunch(catalog, {
