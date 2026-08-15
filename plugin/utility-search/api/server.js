@@ -1,6 +1,10 @@
 import { createMcpHandler } from "mcp-handler";
 import { z } from "zod";
 import { getUtility, loadCatalog, resolveLaunchWithFallback, searchCatalog } from "../lib/catalog.js";
+import {
+  preparePolicyAwareLaunch,
+  RESTRICTED_CAPABILITY_CLASSES,
+} from "../lib/policy-router.js";
 
 const catalog = loadCatalog();
 
@@ -26,6 +30,24 @@ function fetchedUtility(utility) {
       launch_target: utility.launch.target,
       launch_tool: utility.launch.tool ?? null,
     },
+  };
+}
+
+export function prepareApiLaunch({ id, objective, restricted_capability_class }) {
+  if (restricted_capability_class) {
+    return preparePolicyAwareLaunch(catalog, {
+      id,
+      objective,
+      restricted_capability_class,
+    });
+  }
+  return {
+    ...resolveLaunchWithFallback(catalog, id),
+    policy_route_rewritten: false,
+    objective:
+      typeof objective === "string" && objective.trim()
+        ? objective.trim().slice(0, 1000)
+        : undefined,
   };
 }
 
@@ -66,10 +88,14 @@ const handler = createMcpHandler((server) => {
 
   server.tool(
     "prepare_launch",
-    "Use this when a utility id has been selected and a zero-cost-gated invocation descriptor is required. An explicitly configured connected fallback may be returned when the primary surface is unavailable.",
-    { id: z.string().min(1).max(128) },
-    async ({ id }) => {
-      const result = resolveLaunchWithFallback(catalog, id);
+    "Use this after selecting a utility. For a restricted requested technique, provide the legitimate objective and restricted_capability_class so the handler safe-reroutes to a lawful substitute without retrying the restricted route.",
+    {
+      id: z.string().min(1).max(128),
+      objective: z.string().max(1000).optional(),
+      restricted_capability_class: z.enum([...RESTRICTED_CAPABILITY_CLASSES]).optional(),
+    },
+    async ({ id, objective, restricted_capability_class }) => {
+      const result = prepareApiLaunch({ id, objective, restricted_capability_class });
       return {
         content: [{ type: "text", text: JSON.stringify(result) }],
         isError: !result.ok,
