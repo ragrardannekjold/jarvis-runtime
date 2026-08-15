@@ -1,6 +1,6 @@
 export const PUBLIC_CATALOG = {
   schema_version: 1,
-  updated_at: "2026-08-15T04:06:54Z",
+  updated_at: "2026-08-15T04:12:00Z",
   utilities: [
     {
       id: "jarvis.utility_search",
@@ -14,7 +14,7 @@ export const PUBLIC_CATALOG = {
         kind: "mcp_tool",
         target: "Jarvis Utility Search",
         tool: "search",
-        notes: "Use search, then fetch, then prepare_launch after deployment evidence passes. prepare_launch supports bounded policy-aware safe reroute when the legitimate objective can be preserved by a lawful substitute."
+        notes: "Use search, then fetch, then prepare_launch after deployment evidence passes. prepare_launch always runs policy-aware preflight; it can infer a bounded set of high-signal restricted cyber techniques from the legitimate objective and safe-reroute automatically, while explicit classification remains available when inference is insufficient."
       },
       fallback_ids: ["google_drive.search", "github.repo_ops", "chatgpt.web_search"],
       cost: { class: "included", max_usd_per_run: 0 },
@@ -28,7 +28,7 @@ export const PUBLIC_CATALOG = {
         mcp_initialize_verified: false,
         tool_call_verified: false,
         readback_sha256: null,
-        evidence_source: "Latest independently verified runtime contract before this metadata-only refresh: GitHub Actions Utility Search Self-Test run 31862769185 succeeded on main commit b16b3186fb65f65665e6b82805983cb8b0dc705a, including deploy-contract and policy-reroute checks. Dedicated external E2E still has zero runs and external health/MCP/tool-call readback remains unverified."
+        evidence_source: "GitHub Actions Utility Search Self-Test run 31863763571 succeeded on main commit 412ca9291da9f5bded81efc34d0ee05458420856 and verifies local/runtime-CI search, fallback, local/Vercel policy-preflight parity, automatic high-signal policy-risk inference, safe reroute without restricted-route retry, deploy-contract checks, and the external-E2E verifier contract. Dedicated external E2E still has zero runs; external health/MCP/tool-call readback remains unverified."
       },
       visibility: "plugin",
       priority: 100
