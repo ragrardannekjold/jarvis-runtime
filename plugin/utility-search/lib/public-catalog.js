@@ -1,6 +1,6 @@
 export const PUBLIC_CATALOG = {
   schema_version: 1,
-  updated_at: "2026-08-15T01:10:00Z",
+  updated_at: "2026-08-15T04:06:54Z",
   utilities: [
     {
       id: "jarvis.utility_search",
@@ -28,7 +28,7 @@ export const PUBLIC_CATALOG = {
         mcp_initialize_verified: false,
         tool_call_verified: false,
         readback_sha256: null,
-        evidence_source: "GitHub Actions run 31855754756 verifies local/CI E2E, Vercel handler loading, and local/Vercel policy-safe launch parity on main commit d1187b9113dc0386c9c6768363c808d3e8fef99d. No external Vercel project is currently mapped, so external health and functional MCP readback remain unverified."
+        evidence_source: "Latest independently verified runtime contract before this metadata-only refresh: GitHub Actions Utility Search Self-Test run 31862769185 succeeded on main commit b16b3186fb65f65665e6b82805983cb8b0dc705a, including deploy-contract and policy-reroute checks. Dedicated external E2E still has zero runs and external health/MCP/tool-call readback remains unverified."
       },
       visibility: "plugin",
       priority: 100
