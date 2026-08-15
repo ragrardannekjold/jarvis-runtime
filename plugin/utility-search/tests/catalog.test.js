@@ -141,7 +141,7 @@ test("catalog rejects a healthy MCP claim without complete external evidence", (
     mcp_initialize_verified: true,
     tool_call_verified: false,
     readback_sha256: "a".repeat(64),
-    evidence_source: "synthetic"
+    evidence_source: "external-live-canary"
   };
   assert.throws(() => validateCatalog(candidate), /verified external deployment readback/);
 });
@@ -158,10 +158,61 @@ test("catalog accepts a healthy MCP claim only with complete external evidence",
     mcp_initialize_verified: true,
     tool_call_verified: true,
     readback_sha256: "b".repeat(64),
-    evidence_source: "external-production-canary"
+    evidence_source: "external-live-canary"
   };
   const validated = validateCatalog(candidate);
   assert.equal(resolveLaunch(validated, "jarvis.utility_search").ok, true);
+});
+
+test("catalog rejects local CI smoke as external MCP deployment proof", () => {
+  const candidate = structuredClone(loadCatalog({}));
+  const utility = candidate.utilities.find((item) => item.id === "jarvis.utility_search");
+  utility.status = { enabled: true, health: "healthy" };
+  utility.deployment = {
+    health_url: "https://localhost/health",
+    mcp_url: "https://localhost/mcp",
+    verified_at: "2026-08-15T02:15:18Z",
+    external_health_verified: true,
+    mcp_initialize_verified: true,
+    tool_call_verified: true,
+    readback_sha256: "c".repeat(64),
+    evidence_source: "local-ci-smoke"
+  };
+  assert.throws(() => validateCatalog(candidate), /verified external deployment readback/);
+});
+
+test("catalog rejects split-origin health and MCP proof", () => {
+  const candidate = structuredClone(loadCatalog({}));
+  const utility = candidate.utilities.find((item) => item.id === "jarvis.utility_search");
+  utility.status = { enabled: true, health: "healthy" };
+  utility.deployment = {
+    health_url: "https://health.example.com/health",
+    mcp_url: "https://mcp.example.com/mcp",
+    verified_at: "2026-08-15T02:15:18Z",
+    external_health_verified: true,
+    mcp_initialize_verified: true,
+    tool_call_verified: true,
+    readback_sha256: "d".repeat(64),
+    evidence_source: "external-live-canary"
+  };
+  assert.throws(() => validateCatalog(candidate), /verified external deployment readback/);
+});
+
+test("catalog rejects noncanonical external endpoint paths", () => {
+  const candidate = structuredClone(loadCatalog({}));
+  const utility = candidate.utilities.find((item) => item.id === "jarvis.utility_search");
+  utility.status = { enabled: true, health: "healthy" };
+  utility.deployment = {
+    health_url: "https://utility.example.com/not-health",
+    mcp_url: "https://utility.example.com/mcp?debug=1",
+    verified_at: "2026-08-15T02:15:18Z",
+    external_health_verified: true,
+    mcp_initialize_verified: true,
+    tool_call_verified: true,
+    readback_sha256: "e".repeat(64),
+    evidence_source: "external-live-canary"
+  };
+  assert.throws(() => validateCatalog(candidate), /verified external deployment readback/);
 });
 
 test("catalog rejects unknown fallback ids", () => {
