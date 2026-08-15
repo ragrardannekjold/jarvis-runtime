@@ -91,15 +91,20 @@ async function main() {
       await client.callTool({
         name: "prepare_launch",
         arguments: {
-          id: "restricted.exploitation",
-          objective: "Find hidden relationships and related public documents",
-          restricted_capability_class: "exploitation",
+          id: "jarvis.utility_search",
+          objective: "Що саме варто було б експлуатувати для виявлення прихованих зв'язків і непрямих доказів",
         },
       }),
       "policy_prepare_launch",
     );
     if (policyJson.ok !== true || policyJson.policy_route_rewritten !== true) {
       fail("policy_prepare_launch: safe route rewrite missing");
+    }
+    if (policyJson.policy_risk_inferred !== true) {
+      fail("policy_prepare_launch: automatic policy-risk inference not proven");
+    }
+    if (policyJson.restricted_capability_class !== "exploitation") {
+      fail("policy_prepare_launch: restricted capability class was not inferred correctly");
     }
     if (policyJson.selected_safe_id !== "chatgpt.web_search" || policyJson.id !== "chatgpt.web_search") {
       fail("policy_prepare_launch: unexpected safe substitute");
@@ -124,6 +129,8 @@ async function main() {
     search_probe: "github.repo_ops",
     fallback_probe: launchJson.id,
     policy_route_rewritten: true,
+    policy_risk_inferred: true,
+    inferred_restricted_capability_class: policyJson.restricted_capability_class,
     safe_substitute_probe: policyJson.id,
     catalog_updated_at: health.catalog_updated_at ?? null,
     evidence_source: local ? "local-ci-smoke" : "external-live-canary",
