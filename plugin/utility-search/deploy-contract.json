@@ -1,0 +1,32 @@
+{
+  "schema_version": 1,
+  "provider": "vercel",
+  "project_name": "jarvis-utility-search",
+  "source": {
+    "repository": "ragrardannekjold/jarvis-runtime",
+    "ref": "main",
+    "root_directory": "plugin/utility-search"
+  },
+  "expected_endpoints": {
+    "health": "/health",
+    "mcp": "/mcp"
+  },
+  "deploy_guard": {
+    "requires_explicit_project_binding": true,
+    "blind_zero_argument_deploy_forbidden": true,
+    "zero_incremental_cost_required": true,
+    "account_or_team_ids_must_not_be_persisted_here": true
+  },
+  "verification": {
+    "workflow": ".github/workflows/utility-search-external-e2e.yml",
+    "verifier": "plugin/utility-search/scripts/verify-external-e2e.mjs",
+    "evidence_source": "external-live-canary",
+    "required_readback": [
+      "external_health_verified",
+      "mcp_initialize_verified",
+      "tool_call_verified",
+      "readback_sha256"
+    ]
+  },
+  "operational_state": "NOT_DEPLOYED_UNTIL_EXTERNAL_READBACK"
+}
