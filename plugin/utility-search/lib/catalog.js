@@ -203,6 +203,80 @@ export function launchReadiness(utility) {
   return { ok: true };
 }
 
+function baseLiveReadbackRequirement(utility) {
+  if (utility?.failure_scope !== "external" || typeof utility?.failure_domain !== "string" || !utility.failure_domain.trim()) {
+    return null;
+  }
+  return {
+    required: true,
+    timing: "immediately_before_first_data_access",
+    evidence: "live_connector_or_api_readback",
+    static_catalog_health_sufficient: false,
+    failure_domain: utility.failure_domain,
+    on_failure: {
+      adapter_state: "UNKNOWN_OR_DEGRADED",
+      global_state: "UNCHANGED",
+      action: "TRY_NEXT_INDEPENDENT_FAILURE_DOMAIN",
+      candidates: [],
+    },
+  };
+}
+
+function runtimeLaunchDescriptor(utility) {
+  const launch = structuredClone(utility.launch);
+  launch.failure_domain = utility.failure_domain ?? null;
+  launch.failure_scope = utility.failure_scope ?? null;
+  const readback = baseLiveReadbackRequirement(utility);
+  if (readback) launch.pre_execution_readback = readback;
+  return launch;
+}
+
+function orderedFallbackIds(catalog, rootId) {
+  const ordered = [];
+  const visited = new Set();
+  function visit(candidateId) {
+    if (visited.has(candidateId)) return;
+    visited.add(candidateId);
+    if (candidateId !== rootId) ordered.push(candidateId);
+    const candidate = getUtility(catalog, candidateId);
+    for (const fallbackId of candidate?.fallback_ids ?? []) visit(fallbackId);
+  }
+  visit(rootId);
+  return ordered;
+}
+
+function attachIndependentReadbackFailover(catalog, requestedId, selected) {
+  if (!selected?.ok || !selected.launch?.pre_execution_readback) return selected;
+  const selectedUtility = getUtility(catalog, selected.id);
+  const selectedDomain = selectedUtility?.failure_domain;
+  const seenDomains = new Set(selectedDomain ? [selectedDomain] : []);
+  const candidates = [];
+
+  for (const candidateId of orderedFallbackIds(catalog, requestedId)) {
+    if (candidateId === selected.id) continue;
+    const candidate = getUtility(catalog, candidateId);
+    if (!candidate || candidate.failure_scope !== "external") continue;
+    if (!candidate.failure_domain || seenDomains.has(candidate.failure_domain)) continue;
+    if (!launchReadiness(candidate).ok) continue;
+    seenDomains.add(candidate.failure_domain);
+    candidates.push({ id: candidate.id, failure_domain: candidate.failure_domain });
+  }
+
+  return {
+    ...selected,
+    launch: {
+      ...selected.launch,
+      pre_execution_readback: {
+        ...selected.launch.pre_execution_readback,
+        on_failure: {
+          ...selected.launch.pre_execution_readback.on_failure,
+          candidates,
+        },
+      },
+    },
+  };
+}
+
 export function isLaunchable(utility) {
   return launchReadiness(utility).ok;
 }
@@ -284,7 +358,7 @@ export function resolveLaunch(catalog, id) {
     ok: true,
     id: utility.id,
     name: utility.name,
-    launch: utility.launch,
+    launch: runtimeLaunchDescriptor(utility),
     risk: utility.risk,
     cost: utility.cost,
     url: utility.url,
@@ -303,7 +377,13 @@ export function resolveLaunchWithFallback(catalog, id) {
     if (visited.has(candidateId)) return null;
     visited.add(candidateId);
     const result = resolveLaunch(catalog, candidateId);
-    attempted.push({ id: candidateId, ok: result.ok, reason: result.ok ? undefined : result.reason });
+    const utility = getUtility(catalog, candidateId);
+    attempted.push({
+      id: candidateId,
+      ok: result.ok,
+      reason: result.ok ? undefined : result.reason,
+      failure_domain: utility?.failure_domain ?? null,
+    });
     if (result.ok) return result;
     if (candidateId === id) primaryFailure = result;
     const candidate = getUtility(catalog, candidateId);
@@ -316,8 +396,9 @@ export function resolveLaunchWithFallback(catalog, id) {
 
   const selected = tryId(id);
   if (selected?.ok) {
+    const guardedSelected = attachIndependentReadbackFailover(catalog, id, selected);
     return {
-      ...selected,
+      ...guardedSelected,
       requested_id: id,
       fallback_used: selected.id !== id,
       primary_reason: selected.id !== id ? primaryFailure?.reason ?? null : null,
