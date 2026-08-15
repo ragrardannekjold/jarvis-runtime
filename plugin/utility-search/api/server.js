@@ -1,10 +1,8 @@
 import { createMcpHandler } from "mcp-handler";
 import { z } from "zod";
 import { getUtility, loadCatalog, searchCatalog } from "../lib/catalog.js";
-import {
-  EXECUTION_CONTEXTS,
-  prepareContextAwareLaunch,
-} from "../lib/context-router.js";
+import { EXECUTION_CONTEXTS } from "../lib/context-router.js";
+import { prepareLaunchWithFeedback } from "../lib/feedback-router.js";
 import { RESTRICTED_CAPABILITY_CLASSES } from "../lib/policy-router.js";
 
 const catalog = loadCatalog();
@@ -35,12 +33,19 @@ function fetchedUtility(utility) {
   };
 }
 
-export function prepareApiLaunch({ id, objective, restricted_capability_class, execution_context }) {
-  return prepareContextAwareLaunch(catalog, {
+export function prepareApiLaunch({
+  id,
+  objective,
+  restricted_capability_class,
+  execution_context,
+  failed_failure_domains,
+}) {
+  return prepareLaunchWithFeedback(catalog, {
     id,
     objective,
     restricted_capability_class,
     execution_context,
+    failed_failure_domains,
   });
 }
 
@@ -81,19 +86,21 @@ const handler = createMcpHandler((server) => {
 
   server.tool(
     "prepare_launch",
-    "Use this after selecting a utility. Policy-aware preflight always runs. Pass execution_context=noninteractive for scheduled/background work so interactive-only or unknown-context routes fail closed or use a verified compatible fallback without being misclassified as global outages.",
+    "Use this after selecting a utility. Policy-aware preflight always runs. Pass execution_context=noninteractive for scheduled/background work. After a live connector/API readback failure, pass the provider failure domain in failed_failure_domains so the same bounded independent fallback semantics used by the canonical local MCP surface are preserved.",
     {
       id: z.string().min(1).max(128),
       objective: z.string().max(1000).optional(),
       restricted_capability_class: z.enum([...RESTRICTED_CAPABILITY_CLASSES]).optional(),
       execution_context: z.enum([...EXECUTION_CONTEXTS]).optional(),
+      failed_failure_domains: z.array(z.string().min(1).max(128)).max(16).optional(),
     },
-    async ({ id, objective, restricted_capability_class, execution_context }) => {
+    async ({ id, objective, restricted_capability_class, execution_context, failed_failure_domains }) => {
       const result = prepareApiLaunch({
         id,
         objective,
         restricted_capability_class,
         execution_context,
+        failed_failure_domains,
       });
       return {
         content: [{ type: "text", text: JSON.stringify(result) }],
