@@ -1,6 +1,6 @@
 export const PUBLIC_CATALOG = {
   schema_version: 1,
-  updated_at: "2026-08-15T04:19:00Z",
+  updated_at: "2026-08-15T04:47:00Z",
   utilities: [
     {
       id: "jarvis.utility_search",
@@ -114,6 +114,26 @@ export const PUBLIC_CATALOG = {
       status: { enabled: true, health: "healthy" },
       visibility: "plugin",
       priority: 92
+    },
+    {
+      id: "gmail.message_search",
+      name: "Gmail Message Search",
+      description: "Searches the connected Gmail mailbox through structured read-only message and message-ID search without changing mail state.",
+      url: "https://mail.google.com/",
+      aliases: ["gmail", "email search", "mail search", "inbox search", "пошта", "пошук листів"],
+      intents: ["search email", "find message", "inspect inbox", "find correspondence", "пошук пошти"],
+      capabilities: ["message search", "message id search", "gmail query operators", "read-only inbox lookup"],
+      launch: {
+        kind: "chat_plugin",
+        target: "Gmail",
+        tool: "search_emails",
+        notes: "Default to read-only Gmail search. Search operators belong in the Gmail query; any send, draft, archive, delete or label mutation remains a separate explicitly scoped action and is not implied by this adapter."
+      },
+      cost: { class: "included", max_usd_per_run: 0 },
+      risk: { mode: "read_only", confirmation_required: false },
+      status: { enabled: true, health: "healthy" },
+      visibility: "plugin",
+      priority: 91
     },
     {
       id: "openai.developers",
