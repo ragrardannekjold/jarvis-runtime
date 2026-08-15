@@ -184,8 +184,9 @@ test("catalog updated_at must be timezone-aware", () => {
 
 test("diagnostics expose catalog freshness and launchable counts", () => {
   const bundled = loadCatalog({});
-  const diagnostics = catalogDiagnostics(bundled, new Date("2026-08-15T01:00:00Z"));
-  assert.equal(diagnostics.catalog_updated_at, "2026-08-15T00:00:00Z");
+  const updatedAt = new Date(bundled.updated_at);
+  const diagnostics = catalogDiagnostics(bundled, new Date(updatedAt.getTime() + 3600_000));
+  assert.equal(diagnostics.catalog_updated_at, bundled.updated_at);
   assert.equal(diagnostics.catalog_age_seconds, 3600);
   assert.equal(diagnostics.utility_count, bundled.utilities.length);
   assert.equal(diagnostics.launchable_utility_count, 4);
