@@ -107,6 +107,16 @@ def run_id_from_environment(anchor: datetime | None = None) -> str:
     return f"KYIV-LOCAL-{anchor.strftime('%Y%m%dT%H%M%S%fZ')}-{os.getpid()}"
 
 
+def clamp_expected_bin_end(source_latest: datetime | None, anchor: datetime, *, max_future_seconds: int = 900) -> tuple[datetime | None, str]:
+    if source_latest is None:
+        return None, "NO_SOURCE_TIMESTAMP"
+    if source_latest <= anchor:
+        return source_latest, "DIRECT"
+    if (source_latest - anchor).total_seconds() <= max_future_seconds:
+        return anchor, "EXPECTED_BIN_END_LABEL_CLAMPED"
+    return None, "FUTURE_LABEL_QUARANTINED"
+
+
 def _source_metadata(host: str) -> tuple[str, str, str]:
     if host == "api.ioda.inetintel.cc.gatech.edu":
         return "IODA", "IODA_PUBLIC_API", "IODA"

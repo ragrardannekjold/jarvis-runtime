@@ -8,6 +8,7 @@ from datetime import datetime, timedelta, timezone
 from receipt_contract import (
     RESULT_SEMANTICS,
     build_receipt,
+    clamp_expected_bin_end,
     finalize_json_receipt,
     set_receipt_result,
     validate_receipts,
@@ -134,6 +135,14 @@ class ReceiptContractTests(unittest.TestCase):
         row["ended_utc"] = "2026-08-16T23:59:59Z"
         result = self.assert_failed([row])
         self.assertTrue(any(error["reason"] == "BEFORE_START" for error in result["errors"]))
+
+    def test_expected_ten_minute_bin_end_is_clamped_but_larger_future_is_quarantined(self):
+        clamped,state=clamp_expected_bin_end(self.started+timedelta(minutes=10),self.started)
+        self.assertEqual(clamped,self.started)
+        self.assertEqual(state,"EXPECTED_BIN_END_LABEL_CLAMPED")
+        quarantined,state=clamp_expected_bin_end(self.started+timedelta(minutes=16),self.started)
+        self.assertIsNone(quarantined)
+        self.assertEqual(state,"FUTURE_LABEL_QUARANTINED")
 
     def test_augment_style_row_preserves_single_run_id(self):
         collector_row = self.canonical()

@@ -6,6 +6,7 @@ from pathlib import Path
 
 from receipt_contract import (
     build_receipt,
+    clamp_expected_bin_end,
     finalize_json_receipt,
     finalize_parse_failure,
     run_id_from_environment,
@@ -92,12 +93,11 @@ def ioda_bgp(tag,name,receipts,anchor):
     for s in walk(o):
         if str(s.get('datasource'))!='bgp':continue
         vals.extend(nums(s.get('values')));d=pdt(s.get('until'));latest=d if d and (not latest or d>latest) else latest
-    raw_latest=latest
-    if latest and latest>anchor:latest=anchor
+    raw_latest=latest;latest,bin_semantics=clamp_expected_bin_end(raw_latest,anchor)
     result={'status':'OK' if vals else 'NO_SERIES','fresh':bool(latest and anchor-latest<=timedelta(hours=6)),'latest_utc':isoz(latest),'raw_latest_label_utc':isoz(raw_latest) if raw_latest and raw_latest>anchor else None,'temporal_semantics':'FUTURE_BIN_END_LABEL_CLAMPED' if raw_latest and raw_latest>anchor else 'DIRECT','points':len(vals),'trend':tchange(vals),'measurement_class':'routing_control_plane','provider_independence':'SAME_PROVIDER_DIFFERENT_MEASUREMENT_CLASS'}
     if receipts:
         if raw_latest and raw_latest>anchor:
-            receipts[-1]['source_latest_raw_utc']=isoz(raw_latest);receipts[-1]['temporal_semantics']='FUTURE_BIN_END_LABEL_CLAMPED'
+            receipts[-1]['source_latest_raw_utc']=isoz(raw_latest);receipts[-1]['temporal_semantics']=bin_semantics
         observed=bool(vals and result['fresh'])
         semantic='DELTA_PRESENT' if observed and result['trend'].get('material_change') else ('NO_DELTA_OBSERVED' if observed else 'UNKNOWN')
         set_receipt_result(receipts[-1],semantic,'MATERIAL_ROUTING_CHANGE' if semantic=='DELTA_PRESENT' else ('NO_MATERIAL_ROUTING_CHANGE' if semantic=='NO_DELTA_OBSERVED' else 'INSUFFICIENT_ROUTING_WINDOW'),observation_opportunity=observed,source_latest=latest,record_count=len(vals))

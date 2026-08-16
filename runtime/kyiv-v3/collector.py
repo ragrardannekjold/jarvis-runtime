@@ -9,6 +9,7 @@ from typing import Any
 from receipt_contract import (
     RECEIPT_SCHEMA_VERSION,
     build_receipt,
+    clamp_expected_bin_end,
     finalize_json_receipt,
     finalize_non_json_receipt,
     finalize_parse_failure,
@@ -133,13 +134,11 @@ def collect_ioda(tag,code,receipts,t0):
     for s in walk_series(o):
         if str(s.get("datasource"))!="ping-slash24": continue
         vals.extend(nums(s.get("values"))); d=pdt(s.get("until")); latest=d if d and (not latest or d>latest) else latest
-    raw_latest=latest
-    if latest and latest>t0:
-        latest=t0 if latest-t0<=timedelta(minutes=5) else None
+    raw_latest=latest; latest,bin_semantics=clamp_expected_bin_end(raw_latest,t0)
     result={"status":"OK" if vals else "NO_SERIES","fresh":bool(latest and t0-latest<=timedelta(hours=6)),"latest_utc":isoz(latest),"points":len(vals),"trend":trend(vals)}
     if receipts:
         if raw_latest and raw_latest>t0:
-            receipts[-1]["source_latest_raw_utc"]=isoz(raw_latest);receipts[-1]["temporal_semantics"]="FUTURE_BIN_END_LABEL_CLAMPED" if latest else "FUTURE_LABEL_QUARANTINED"
+            receipts[-1]["source_latest_raw_utc"]=isoz(raw_latest);receipts[-1]["temporal_semantics"]=bin_semantics
         observed=bool(vals and result["fresh"])
         semantic="DELTA_PRESENT" if observed and result["trend"].get("material_drop") else ("NO_DELTA_OBSERVED" if observed else "UNKNOWN")
         set_receipt_result(receipts[-1],semantic,"MATERIAL_REACHABILITY_DROP" if semantic=="DELTA_PRESENT" else ("NO_MATERIAL_REACHABILITY_DROP" if semantic=="NO_DELTA_OBSERVED" else "INSUFFICIENT_FRESH_PARSED_SERIES"),observation_opportunity=observed,source_latest=latest,record_count=len(vals))
