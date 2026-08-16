@@ -55,6 +55,7 @@ jobs:
           assert p['learning_status']=='LEARNED'
           PY
       - uses: actions/upload-artifact@v4
+        if: always()
         with:
           name: kyiv-v3-readback-${{ github.run_id }}
           path: runtime/kyiv-v3/out/
