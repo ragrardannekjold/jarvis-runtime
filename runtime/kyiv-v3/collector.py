@@ -16,6 +16,7 @@ from receipt_contract import (
     run_id_from_environment,
     set_receipt_result,
 )
+from suppression_contract import default_suppression_state
 
 UA = "KyivV3PublicCollector/1.3 (+defensive-civilian-safety; passive-only)"
 IODA = "https://api.ioda.inetintel.cc.gatech.edu/v2"
@@ -279,7 +280,7 @@ def main():
         "broad_physical_geospatial":{"status":"OBSERVED" if geo["gate"]=="PASS" else "UNKNOWN","coverage":geo["gate"]},
         "digital_telemetry_dependency":{"status":"OBSERVED" if cy["gate"]=="PASS" else "UNKNOWN","coverage":cy["gate"]},
     },"offensive_preparation_convergence":False}
-    out={"schema_version":1,"receipt_schema_version":RECEIPT_SCHEMA_VERSION,"run_id":ACTIVE_RUN_ID,"quality_floor":"QUALITY_FLOOR_V3","generated_utc":isoz(t0),"collection_anchor_utc":isoz(t0),"safety_scope":"DEFENSIVE_CIVILIAN_AGGREGATE_ONLY","cybint":cy,"geoint":geo,"documentary":doc,"preconfiguration":pre,"gate_summary":{"passive_cybint":cy["gate"],"geoint_16_tile":geo["gate"],"preconfig_evaluation":pre["evaluation_gate"],"preconfig_coverage":pre["coverage_gate"]},"receipt_count":len(receipts),"receipt_digest":hobj(receipts),"high_prealert_authority":False}
+    out={"schema_version":1,"receipt_schema_version":RECEIPT_SCHEMA_VERSION,"run_id":ACTIVE_RUN_ID,"quality_floor":"QUALITY_FLOOR_V3","generated_utc":isoz(t0),"collection_anchor_utc":isoz(t0),"safety_scope":"DEFENSIVE_CIVILIAN_AGGREGATE_ONLY","cybint":cy,"geoint":geo,"documentary":doc,"preconfiguration":pre,"ballistic_suppression":default_suppression_state(),"gate_summary":{"passive_cybint":cy["gate"],"geoint_16_tile":geo["gate"],"preconfig_evaluation":pre["evaluation_gate"],"preconfig_coverage":pre["coverage_gate"]},"receipt_count":len(receipts),"receipt_digest":hobj(receipts),"high_prealert_authority":False}
     root=Path("runtime/kyiv-v3/out"); root.mkdir(parents=True,exist_ok=True); (root/"latest.json").write_text(json.dumps(out,ensure_ascii=False,indent=2)+"\n"); (root/"receipts.jsonl").write_text("".join(json.dumps(x,ensure_ascii=False)+"\n" for x in receipts)); print(json.dumps({"gate_summary":out["gate_summary"],"receipt_count":len(receipts)},ensure_ascii=False)); return 0
 
 if __name__=="__main__": raise SystemExit(main())
