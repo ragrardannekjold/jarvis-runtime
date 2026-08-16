@@ -1,0 +1,52 @@
+{
+  "accepted_at_utc": "2026-08-16T12:41:28Z",
+  "source_run": 31947669148,
+  "quality_floor": "QUALITY_FLOOR_V3",
+  "process_qf_v3": "PASS",
+  "observability": "DEGRADED",
+  "learning_status": "LEARNED",
+  "passive_cybint": {
+    "gate": "PASS",
+    "regions_two_class_covered": "4/4",
+    "ioda_active_regions_fresh": 4,
+    "independent_ripe_regions_fresh": 3,
+    "material_two_class_regions": 0,
+    "relationship_pivot_gate": "NOT_APPLICABLE_NO_DELTA",
+    "cloudflare_radar_timeseries": "CREDENTIAL_GATED_API_TOKEN_REQUIRED"
+  },
+  "geoint": {
+    "gate": "PASS",
+    "tiles_attempted": "16/16",
+    "p1_recent_24h": "10/12",
+    "p1_two_usable_layer_families": "11/12",
+    "raw_candidate_tiles": 2,
+    "deduplicated_candidate_lineages": 1,
+    "cross_sensor_corroboration": false,
+    "candidate_promotion": "NOT_PROMOTED",
+    "thermal_firms": "COVERAGE_GAP_MAP_KEY_NOT_CONFIGURED",
+    "night_light": "STALE_FOR_SHORT_HORIZON"
+  },
+  "preconfiguration": {
+    "evaluation_gate": "PASS",
+    "coverage_gate": "INCOMPLETE",
+    "coverage_count": "3/5",
+    "statuses": {
+      "aeronautical_airspace_service": "UNKNOWN",
+      "maintenance_support_service_dependency": "UNKNOWN",
+      "logistics_fuel_transport_aggregate": "UNKNOWN",
+      "broad_physical_geospatial": "UNKNOWN",
+      "digital_telemetry_dependency": "NEGATIVE_WITH_COVERAGE"
+    },
+    "offensive_preparation_convergence": false
+  },
+  "temporal_integrity": {
+    "gate": "PASS_WITH_QUARANTINE",
+    "future_bin_labels_quarantined": 4
+  },
+  "receipts": {
+    "count": 150,
+    "digest_verified": true
+  },
+  "regression_tests": "10/10 PASS",
+  "civilian_safety_scope": "AGGREGATE_ONLY_NO_CURRENT_MILITARY_COORDINATES_ROUTES_OR_TARGETABLE_OUTPUT"
+}
