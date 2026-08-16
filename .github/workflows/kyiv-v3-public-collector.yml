@@ -1,0 +1,50 @@
+name: Kyiv V3 public collector
+
+on:
+  pull_request:
+    paths:
+      - "runtime/kyiv-v3/**"
+      - ".github/workflows/kyiv-v3-public-collector.yml"
+  workflow_dispatch:
+  schedule:
+    - cron: "47 * * * *"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: kyiv-v3-public-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  collect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install raster preview parser
+        run: python -m pip install --disable-pip-version-check pillow==11.3.0
+      - name: Syntax gate
+        run: python -m py_compile runtime/kyiv-v3/collector.py
+      - name: Execute fresh V3 collection
+        run: python runtime/kyiv-v3/collector.py
+      - name: Readback gate
+        run: |
+          python - <<'PY'
+          import json
+          p=json.load(open('runtime/kyiv-v3/out/latest.json',encoding='utf-8'))
+          print(json.dumps({'generated_utc':p['generated_utc'],'gate_summary':p['gate_summary'],'receipt_count':p['receipt_count']},ensure_ascii=False,indent=2))
+          assert p['quality_floor']=='QUALITY_FLOOR_V3'
+          assert p['geoint']['tiles_attempted']==16
+          assert len(p['preconfiguration']['families'])==5
+          assert p['receipt_count']>0
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: kyiv-v3-readback-${{ github.run_id }}
+          path: runtime/kyiv-v3/out/
+          if-no-files-found: error
+          retention-days: 14
