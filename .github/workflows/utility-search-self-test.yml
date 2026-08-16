@@ -1,12 +1,8 @@
 name: Utility Search Self-Test
 
+# EMERGENCY CONTAINMENT 2026-08-16: non-allowlisted background checks are manual-only.
 on:
   workflow_dispatch:
-  push:
-    paths:
-      - "plugin/utility-search/**"
-      - ".github/workflows/utility-search-self-test.yml"
-      - "PUBLIC_EXPORT_MANIFEST.json"
 
 permissions:
   contents: read
