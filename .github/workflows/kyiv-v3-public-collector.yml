@@ -28,18 +28,24 @@ jobs:
       - name: Install raster preview parser
         run: python -m pip install --disable-pip-version-check pillow==11.3.0
       - name: Syntax gate
-        run: python -m py_compile runtime/kyiv-v3/collector.py
+        run: python -m py_compile runtime/kyiv-v3/collector.py runtime/kyiv-v3/validate.py
       - name: Execute fresh V3 collection
         run: python runtime/kyiv-v3/collector.py
+      - name: Apply V3 semantic validator
+        run: python runtime/kyiv-v3/validate.py
       - name: Readback gate
         run: |
           python - <<'PY'
           import json
           p=json.load(open('runtime/kyiv-v3/out/latest.json',encoding='utf-8'))
-          print(json.dumps({'generated_utc':p['generated_utc'],'gate_summary':p['gate_summary'],'receipt_count':p['receipt_count']},ensure_ascii=False,indent=2))
+          valid={'POSITIVE','NEGATIVE_WITH_COVERAGE','UNKNOWN','NOT_APPLICABLE'}
+          print(json.dumps({'generated_utc':p['generated_utc'],'gate_summary':p['gate_summary'],'process_qf_v3':p['process_qf_v3'],'observability':p['observability'],'temporal_integrity':p['temporal_integrity'],'receipt_count':p['receipt_count']},ensure_ascii=False,indent=2))
           assert p['quality_floor']=='QUALITY_FLOOR_V3'
           assert p['geoint']['tiles_attempted']==16
           assert len(p['preconfiguration']['families'])==5
+          assert all(x['status'] in valid for x in p['preconfiguration']['families'].values())
+          assert p['process_qf_v3']=='PASS'
+          assert p['receipt_readback']['lines']==p['receipt_count']
           assert p['receipt_count']>0
           PY
       - uses: actions/upload-artifact@v4
