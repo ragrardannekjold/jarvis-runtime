@@ -1,12 +1,8 @@
 name: Public Runtime Self-Test
 
+# EMERGENCY CONTAINMENT 2026-08-16: non-allowlisted background checks are manual-only.
 on:
   workflow_dispatch:
-  push:
-    branches: [main]
-    paths:
-      - 'runtime/**'
-      - '.github/workflows/runtime-self-test.yml'
 
 permissions:
   contents: read
