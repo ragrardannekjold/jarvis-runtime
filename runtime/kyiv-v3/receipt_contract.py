@@ -117,7 +117,7 @@ def clamp_expected_bin_end(source_latest: datetime | None, anchor: datetime, *, 
     return None, "FUTURE_LABEL_QUARANTINED"
 
 
-def _source_metadata(host: str) -> tuple[str, str, str]:
+def _source_metadata(host: str, path: str = "") -> tuple[str, str, str]:
     if host == "api.ioda.inetintel.cc.gatech.edu":
         return "IODA", "IODA_PUBLIC_API", "IODA"
     if host == "stat.ripe.net":
@@ -125,7 +125,14 @@ def _source_metadata(host: str) -> tuple[str, str, str]:
     if host == "planetarycomputer.microsoft.com":
         return "PC_STAC", "MICROSOFT_PLANETARY_COMPUTER_STAC", "MICROSOFT_PLANETARY_COMPUTER"
     if host == "t.me":
-        return "ROSAVIATSIA_PUBLIC", "TELEGRAM_PUBLIC_WEB_ROSAVIATSIA", "ROSAVIATSIA_TELEGRAM"
+        channel = next((part for part in path.split("/") if part and part != "s"), "").casefold()
+        telegram_sources = {
+            "favt_info": ("ROSAVIATSIA_PUBLIC", "TELEGRAM_PUBLIC_WEB_ROSAVIATSIA", "ROSAVIATSIA_TELEGRAM"),
+            "generalstaffzsu": ("UA_GENERAL_STAFF_PUBLIC", "TELEGRAM_PUBLIC_WEB_UA_GENERAL_STAFF", "UA_GENERAL_STAFF"),
+            "mod_russia": ("RUSSIAN_MOD_PUBLIC", "TELEGRAM_PUBLIC_WEB_RUSSIAN_MOD", "RUSSIAN_MOD"),
+            "mchs_official": ("RUSSIAN_EMERGENCY_MINISTRY_PUBLIC", "TELEGRAM_PUBLIC_WEB_RUSSIAN_EMERGENCY_MINISTRY", "RUSSIAN_EMERGENCY_MINISTRY"),
+        }
+        return telegram_sources.get(channel, ("TELEGRAM_PUBLIC", f"TELEGRAM_PUBLIC_WEB_{channel.upper() or 'UNKNOWN'}", f"TELEGRAM_{channel.upper() or 'UNKNOWN'}"))
     return host.upper().replace(".", "_"), host, host
 
 
@@ -183,7 +190,7 @@ def build_receipt(
     attempt: int = 1,
 ) -> dict[str, Any]:
     parsed = urllib.parse.urlparse(url)
-    collector_id, source_lineage, independence_group = _source_metadata(parsed.netloc)
+    collector_id, source_lineage, independence_group = _source_metadata(parsed.netloc, parsed.path)
     method = "POST" if payload is not None else "GET"
     result_status = "SUCCESS" if http_status == 200 and bool(raw) else "FAILED"
     parser_status = "RAW_FETCHED" if result_status == "SUCCESS" else ("EMPTY_RESPONSE" if http_status == 200 else "HTTP_FAILED")

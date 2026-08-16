@@ -130,6 +130,26 @@ class ReceiptContractTests(unittest.TestCase):
         self.assertEqual(row["request"]["body_redacted"]["bbox"], "REDACTED_BROAD_ADMIN_TILE_USE_QUERY_ID_AND_CONFIG_HASH")
         self.assertNotIn("hidden", str(row["request"]["parameters_redacted"]))
 
+    def test_telegram_channels_keep_distinct_source_lineages(self):
+        rows = []
+        for channel in ("GeneralStaffZSU", "mod_russia", "mchs_official", "favt_info"):
+            row = build_receipt(
+                run_id=self.run_id,
+                url=f"https://t.me/s/{channel}",
+                measurement_class="documentary_public_aggregate",
+                query_id=f"public scan {channel}",
+                started=self.started,
+                ended=self.ended,
+                http_status=200,
+                raw=b"page",
+                elapsed_ms=1,
+                error=None,
+            )
+            rows.append(row)
+        self.assertEqual(len({row["source_lineage"] for row in rows}), 4)
+        self.assertEqual(rows[0]["collector_id"], "UA_GENERAL_STAFF_PUBLIC")
+        self.assertEqual(rows[1]["collector_id"], "RUSSIAN_MOD_PUBLIC")
+
     def test_started_after_ended_rejected(self):
         row = self.canonical()
         row["ended_utc"] = "2026-08-16T23:59:59Z"

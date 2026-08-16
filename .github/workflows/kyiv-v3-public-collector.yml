@@ -36,7 +36,7 @@ jobs:
       - name: Install raster preview parser
         run: python -m pip install --disable-pip-version-check pillow==11.3.0
       - name: Syntax gate
-        run: python -m py_compile runtime/kyiv-v3/receipt_contract.py runtime/kyiv-v3/collector.py runtime/kyiv-v3/augment.py runtime/kyiv-v3/validate.py runtime/kyiv-v3/suppression_contract.py runtime/kyiv-v3/test_receipt_contract.py runtime/kyiv-v3/test_suppression_contract.py
+        run: python -m py_compile runtime/kyiv-v3/receipt_contract.py runtime/kyiv-v3/collector.py runtime/kyiv-v3/augment.py runtime/kyiv-v3/validate.py runtime/kyiv-v3/suppression_contract.py runtime/kyiv-v3/suppression_watch.py runtime/kyiv-v3/test_receipt_contract.py runtime/kyiv-v3/test_suppression_contract.py runtime/kyiv-v3/test_suppression_watch.py
       - name: Receipt contract regression tests
         run: python -m unittest discover -s runtime/kyiv-v3 -p "test_*.py" -v
       - name: Execute fresh V3 collection
@@ -70,11 +70,19 @@ jobs:
           assert p['receipt_derived_cybint']['gate']=='PASS'
           assert all(p['regression_tests'].values())
           assert p['learning_status']=='CORRECTED_UNVERIFIED'
-          assert p['ballistic_suppression']['feature_id']=='BAL_VERIFIED_LAUNCH_CAPABILITY_DISRUPTION'
-          assert p['ballistic_suppression']['registry_status']=='UNTESTED'
-          assert p['ballistic_suppression']['evidence_state']=='UNKNOWN'
-          assert p['ballistic_suppression']['effect']['applied_delta_points']==0
-          assert p['ballistic_suppression']['effect']['civilian_action_override_allowed'] is False
+          suppression=p['ballistic_suppression']
+          assert suppression['feature_id']=='BAL_VERIFIED_LAUNCH_CAPABILITY_DISRUPTION'
+          assert suppression['registry_status']=='UNTESTED'
+          assert suppression['evidence_state']=='UNKNOWN'
+          assert suppression['effect']['applied_delta_points']==0
+          assert suppression['effect']['civilian_action_override_allowed'] is False
+          watch=suppression['collection_watch']
+          assert watch['collection_status'] in {'VERIFIED_DONE','PARTIAL','UNKNOWN'}
+          assert watch['action'] in {'ROUTINE_PUBLIC_SCAN','OPEN_SUPPRESSION_WATCH'}
+          assert watch['applied_delta_points']==0
+          assert watch['evidence_effect']=='NONE'
+          assert watch['current_threat_state_updated'] is False
+          assert (watch['candidate_count_6h']>0)==(watch['action']=='OPEN_SUPPRESSION_WATCH')
           assert p['regression_tests']['ballistic_suppression_contract'] is True
           assert p['regression_tests']['ballistic_suppression_untested_zero_effect'] is True
           PY

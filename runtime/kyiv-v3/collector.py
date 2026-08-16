@@ -17,6 +17,7 @@ from receipt_contract import (
     set_receipt_result,
 )
 from suppression_contract import default_suppression_state
+from suppression_watch import build_public_suppression_watch, telegram_posts
 
 UA = "KyivV3PublicCollector/1.3 (+defensive-civilian-safety; passive-only)"
 IODA = "https://api.ioda.inetintel.cc.gatech.edu/v2"
@@ -261,6 +262,31 @@ def documentary(receipts,t0):
     return {"coverage":"COVERED" if s==200 and bool(txt) else "UNKNOWN","recent_page_timestamp":recent,"restriction_markers":txt.casefold().count("введены временные ограничения"),"confounder":"DEFENSIVE_REACTION_POSSIBLE"}
 
 
+def public_suppression_watch(receipts,t0):
+    pages={}
+    sources=(
+        ("ukrainian", "https://t.me/s/GeneralStaffZSU", "GeneralStaffZSU", "UA General Staff public suppression trigger scan"),
+        ("mod_russia", "https://t.me/s/mod_russia", "mod_russia", "Russian MOD public aggregate corroboration scan"),
+        ("mchs_official", "https://t.me/s/mchs_official", "mchs_official", "Russian emergency ministry public aggregate consequence scan"),
+    )
+    for key,url,channel,query_id in sources:
+        status,raw=fetch(url,receipts,"documentary_public_aggregate",query_id)
+        text=raw.decode("utf-8",errors="replace") if raw else ""
+        posts=telegram_posts(text,channel)
+        latest=max((post["published_utc"] for post in posts),default=None)
+        if status==200 and text and posts:
+            finalize_non_json_receipt(receipts[-1],parser_status="HTML_PARSED",record_count=len(posts),source_latest=latest,schema_id="TELEGRAM_PUBLIC_HTML_POSTS")
+            set_receipt_result(receipts[-1],"UNKNOWN","PUBLIC_AGGREGATE_CONTEXT_NOT_FUNCTIONAL_BDA",observation_opportunity=False,source_latest=latest,record_count=len(posts))
+        elif status==200 and text:
+            finalize_parse_failure(receipts[-1],"HTML_PARSE_FAILED","NO_TIMESTAMPED_PUBLIC_POSTS")
+        pages[key]=text
+    return build_public_suppression_watch(
+        ukrainian_page=pages.get("ukrainian",""),
+        aggressor_pages={"mod_russia":pages.get("mod_russia",""),"mchs_official":pages.get("mchs_official","")},
+        anchor_utc=isoz(t0),
+    )
+
+
 def main():
     global ACTIVE_RUN_ID
     t0=now(); ACTIVE_RUN_ID=run_id_from_environment(t0); receipts=[]; regions={}; af=rf=rel=both=0
@@ -272,7 +298,7 @@ def main():
         mat=bool(a.get("trend",{}).get("material_drop") and r.get("material_churn")); both+=int(mat)
         regions[tag]={"relationship_pivot":bool(code and asns),"ioda_active":a,"ripe_ris":r,"two_class_material":mat}
     cy={"gate":"PASS" if af>=3 and rf>=3 and rel>=3 else "INCOMPLETE","ioda_active_regions_fresh":af,"ripe_regions_fresh":rf,"relationship_regions_resolved":rel,"regions_with_two_class_material":both,"regions":regions}
-    geo=geoint(receipts,t0); doc=documentary(receipts,t0)
+    geo=geoint(receipts,t0); doc=documentary(receipts,t0); watch=public_suppression_watch(receipts,t0)
     pre={"evaluation_gate":"PASS","coverage_gate":"INCOMPLETE","families":{
         "aeronautical_airspace_service":{"status":"OBSERVED_CONTEXT" if doc["coverage"]=="COVERED" else "UNKNOWN","coverage":doc["coverage"]},
         "maintenance_support_service_dependency":{"status":"UNKNOWN","coverage":"GAP"},
@@ -280,7 +306,8 @@ def main():
         "broad_physical_geospatial":{"status":"OBSERVED" if geo["gate"]=="PASS" else "UNKNOWN","coverage":geo["gate"]},
         "digital_telemetry_dependency":{"status":"OBSERVED" if cy["gate"]=="PASS" else "UNKNOWN","coverage":cy["gate"]},
     },"offensive_preparation_convergence":False}
-    out={"schema_version":1,"receipt_schema_version":RECEIPT_SCHEMA_VERSION,"run_id":ACTIVE_RUN_ID,"quality_floor":"QUALITY_FLOOR_V3","generated_utc":isoz(t0),"collection_anchor_utc":isoz(t0),"safety_scope":"DEFENSIVE_CIVILIAN_AGGREGATE_ONLY","cybint":cy,"geoint":geo,"documentary":doc,"preconfiguration":pre,"ballistic_suppression":default_suppression_state(),"gate_summary":{"passive_cybint":cy["gate"],"geoint_16_tile":geo["gate"],"preconfig_evaluation":pre["evaluation_gate"],"preconfig_coverage":pre["coverage_gate"]},"receipt_count":len(receipts),"receipt_digest":hobj(receipts),"high_prealert_authority":False}
+    suppression=default_suppression_state(); suppression["collection_watch"]=watch
+    out={"schema_version":1,"receipt_schema_version":RECEIPT_SCHEMA_VERSION,"run_id":ACTIVE_RUN_ID,"quality_floor":"QUALITY_FLOOR_V3","generated_utc":isoz(t0),"collection_anchor_utc":isoz(t0),"safety_scope":"DEFENSIVE_CIVILIAN_AGGREGATE_ONLY","cybint":cy,"geoint":geo,"documentary":doc,"preconfiguration":pre,"ballistic_suppression":suppression,"gate_summary":{"passive_cybint":cy["gate"],"geoint_16_tile":geo["gate"],"preconfig_evaluation":pre["evaluation_gate"],"preconfig_coverage":pre["coverage_gate"]},"receipt_count":len(receipts),"receipt_digest":hobj(receipts),"high_prealert_authority":False}
     root=Path("runtime/kyiv-v3/out"); root.mkdir(parents=True,exist_ok=True); (root/"latest.json").write_text(json.dumps(out,ensure_ascii=False,indent=2)+"\n"); (root/"receipts.jsonl").write_text("".join(json.dumps(x,ensure_ascii=False)+"\n" for x in receipts)); print(json.dumps({"gate_summary":out["gate_summary"],"receipt_count":len(receipts)},ensure_ascii=False)); return 0
 
 if __name__=="__main__": raise SystemExit(main())

@@ -63,6 +63,25 @@ def default_suppression_state() -> dict[str, Any]:
             "civilian_action_override_allowed": False,
         },
         "official_threat_override": False,
+        "collection_watch": {
+            "schema_version": 1,
+            "collection_status": "UNKNOWN",
+            "action": "ROUTINE_PUBLIC_SCAN",
+            "candidate_state": "UNKNOWN",
+            "window_hours": 6,
+            "source_scope": "SAMPLED_OFFICIAL_PUBLIC_PAGE_NOT_COMPLETE_COVERAGE",
+            "source_latest_publication_utc": None,
+            "latest_candidate_publication_utc": None,
+            "first_seen_utc": None,
+            "candidate_count_6h": 0,
+            "candidate_region_buckets": [],
+            "candidate_text_sha256": [],
+            "aggressor_readback": {},
+            "evidence_effect": "NONE",
+            "applied_delta_points": 0,
+            "current_threat_state_updated": False,
+            "reason": "NO_CURRENT_PUBLIC_TRIGGER_EVALUATED",
+        },
         "execution_debt": "HISTORICAL_MATCHED_BACKTEST_NOT_DONE",
     }
 
@@ -209,4 +228,24 @@ def validate_suppression_state(state: dict[str, Any]) -> list[str]:
         errors.append("UNQUALIFIED_NONZERO_DELTA")
     if effect.get("civilian_action_override_allowed") is True:
         errors.append("CIVILIAN_ACTION_OVERRIDE_FORBIDDEN")
+    watch = state.get("collection_watch")
+    if not isinstance(watch, dict):
+        errors.append("COLLECTION_WATCH_MISSING")
+    else:
+        if watch.get("collection_status") not in {"VERIFIED_DONE", "PARTIAL", "UNKNOWN"}:
+            errors.append("INVALID_COLLECTION_WATCH_STATUS")
+        if watch.get("action") not in {"ROUTINE_PUBLIC_SCAN", "OPEN_SUPPRESSION_WATCH"}:
+            errors.append("INVALID_COLLECTION_WATCH_ACTION")
+        if watch.get("evidence_effect") != "NONE" or watch.get("applied_delta_points") != 0:
+            errors.append("COLLECTION_WATCH_NONZERO_EFFECT")
+        if watch.get("current_threat_state_updated") is not False:
+            errors.append("COLLECTION_WATCH_THREAT_STATE_REUSE")
+        count = watch.get("candidate_count_6h")
+        if not isinstance(count, int) or isinstance(count, bool) or count < 0:
+            errors.append("INVALID_COLLECTION_WATCH_CANDIDATE_COUNT")
+        elif (count > 0) != (watch.get("action") == "OPEN_SUPPRESSION_WATCH"):
+            errors.append("COLLECTION_WATCH_TRIGGER_ACTION_MISMATCH")
+        forbidden = {"raw_text", "coordinates", "latitude", "longitude", "bbox"}
+        if forbidden.intersection(watch):
+            errors.append("COLLECTION_WATCH_PRECISE_OR_RAW_FIELDS_FORBIDDEN")
     return errors
