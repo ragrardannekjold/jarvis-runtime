@@ -1,6 +1,12 @@
 name: Kyiv V3 public collector
 
 on:
+  push:
+    branches:
+      - main
+    paths:
+      - "runtime/kyiv-v3/**"
+      - ".github/workflows/kyiv-v3-public-collector.yml"
   pull_request:
     paths:
       - "runtime/kyiv-v3/**"
@@ -25,10 +31,14 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      - name: Bind immutable run identity
+        run: echo "KYIV_RUN_ID=KYIV-RUNTIME-${GITHUB_RUN_ID}-A${GITHUB_RUN_ATTEMPT}" >> "$GITHUB_ENV"
       - name: Install raster preview parser
         run: python -m pip install --disable-pip-version-check pillow==11.3.0
       - name: Syntax gate
-        run: python -m py_compile runtime/kyiv-v3/collector.py runtime/kyiv-v3/augment.py runtime/kyiv-v3/validate.py
+        run: python -m py_compile runtime/kyiv-v3/receipt_contract.py runtime/kyiv-v3/collector.py runtime/kyiv-v3/augment.py runtime/kyiv-v3/validate.py runtime/kyiv-v3/test_receipt_contract.py
+      - name: Receipt contract regression tests
+        run: python -m unittest discover -s runtime/kyiv-v3 -p "test_*.py" -v
       - name: Execute fresh V3 collection
         run: python runtime/kyiv-v3/collector.py
       - name: Apply routing fallback and documentary pivots
@@ -41,7 +51,8 @@ jobs:
           import json
           p=json.load(open('runtime/kyiv-v3/out/latest.json',encoding='utf-8'))
           valid={'POSITIVE','NEGATIVE_WITH_COVERAGE','UNKNOWN','NOT_APPLICABLE'}
-          print(json.dumps({'generated_utc':p['generated_utc'],'gate_summary':p['gate_summary'],'process_qf_v3':p['process_qf_v3'],'observability':p['observability'],'learning_status':p['learning_status'],'temporal_integrity':p['temporal_integrity'],'receipt_readback':p['receipt_readback'],'receipt_count':p['receipt_count']},ensure_ascii=False,indent=2))
+          print(json.dumps({'run_id':p['run_id'],'generated_utc':p['generated_utc'],'gate_summary':p['gate_summary'],'process_qf_v3':p['process_qf_v3'],'observability':p['observability'],'learning_status':p['learning_status'],'temporal_integrity':p['temporal_integrity'],'receipt_readback':p['receipt_readback'],'receipt_contract':p['receipt_contract'],'receipt_count':p['receipt_count']},ensure_ascii=False,indent=2))
+          assert p['run_id']==f"KYIV-RUNTIME-{__import__('os').environ['GITHUB_RUN_ID']}-A{__import__('os').environ['GITHUB_RUN_ATTEMPT']}"
           assert p['quality_floor']=='QUALITY_FLOOR_V3'
           assert p['geoint']['tiles_attempted']==16
           assert len(p['preconfiguration']['families'])==5
@@ -51,8 +62,14 @@ jobs:
           assert p['process_qf_v3']=='PASS'
           assert p['receipt_readback']['lines']==p['receipt_count']
           assert p['receipt_readback']['digest_matches_declared'] is True
+          assert p['receipt_readback']['schema_verified'] is True
+          assert p['receipt_readback']['run_linkage_verified'] is True
+          assert p['receipt_readback']['semantic_enum_verified'] is True
+          assert p['receipt_readback']['unique_receipt_ids_verified'] is True
+          assert p['receipt_contract']['error_count']==0
+          assert p['receipt_derived_cybint']['gate']=='PASS'
           assert all(p['regression_tests'].values())
-          assert p['learning_status']=='LEARNED'
+          assert p['learning_status']=='CORRECTED_UNVERIFIED'
           PY
       - uses: actions/upload-artifact@v4
         if: always()

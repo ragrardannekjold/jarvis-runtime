@@ -4,9 +4,18 @@ import hashlib,json,math,statistics,time,urllib.error,urllib.parse,urllib.reques
 from datetime import datetime,timezone,timedelta
 from pathlib import Path
 
+from receipt_contract import (
+    build_receipt,
+    finalize_json_receipt,
+    finalize_parse_failure,
+    run_id_from_environment,
+    set_receipt_result,
+)
+
 P=Path('runtime/kyiv-v3/out/latest.json');R=Path('runtime/kyiv-v3/out/receipts.jsonl')
 IODA='https://api.ioda.inetintel.cc.gatech.edu/v2';UA='KyivV3PublicCollector/1.2 (+defensive-civilian-safety; passive-only)'
 REGIONS={'BRY':'Bryansk','KUR':'Kursk','BEL':'Belgorod','VOR':'Voronezh'}
+ACTIVE_RUN_ID=''
 
 def now():return datetime.now(timezone.utc)
 def isoz(d):return d.astimezone(timezone.utc).isoformat().replace('+00:00','Z') if d else None
@@ -33,14 +42,16 @@ def fetch(url,cls,semantic,receipts,timeout=25):
         try:raw=e.read()
         except Exception:pass
     except Exception as e:err=type(e).__name__
-    receipts.append({'class':cls,'semantic':semantic,'started_utc':isoz(st),'ended_utc':isoz(now()),'host':urllib.parse.urlparse(url).netloc,'path':urllib.parse.urlparse(url).path,'status':status,'bytes':len(raw),'elapsed_ms':int((time.monotonic()-t)*1000),'sha256':digest(raw) if raw else None,'error':err})
+    en=now();receipts.append(build_receipt(run_id=ACTIVE_RUN_ID or run_id_from_environment(st),url=url,measurement_class=cls,query_id=semantic,started=st,ended=en,http_status=status,raw=raw,elapsed_ms=int((time.monotonic()-t)*1000),error=err))
     return status,raw
 
 def jfetch(url,cls,semantic,receipts):
     s,b=fetch(url,cls,semantic,receipts)
     if s!=200 or not b:return None
-    try:return json.loads(b.decode())
-    except Exception:return None
+    try:
+        obj=json.loads(b.decode());finalize_json_receipt(receipts[-1],obj);return obj
+    except Exception as e:
+        finalize_parse_failure(receipts[-1],'JSON_PARSE_FAILED',type(e).__name__);return None
 
 def data_list(o):
     d=o.get('data') if isinstance(o,dict) else None;return [x for x in d if isinstance(x,dict)] if isinstance(d,list) else []
@@ -67,6 +78,7 @@ def tchange(v):
 
 def resolve(name,receipts):
     q=urllib.parse.urlencode({'entityType':'region','search':name,'limit':30});o=jfetch(f'{IODA}/entities/query?{q}','relationship_metadata',f'IODA aggregate region resolution {name}',receipts)
+    if receipts:set_receipt_result(receipts[-1],'NOT_APPLICABLE','RELATIONSHIP_LOOKUP_ONLY',observation_opportunity=isinstance(o,dict))
     for x in data_list(o):
         if name.casefold() in str(x.get('name','')).casefold() and str(x.get('code','')).strip():return str(x['code']).strip()
     return None
@@ -82,10 +94,18 @@ def ioda_bgp(tag,name,receipts,anchor):
         vals.extend(nums(s.get('values')));d=pdt(s.get('until'));latest=d if d and (not latest or d>latest) else latest
     raw_latest=latest
     if latest and latest>anchor:latest=anchor
-    return {'status':'OK' if vals else 'NO_SERIES','fresh':bool(latest and anchor-latest<=timedelta(hours=6)),'latest_utc':isoz(latest),'raw_latest_label_utc':isoz(raw_latest) if raw_latest and raw_latest>anchor else None,'temporal_semantics':'FUTURE_BIN_END_LABEL_CLAMPED' if raw_latest and raw_latest>anchor else 'DIRECT','points':len(vals),'trend':tchange(vals),'measurement_class':'routing_control_plane','provider_independence':'SAME_PROVIDER_DIFFERENT_MEASUREMENT_CLASS'}
+    result={'status':'OK' if vals else 'NO_SERIES','fresh':bool(latest and anchor-latest<=timedelta(hours=6)),'latest_utc':isoz(latest),'raw_latest_label_utc':isoz(raw_latest) if raw_latest and raw_latest>anchor else None,'temporal_semantics':'FUTURE_BIN_END_LABEL_CLAMPED' if raw_latest and raw_latest>anchor else 'DIRECT','points':len(vals),'trend':tchange(vals),'measurement_class':'routing_control_plane','provider_independence':'SAME_PROVIDER_DIFFERENT_MEASUREMENT_CLASS'}
+    if receipts:
+        if raw_latest and raw_latest>anchor:
+            receipts[-1]['source_latest_raw_utc']=isoz(raw_latest);receipts[-1]['temporal_semantics']='FUTURE_BIN_END_LABEL_CLAMPED'
+        observed=bool(vals and result['fresh'])
+        semantic='DELTA_PRESENT' if observed and result['trend'].get('material_change') else ('NO_DELTA_OBSERVED' if observed else 'UNKNOWN')
+        set_receipt_result(receipts[-1],semantic,'MATERIAL_ROUTING_CHANGE' if semantic=='DELTA_PRESENT' else ('NO_MATERIAL_ROUTING_CHANGE' if semantic=='NO_DELTA_OBSERVED' else 'INSUFFICIENT_ROUTING_WINDOW'),observation_opportunity=observed,source_latest=latest,record_count=len(vals))
+    return result
 
 def main():
-    p=json.loads(P.read_text(encoding='utf-8'));anchor=pdt(p['generated_utc']);receipts=[json.loads(x) for x in R.read_text(encoding='utf-8').splitlines() if x.strip()]
+    global ACTIVE_RUN_ID
+    p=json.loads(P.read_text(encoding='utf-8'));anchor=pdt(p['generated_utc']);ACTIVE_RUN_ID=str(p.get('run_id') or run_id_from_environment(anchor));p['run_id']=ACTIVE_RUN_ID;receipts=[json.loads(x) for x in R.read_text(encoding='utf-8').splitlines() if x.strip()]
     covered=0;material_regions=[];pivot_checked=0
     for tag,name in REGIONS.items():
         rv=p['cybint']['regions'][tag];ripe=rv.get('ripe_ris',{});routing_ok=ripe.get('status')=='OK' and ripe.get('fresh') is True
