@@ -1,10 +1,12 @@
 name: Kyiv Early Warning Fast Watch
 
-# Fast-path revision 4:
+# Fast-path revision 5:
 # - workflow_dispatch is the independent ~5-minute watcher loop;
 # - native GitHub schedule is only a watchdog/bootstrap and does not create a
 #   second competing watcher chain;
-# - push remains a one-shot transport test after workflow changes.
+# - push remains a one-shot transport test after workflow changes and may
+#   bootstrap the self-dispatch chain after a repair;
+# - dispatch calls retry once on transient GitHub 5xx responses, then fail.
 on:
   workflow_dispatch:
   schedule:
@@ -48,19 +50,27 @@ jobs:
             echo "self-dispatch loop is recent; watchdog does not duplicate it"
             exit 0
           fi
-          code=$(curl -sS -o /tmp/dispatch-response -w '%{http_code}' \
-            -X POST \
-            -H 'Accept: application/vnd.github+json' \
-            -H "Authorization: Bearer $GH_TOKEN" \
-            -H 'X-GitHub-Api-Version: 2022-11-28' \
-            "https://api.github.com/repos/${{ github.repository }}/actions/workflows/kyiv-fast-watch.yml/dispatches" \
-            -d '{"ref":"main"}')
-          if [[ "$code" != "204" ]]; then
-            echo "watchdog bootstrap failed HTTP $code" >&2
+          dispatch_url="https://api.github.com/repos/${{ github.repository }}/actions/workflows/kyiv-fast-watch.yml/dispatches"
+          for attempt in 1 2; do
+            code=$(curl -sS -o /tmp/dispatch-response -w '%{http_code}' \
+              -X POST \
+              -H 'Accept: application/vnd.github+json' \
+              -H "Authorization: Bearer $GH_TOKEN" \
+              -H 'X-GitHub-Api-Version: 2022-11-28' \
+              "$dispatch_url" \
+              -d '{"ref":"main"}')
+            if [[ "$code" == "204" ]]; then
+              echo "stale/missing self-dispatch loop bootstrapped"
+              exit 0
+            fi
+            echo "watchdog bootstrap failed HTTP $code (attempt $attempt/2)" >&2
             cat /tmp/dispatch-response >&2 || true
+            if [[ "$attempt" == "1" && "$code" =~ ^5 ]]; then
+              sleep 10
+              continue
+            fi
             exit 1
-          fi
-          echo "stale/missing self-dispatch loop bootstrapped"
+          done
 
   fast-watch:
     if: github.event_name != 'schedule'
@@ -107,6 +117,35 @@ jobs:
           fi
           python command-center/scripts/runtime_kyiv_fast_watch.py "${extra[@]}"
 
+      - name: Bootstrap fast-watch chain after workflow repair
+        if: always() && github.event_name == 'push'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          dispatch_url="https://api.github.com/repos/${{ github.repository }}/actions/workflows/kyiv-fast-watch.yml/dispatches"
+          for attempt in 1 2; do
+            code=$(curl -sS -o /tmp/dispatch-response -w '%{http_code}' \
+              -X POST \
+              -H 'Accept: application/vnd.github+json' \
+              -H "Authorization: Bearer $GH_TOKEN" \
+              -H 'X-GitHub-Api-Version: 2022-11-28' \
+              "$dispatch_url" \
+              -d '{"ref":"main"}')
+            if [[ "$code" == "204" ]]; then
+              echo 'repair bootstrap dispatch accepted'
+              exit 0
+            fi
+            echo "repair bootstrap failed HTTP $code (attempt $attempt/2)" >&2
+            cat /tmp/dispatch-response >&2 || true
+            if [[ "$attempt" == "1" && "$code" =~ ^5 ]]; then
+              sleep 10
+              continue
+            fi
+            exit 1
+          done
+
       - name: Continue independent fast-watch loop
         if: always() && github.event_name == 'workflow_dispatch'
         shell: bash
@@ -114,16 +153,24 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           sleep 270
-          code=$(curl -sS -o /tmp/dispatch-response -w '%{http_code}' \
-            -X POST \
-            -H 'Accept: application/vnd.github+json' \
-            -H "Authorization: Bearer $GH_TOKEN" \
-            -H 'X-GitHub-Api-Version: 2022-11-28' \
-            "https://api.github.com/repos/${{ github.repository }}/actions/workflows/kyiv-fast-watch.yml/dispatches" \
-            -d '{"ref":"main"}')
-          if [[ "$code" != "204" ]]; then
-            echo "self-dispatch failed HTTP $code" >&2
+          dispatch_url="https://api.github.com/repos/${{ github.repository }}/actions/workflows/kyiv-fast-watch.yml/dispatches"
+          for attempt in 1 2; do
+            code=$(curl -sS -o /tmp/dispatch-response -w '%{http_code}' \
+              -X POST \
+              -H 'Accept: application/vnd.github+json' \
+              -H "Authorization: Bearer $GH_TOKEN" \
+              -H 'X-GitHub-Api-Version: 2022-11-28' \
+              "$dispatch_url" \
+              -d '{"ref":"main"}')
+            if [[ "$code" == "204" ]]; then
+              echo 'self-dispatch accepted'
+              exit 0
+            fi
+            echo "self-dispatch failed HTTP $code (attempt $attempt/2)" >&2
             cat /tmp/dispatch-response >&2 || true
+            if [[ "$attempt" == "1" && "$code" =~ ^5 ]]; then
+              sleep 10
+              continue
+            fi
             exit 1
-          fi
-          echo 'self-dispatch accepted'
+          done
