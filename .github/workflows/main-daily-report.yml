@@ -1,5 +1,6 @@
 name: Main Daily Control Report
 
+# EMERGENCY CONTAINMENT 2026-08-18: branch-local reporting background execution is paused.
 on:
   workflow_dispatch:
     inputs:
@@ -8,16 +9,6 @@ on:
         required: false
         type: boolean
         default: false
-  push:
-    branches: [main]
-    paths:
-      - 'runtime/daily_report_runner.py'
-      - 'runtime/test_daily_report_runner.py'
-      - '.github/workflows/main-daily-report.yml'
-  schedule:
-    # 20:07/20:27 Europe/Kyiv across UTC+2 and UTC+3.
-    # Off-season UTC pair exits NOT_DUE or ALREADY_PUBLISHED.
-    - cron: '7,27 17,18 * * *'
 
 permissions:
   contents: read
