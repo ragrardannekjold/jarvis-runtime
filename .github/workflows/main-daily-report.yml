@@ -1,5 +1,6 @@
 name: Main Daily Control Report
 
+# EMERGENCY CONTAINMENT 2026-08-18: branch-local reporting background execution is paused.
 on:
   workflow_dispatch:
     inputs:
@@ -17,35 +18,6 @@ on:
         required: false
         default: false
         type: boolean
-  pull_request:
-    branches: [main]
-    paths:
-      - 'runtime/generate_daily_main_report.py'
-      - 'runtime/test_generate_daily_main_report.py'
-      - 'runtime/resilient_daily_report_runner.py'
-      - 'runtime/test_resilient_daily_report_runner.py'
-      - 'runtime/select_daily_report_mode.py'
-      - 'runtime/test_select_daily_report_mode.py'
-      - 'runtime/daily-report-verify-trigger.txt'
-      - '.github/workflows/main-daily-report.yml'
-      - 'PUBLIC_EXPORT_MANIFEST.json'
-  push:
-    branches: [main]
-    paths:
-      - 'runtime/generate_daily_main_report.py'
-      - 'runtime/test_generate_daily_main_report.py'
-      - 'runtime/resilient_daily_report_runner.py'
-      - 'runtime/test_resilient_daily_report_runner.py'
-      - 'runtime/select_daily_report_mode.py'
-      - 'runtime/test_select_daily_report_mode.py'
-      - 'runtime/daily-report-verify-trigger.txt'
-      - '.github/workflows/main-daily-report.yml'
-      - 'PUBLIC_EXPORT_MANIFEST.json'
-  schedule:
-    - cron: '7 20 * * *'
-      timezone: 'Europe/Kyiv'
-    - cron: '27 20 * * *'
-      timezone: 'Europe/Kyiv'
 
 permissions:
   contents: read
