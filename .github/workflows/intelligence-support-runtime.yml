@@ -1,13 +1,8 @@
 name: Intelligence Support Public Runtime
 
+# EMERGENCY CONTAINMENT 2026-08-18: branch-local intelligence background execution is paused.
 on:
   workflow_dispatch:
-  push:
-    branches: [main]
-    paths:
-      - '.github/workflows/intelligence-support-runtime.yml'
-  schedule:
-    - cron: '7 * * * *'
 
 permissions:
   contents: read
