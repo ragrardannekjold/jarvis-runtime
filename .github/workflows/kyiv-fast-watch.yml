@@ -1,6 +1,6 @@
 name: Kyiv Early Warning Fast Watch
 
-# Fast-path revision 8:
+# Fast-path revision 9:
 # - workflow_dispatch is the independent ~5-minute watcher loop;
 # - native GitHub schedule is only a watchdog/bootstrap and does not create a
 #   second competing watcher chain;
@@ -10,7 +10,8 @@ name: Kyiv Early Warning Fast Watch
 # - transition-safe entrypoint applies newest official ballistic standdown
 #   semantics before should_send(), anchored to ballistic evidence time so a
 #   later unrelated context cue cannot resurrect a pre-standdown ballistic cue;
-# - post-write reconciler remains defense-in-depth.
+# - post-write reconciler also clears invalid post-standdown repeat suppression
+#   when no newer ballistic cue survives, preserving sensitivity to a new event.
 on:
   workflow_dispatch:
   schedule:
