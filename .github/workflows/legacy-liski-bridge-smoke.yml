@@ -1,11 +1,8 @@
 name: Legacy Liski public-runner bridge smoke
 
+# EMERGENCY CONTAINMENT 2026-08-18: branch-local Liski background execution is paused.
 on:
   workflow_dispatch:
-  push:
-    branches: [main]
-    paths:
-      - 'runtime/legacy-liski-trigger.txt'
 
 permissions:
   contents: read
