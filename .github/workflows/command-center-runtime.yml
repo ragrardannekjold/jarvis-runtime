@@ -1,19 +1,9 @@
 name: Command Center Public Runtime
 
+# EMERGENCY CONTAINMENT 2026-08-18: branch-local cross-system background execution is paused.
+# Preserve manual dispatch for bounded verified recovery work only.
 on:
   workflow_dispatch:
-  push:
-    branches: [main]
-    paths:
-      - 'runtime/bridge-trigger.txt'
-      - 'runtime/persist_recovery_snapshot.py'
-      - 'runtime/test_persist_recovery_snapshot.py'
-      - 'runtime/validate_public_runtime_inventory.py'
-      - 'runtime/test_validate_public_runtime_inventory.py'
-      - '.github/workflows/command-center-runtime.yml'
-      - 'PUBLIC_EXPORT_MANIFEST.json'
-  schedule:
-    - cron: '31,51 * * * *'
 
 permissions:
   contents: read
