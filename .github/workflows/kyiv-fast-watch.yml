@@ -1,12 +1,14 @@
 name: Kyiv Early Warning Fast Watch
 
-# Fast-path revision 5:
+# Fast-path revision 6:
 # - workflow_dispatch is the independent ~5-minute watcher loop;
 # - native GitHub schedule is only a watchdog/bootstrap and does not create a
 #   second competing watcher chain;
 # - push remains a one-shot transport test after workflow changes and may
 #   bootstrap the self-dispatch chain after a repair;
-# - dispatch calls retry once on transient GitHub 5xx responses, then fail.
+# - dispatch calls retry once on transient GitHub 5xx responses, then fail;
+# - newest-transition reconciler prevents an older ballistic active decision
+#   from surviving a newer official ballistic standdown.
 on:
   workflow_dispatch:
   schedule:
@@ -102,8 +104,11 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Syntax check fast watcher
-        run: python -m py_compile command-center/scripts/runtime_kyiv_fast_watch.py
+      - name: Syntax check fast watcher and reconciler
+        run: python -m py_compile command-center/scripts/runtime_kyiv_fast_watch.py command-center/scripts/runtime_kyiv_fast_watch_reconcile.py command-center/scripts/test_runtime_kyiv_fast_watch_reconcile.py
+
+      - name: Regression test newest-transition reconciliation
+        run: python command-center/scripts/test_runtime_kyiv_fast_watch_reconcile.py
 
       - name: Run Kyiv fast watcher
         shell: bash
@@ -116,6 +121,13 @@ jobs:
             extra+=(--test-once)
           fi
           python command-center/scripts/runtime_kyiv_fast_watch.py "${extra[@]}"
+
+      - name: Reconcile newest official state transition
+        shell: bash
+        env:
+          COMMAND_CENTER_TOKEN: ${{ secrets.COMMAND_CENTER_TOKEN }}
+          COMMAND_CENTER_REPO: ragrardannekjold/jarvis-command-center
+        run: python command-center/scripts/runtime_kyiv_fast_watch_reconcile.py
 
       - name: Bootstrap fast-watch chain after workflow repair
         if: always() && github.event_name == 'push'
