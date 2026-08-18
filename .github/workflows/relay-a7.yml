@@ -1,13 +1,8 @@
 name: Relay A7
 
+# EMERGENCY CONTAINMENT 2026-08-18: branch-local relay background execution is paused.
 on:
   workflow_dispatch:
-  push:
-    branches: [main]
-    paths:
-      - '.github/workflows/relay-a7.yml'
-  schedule:
-    - cron: '7 * * * *'
 
 permissions:
   contents: read
