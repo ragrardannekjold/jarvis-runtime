@@ -1,0 +1,120 @@
+name: Superteam Agent Recon (ephemeral)
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'runtime/superteam-recon-trigger.txt'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: superteam-agent-recon
+  cancel-in-progress: false
+
+jobs:
+  discover:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Register ephemeral agent and fetch agent-eligible listings
+        env:
+          RUN_ID: ${{ github.run_id }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import json, os, re, urllib.request, urllib.parse, urllib.error
+
+          BASE = 'https://superteam.fun'
+          run_id = os.environ.get('RUN_ID', 'unknown')
+          agent_name = f'aiq-revenue-recon-{run_id}'
+
+          def req(url, *, method='GET', payload=None, token=None):
+              headers = {'Accept': 'application/json'}
+              data = None
+              if payload is not None:
+                  data = json.dumps(payload).encode('utf-8')
+                  headers['Content-Type'] = 'application/json'
+              if token:
+                  headers['Authorization'] = f'Bearer {token}'
+              r = urllib.request.Request(url, data=data, headers=headers, method=method)
+              with urllib.request.urlopen(r, timeout=30) as resp:
+                  return json.loads(resp.read().decode('utf-8'))
+
+          reg = req(f'{BASE}/api/agents', method='POST', payload={'name': agent_name})
+          api_key = reg.get('apiKey')
+          if not api_key:
+              raise SystemExit('registration succeeded without usable apiKey')
+
+          live = req(
+              f'{BASE}/api/agents/listings/live?take=100&deadline=2026-12-31',
+              token=api_key,
+          )
+
+          secret_keys = re.compile(r'(api.?key|claim.?code|authorization|token|secret)', re.I)
+          def sanitize(obj):
+              if isinstance(obj, dict):
+                  return {k: sanitize(v) for k, v in obj.items() if not secret_keys.search(str(k))}
+              if isinstance(obj, list):
+                  return [sanitize(v) for v in obj]
+              return obj
+
+          slugs = []
+          def collect_slugs(obj):
+              if isinstance(obj, dict):
+                  slug = obj.get('slug')
+                  if isinstance(slug, str) and slug and slug not in slugs:
+                      slugs.append(slug)
+                  for v in obj.values():
+                      collect_slugs(v)
+              elif isinstance(obj, list):
+                  for v in obj:
+                      collect_slugs(v)
+          collect_slugs(live)
+
+          details = []
+          for slug in slugs[:60]:
+              try:
+                  item = req(
+                      f'{BASE}/api/agents/listings/details/{urllib.parse.quote(slug, safe="")}',
+                      token=api_key,
+                  )
+                  details.append({'slug': slug, 'detail': sanitize(item)})
+              except Exception as exc:
+                  details.append({'slug': slug, 'detail_error': type(exc).__name__})
+
+          out = {
+              'source': 'https://superteam.fun/skill.md',
+              'discovery_mode': 'official_authenticated_agent_api',
+              'agent': {
+                  'agentId': reg.get('agentId'),
+                  'username': reg.get('username'),
+                  'ephemeral': True,
+                  'api_key_persisted': False,
+                  'claim_code_persisted': False,
+              },
+              'live_feed': sanitize(live),
+              'detail_count_attempted': len(details),
+              'details': details,
+          }
+          with open('superteam-agent-recon.json', 'w', encoding='utf-8') as f:
+              json.dump(out, f, ensure_ascii=False, indent=2)
+          print(json.dumps({
+              'status': 'ok',
+              'agentId': reg.get('agentId'),
+              'username': reg.get('username'),
+              'slugs_found': len(slugs),
+              'details_attempted': len(details),
+              'secrets_persisted': False,
+          }))
+          PY
+
+      - name: Upload sanitized discovery artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: superteam-agent-recon
+          path: superteam-agent-recon.json
+          if-no-files-found: error
+          retention-days: 1
