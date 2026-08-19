@@ -1,41 +1,33 @@
-# JARVIS Public Runtime
+# Builderr Trading Agents Round 2 — submission branch
 
-This repository is the **sanitized public runtime** for the private command center. It intentionally contains no project data, client data, checkpoints, research, payment records, result ledgers, coordinates, or private history.
+This branch is an isolated contest artifact for the Builderr Trading Agents Round 2 live paper-market challenge.
 
-## Purpose
+## Entry
 
-Use standard GitHub-hosted runners in a public repository while keeping the authoritative command center private.
+`agent.py` implements the required `decide(market_state, portfolio_state, cash)` contract.
 
-The public runner is designed to:
-1. check out this public runtime;
-2. use one repository secret: `COMMAND_CENTER_TOKEN`;
-3. ephemerally check out the private `ragrardannekjold/jarvis-command-center` repository;
-4. run a strict allowlist of control-plane validation/regression commands with private stdout/stderr captured rather than printed;
-5. write a minimal heartbeat back to the private `jarvis-runtime-state` branch;
-6. upload no private artifacts.
+The strategy is a deterministic, no-network, no-API-key momentum/regime controller with explicit risk caps:
 
-## Security boundary
+- long-only;
+- target weight per ticker <= 23%;
+- target capital <= 96%;
+- beta-adjusted target gross <= 1.30x;
+- 2-trading-day rebalance cadence unless concentration drift requires action;
+- defensive/cash behavior in weak regimes;
+- no brokerage integration and no real-money trading.
 
-- Do not add `pull_request` or `pull_request_target` triggers to workflows that receive bridge secrets.
-- Do not upload the private checkout or `/tmp/jarvis-public-runtime` as artifacts.
-- Do not print private command output.
-- Do not copy project files, registry content, checkpoints, research, payment data, geodata, or result records into this public repository.
-- `COMMAND_CENTER_TOKEN` should be a fine-grained GitHub token limited to the single private command-center repository and only the permissions required by the runtime.
-- External pull requests must never receive bridge secrets.
-- Runtime state belongs in the private `jarvis-runtime-state` branch.
+## Validation status
 
-## Current capability
+Before publication, the candidate passed Python compilation, the Builderr self-check contract shape on the official self-check universe, deterministic scenario tests, and 300 randomized synthetic regime scenarios. Those are compatibility/safety checks only. They are **not** official Builderr admission results, backtest returns, live returns, or a claim that the entry will win a prize.
 
-The secret-free public runner self-test is verified working. The authenticated private bridge remains disabled until `COMMAND_CENTER_TOKEN` is configured and a manual bridge test passes.
+The official Builderr grader remains authoritative for admission and scoring.
 
-Phase 1 restores **independent control-plane validation** outside the private repository's billing-blocked GitHub-hosted Actions.
+Candidate SHA-256 before publication: `e412413965192a993f56d0bf3373957bfc6ea65c22d61c0a107cafda1e58ff79`.
 
-It does **not yet** execute project-native workflows locally. The heartbeat therefore explicitly reports:
+## Privacy and dependencies
 
-`local_project_executor_dispatch = NOT_YET_ENABLED`
+This branch contains no private system configuration, credentials, customer data, military/safety-critical material, personal banking data, or external API key. The agent uses Python standard library only.
 
-That state must not be described as full runtime recovery.
+## Rights
 
-## Export allowlist
-
-Only the files listed in `PUBLIC_EXPORT_MANIFEST.json` are intended for this public repository.
+Submitted for evaluation under the Builderr challenge rules. Code ownership remains with the author. Public readability is not a grant of broader commercial reuse; see `LICENSE.md`.
