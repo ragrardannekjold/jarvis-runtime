@@ -44,3 +44,19 @@ test("Netlas prefers the secure protocol field over generic prot7", () => {
   });
   assert.equal(observation.service.protocol, "https");
 });
+
+test("Shodan registrable-domain rollups are not promoted to exact DNS names", () => {
+  const [observation] = normalizeRecords({
+    ...context,
+    provider: "shodan",
+    asset: { type: "domain", value: "example.com" },
+    records: [{
+      ip_str: "192.0.2.41",
+      hostnames: ["api.example.com"],
+      domains: ["example.com"],
+      port: 443,
+      transport: "tcp",
+    }],
+  });
+  assert.deepEqual(observation.dns.names, ["api.example.com"]);
+});

@@ -175,7 +175,11 @@ function normalizeShodan(records, context) {
       }]),
     },
     certificate: normalizeCertificate(record?.ssl?.cert),
-    dns: { names: uniqueStrings([record?.hostnames, record?.domains]), reverseNames: [] },
+    // Shodan's `domains` field is a registrable-domain rollup for the
+    // returned hostnames. Treating it as an observed exact hostname can
+    // incorrectly elevate `sub.example.com` into an exact `example.com`
+    // match. Exact-domain scope therefore relies on `hostnames` only.
+    dns: { names: uniqueStrings([record?.hostnames]), reverseNames: [] },
   }));
 }
 
