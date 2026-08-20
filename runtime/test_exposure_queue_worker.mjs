@@ -183,3 +183,36 @@ test("completed queue entries are skipped so a later task can execute", async ()
   assert.equal(puts.length, 2);
   assert.equal(puts[0].task_id, second.task_id);
 });
+
+test("a completed receipt larger than the task limit remains readable and blocks re-execution", async () => {
+  const privateTask = task();
+  const largeReceipt = {
+    status: "PAGE_LIMIT_REACHED",
+    observations: Array.from({ length: 100 }, (_, index) => ({
+      observation_id: String(index),
+      padding: "x".repeat(900),
+    })),
+  };
+  assert.ok(Buffer.byteLength(JSON.stringify(largeReceipt)) > 64 * 1024);
+  let providerCalls = 0;
+  const fetchImpl = async (url) => {
+    const parsed = new URL(url);
+    if (parsed.hostname !== "api.github.com") {
+      providerCalls += 1;
+      throw new Error("provider must not run");
+    }
+    if (parsed.pathname.endsWith("/runtime/exposure/queue/pending")) {
+      return jsonResponse([{
+        type: "file",
+        name: `${privateTask.task_id}.json`,
+        path: `runtime/exposure/queue/pending/${privateTask.task_id}.json`,
+      }]);
+    }
+    if (parsed.pathname.endsWith(`/runtime/exposure/queue/pending/${privateTask.task_id}.json`)) return jsonResponse(githubFile(privateTask));
+    if (parsed.pathname.endsWith(`/runtime/exposure/results/${privateTask.task_id}.json`)) return jsonResponse(githubFile(largeReceipt));
+    throw new Error(`unexpected path ${parsed.pathname}`);
+  };
+  const result = await runOne({ env: { COMMAND_CENTER_TOKEN: "private-token", SHODAN_API_KEY: "secret" }, fetchImpl, now });
+  assert.equal(result.status, "IDLE");
+  assert.equal(providerCalls, 0);
+});

@@ -101,7 +101,7 @@ async function listPendingTasks(fetchImpl, token) {
     .sort((left, right) => left.name.localeCompare(right.name));
 }
 
-async function readPrivateFile(fetchImpl, token, privatePath) {
+async function readPrivateFile(fetchImpl, token, privatePath, { maxBytes = MAX_TASK_BYTES } = {}) {
   const encoded = encodeContentPath(privatePath);
   const result = await githubRequest(
     fetchImpl,
@@ -117,14 +117,14 @@ async function readPrivateFile(fetchImpl, token, privatePath) {
     throw new WorkerError("PRIVATE_FILE_RESPONSE_INVALID", "Private task data had an unsupported representation.");
   }
   const raw = Buffer.from(content.replaceAll("\n", ""), "base64");
-  if (raw.byteLength > MAX_TASK_BYTES) {
-    throw new WorkerError("PRIVATE_TASK_TOO_LARGE", "Private task exceeded the size limit.");
+  if (raw.byteLength > maxBytes) {
+    throw new WorkerError("PRIVATE_FILE_TOO_LARGE", "Private runtime file exceeded the size limit.");
   }
   return { raw, sha };
 }
 
-async function readPrivateJson(fetchImpl, token, privatePath) {
-  const file = await readPrivateFile(fetchImpl, token, privatePath);
+async function readPrivateJson(fetchImpl, token, privatePath, options = {}) {
+  const file = await readPrivateFile(fetchImpl, token, privatePath, options);
   if (file === null) return null;
   let document;
   try {
@@ -355,7 +355,7 @@ export async function runOne({
       task = validateTask(taskFile.document, queueEntry.name, { now });
     } catch (error) {
       const rejectionPath = `${RESULT_DIRECTORY}/${fallbackTaskId}.json`;
-      const existingRejection = await readPrivateJson(fetchImpl, token, rejectionPath);
+      const existingRejection = await readPrivateJson(fetchImpl, token, rejectionPath, { maxBytes: MAX_RECEIPT_BYTES });
       if (existingRejection !== null) continue;
       const rejected = {
         schema_version: 1,
@@ -376,7 +376,7 @@ export async function runOne({
 
     const requestHash = sha256(taskFile.raw);
     const receiptPath = `${RESULT_DIRECTORY}/${task.task_id}.json`;
-    const existing = await readPrivateJson(fetchImpl, token, receiptPath);
+    const existing = await readPrivateJson(fetchImpl, token, receiptPath, { maxBytes: MAX_RECEIPT_BYTES });
     if (existing !== null) {
       if (existing.document.status === "STARTED_FAIL_CLOSED") {
         return publicStatus("REVIEW_REQUIRED", { receipt_sha256: sha256(existing.raw) });
