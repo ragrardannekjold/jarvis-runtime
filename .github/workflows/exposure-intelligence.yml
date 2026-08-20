@@ -12,6 +12,7 @@ on:
       - 'runtime/exposure_queue_worker.mjs'
       - 'runtime/test_exposure_queue_worker.mjs'
       - 'runtime/exposure-intelligence/**'
+      - 'runtime/exposure-verify-trigger.txt'
 
 permissions:
   contents: read
