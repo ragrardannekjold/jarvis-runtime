@@ -1,0 +1,21 @@
+{
+  "name": "private-exposure-intelligence",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Provider-neutral, read-only internet exposure intelligence for explicitly authorized assets.",
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "bin": {
+    "exposure-intel": "./bin/exposure-intel.mjs"
+  },
+  "exports": {
+    ".": "./src/index.mjs"
+  },
+  "scripts": {
+    "test": "node --test",
+    "smoke": "node ./bin/exposure-intel.mjs collect --asset example.com --allowlist ./examples/allowlist.json"
+  },
+  "license": "UNLICENSED"
+}
