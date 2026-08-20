@@ -58,6 +58,15 @@
   "status": "MAIN_AUTHORITY_AND_DAILY_REPORT_PRIVATE_READBACK_VERIFIED",
   "bridge_secret_required": "COMMAND_CENTER_TOKEN",
   "shodan_secret_required": "SHODAN_API_KEY",
+  "shodan_readback": {
+    "status": "LIVE_VERIFIED",
+    "workflow_run_id": 32364522450,
+    "verified_utc": "2026-08-20T11:35:19Z",
+    "endpoint": "/api-info",
+    "search_executed": false,
+    "query_credits_spent": 0,
+    "public_output_redacted": true
+  },
   "command_center_runtime_schedule_enabled": true,
   "daily_report_schedule": {
     "enabled": true,

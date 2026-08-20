@@ -29,7 +29,7 @@ The public runner is designed to:
 
 The secret-free public runner self-test is verified working. The authenticated private bridge remains disabled until `COMMAND_CENTER_TOKEN` is configured and a manual bridge test passes.
 
-The Shodan lane has an independent owner-controlled credential readback at `.github/workflows/shodan-runtime-readback.yml`. A successful run proves that this runtime can authenticate to Shodan without spending query credits; it does not enable active scanning or remove the existing target-authorization gates.
+The Shodan lane has an independent owner-controlled credential readback at `.github/workflows/shodan-runtime-readback.yml`. Live run [#1](https://github.com/ragrardannekjold/jarvis-runtime/actions/runs/32364522450) verified this runtime can authenticate to Shodan without search or scan execution and with zero query credits spent. The public receipt contains capability booleans only; it does not expose the credential, account plan, or exact balances. This readback does not enable active scanning or remove the existing target-authorization gates.
 
 Phase 1 restores **independent control-plane validation** outside the private repository's billing-blocked GitHub-hosted Actions.
 
