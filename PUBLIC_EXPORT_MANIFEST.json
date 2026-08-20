@@ -14,6 +14,11 @@
     "runtime/test_shodan_readback.py",
     "runtime/exposure_queue_worker.mjs",
     "runtime/test_exposure_queue_worker.mjs",
+    "runtime/investigation_passive_index.mjs",
+    "runtime/investigation_passive_index_worker.mjs",
+    "runtime/test_investigation_passive_index.mjs",
+    "runtime/test_investigation_passive_index_worker.mjs",
+    "docs/SHODAN_INVESTIGATION_RISK_REGISTER.md",
     "runtime/exposure-verify-trigger.txt",
     "runtime/exposure-intelligence/.env.example",
     "runtime/exposure-intelligence/.gitignore",
@@ -142,6 +147,25 @@
       "arbitrary_third_party_research_available": false,
       "kyiv_early_warning_effect": "NONE_NOT_VALIDATED"
     }
+  },
+  "investigation_passive_index_search": {
+    "status": "IMPLEMENTED_TESTED_LIVE_READBACK_PENDING",
+    "private_queue_branch": "jarvis-runtime-state",
+    "provider": "shodan",
+    "endpoint_class": "PASSIVE_COUNT_SEARCH_AND_BOUNDED_HISTORY",
+    "public_authoritative_exact_domain_anchors_only": true,
+    "max_anchors_per_task": 4,
+    "max_shodan_query_credits_per_task": 4,
+    "max_pages_per_anchor": 1,
+    "raw_banner_html_or_screenshot_persisted": false,
+    "private_normalized_ip_port_fingerprint_cve_output": true,
+    "public_target_or_result_output": false,
+    "active_scanning_available": false,
+    "ambiguous_paid_request_auto_retry": false,
+    "provider_text_trusted_as_instructions": false,
+    "provider_failure_stops_parent_investigation": false,
+    "material_claim_requires_independent_corroboration": true,
+    "current_kyiv_early_warning_effect": "NONE_NOT_VALIDATED"
   },
   "command_center_runtime_schedule_enabled": true,
   "daily_report_schedule": {

@@ -11,6 +11,10 @@ on:
       - '.github/workflows/exposure-intelligence.yml'
       - 'runtime/exposure_queue_worker.mjs'
       - 'runtime/test_exposure_queue_worker.mjs'
+      - 'runtime/investigation_passive_index.mjs'
+      - 'runtime/investigation_passive_index_worker.mjs'
+      - 'runtime/test_investigation_passive_index.mjs'
+      - 'runtime/test_investigation_passive_index_worker.mjs'
       - 'runtime/exposure-intelligence/**'
       - 'runtime/exposure-verify-trigger.txt'
 
@@ -35,7 +39,7 @@ jobs:
           node-version: '24'
 
       - name: Regression-test passive exposure boundary
-        run: node --test runtime/exposure-intelligence/test/*.test.mjs runtime/test_exposure_queue_worker.mjs
+        run: node --test runtime/exposure-intelligence/test/*.test.mjs runtime/test_exposure_queue_worker.mjs runtime/test_investigation_passive_index.mjs runtime/test_investigation_passive_index_worker.mjs
 
       - name: Execute one authorized private task
         shell: bash
@@ -55,3 +59,17 @@ jobs:
           if [[ -n "$CENSYS_ORGANIZATION_ID" ]]; then echo "::add-mask::$CENSYS_ORGANIZATION_ID"; fi
           if [[ -n "$NETLAS_API_KEY" ]]; then echo "::add-mask::$NETLAS_API_KEY"; fi
           node runtime/exposure_queue_worker.mjs
+
+      - name: Execute one risk-gated passive Investigation enrichment task
+        if: always()
+        shell: bash
+        env:
+          COMMAND_CENTER_TOKEN: ${{ secrets.COMMAND_CENTER_TOKEN }}
+          SHODAN_API_KEY: ${{ secrets.SHODAN_API_KEY }}
+        run: |
+          set -euo pipefail
+          set +x
+          test -n "$COMMAND_CENTER_TOKEN" || { echo '{"capability":"investigation.passive_index_search","status":"WORKER_FAILED","error_code":"COMMAND_CENTER_TOKEN_MISSING"}'; exit 2; }
+          echo "::add-mask::$COMMAND_CENTER_TOKEN"
+          if [[ -n "$SHODAN_API_KEY" ]]; then echo "::add-mask::$SHODAN_API_KEY"; fi
+          node runtime/investigation_passive_index_worker.mjs
