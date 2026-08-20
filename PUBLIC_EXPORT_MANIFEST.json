@@ -106,7 +106,7 @@
     "public_output_redacted": true
   },
   "exposure_lookup": {
-    "status": "IMPLEMENTED_PENDING_LIVE_CANARY",
+    "status": "LIVE_VERIFIED_BOUNDED_AUTHORIZED_ASSETS",
     "private_queue_branch": "jarvis-runtime-state",
     "provider_route": [
       "shodan",
@@ -118,7 +118,25 @@
     "max_pages_per_task": 1,
     "max_shodan_query_credits_per_task": 1,
     "ambiguous_outcome_auto_retry": false,
-    "public_target_or_result_output": false
+    "public_target_or_result_output": false,
+    "live_canary": {
+      "workflow_run_id": 32368379389,
+      "verified_utc": "2026-08-20T12:21:14Z",
+      "provider": "shodan",
+      "result_status": "PAGE_LIMIT_REACHED",
+      "query_credits_spent": 1,
+      "evidence_chain_valid": true,
+      "first_page_records": 100,
+      "accepted_after_exact_scope": 41,
+      "dropped_out_of_exact_scope": 59,
+      "public_raw_result": false
+    },
+    "quality_boundary": {
+      "hostname_match_is_lead_only": true,
+      "independent_corroboration_required": true,
+      "arbitrary_third_party_research_available": false,
+      "kyiv_early_warning_effect": "NONE_NOT_VALIDATED"
+    }
   },
   "command_center_runtime_schedule_enabled": true,
   "daily_report_schedule": {
