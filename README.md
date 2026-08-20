@@ -34,6 +34,8 @@ The Shodan lane has an independent owner-controlled credential readback at `.git
 
 The operational passive lane is `.github/workflows/exposure-intelligence.yml`. It polls a private queue on the `jarvis-runtime-state` branch, writes a fail-closed `STARTED` receipt before any provider request, and then uses Shodan primary with Censys and Netlas standby adapters. Targets, normalized observations, provider events, exact balances, and the hash-chained evidence ledger are written only to the private state branch. Public logs receive a finite status and receipt hash. Repeated schedules do not re-execute a task that already has a receipt, including an interrupted `STARTED` task.
 
+Live runs [#1](https://github.com/ragrardannekjold/jarvis-runtime/actions/runs/32366430482) and [#3](https://github.com/ragrardannekjold/jarvis-runtime/actions/runs/32368379389) verified two separately authorized documentation canaries. Each task used exactly one Shodan query credit; the latest exact-hostname scope retained 41 observations in 42 verified evidence entries. The target, task identifier, observations, IP data, credentials, and exact account balances were absent from public logs. `runtime/exposure-verify-trigger.txt` provides a zero-task commit-triggered route for explicit idempotency readback without waiting for cron.
+
 Phase 1 restores **independent control-plane validation** outside the private repository's billing-blocked GitHub-hosted Actions.
 
 It does **not yet** execute project-native workflows locally. The heartbeat therefore explicitly reports:
