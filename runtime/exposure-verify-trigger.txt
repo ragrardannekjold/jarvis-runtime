@@ -1,2 +1,3 @@
 [exposure-lookup:verification]
 [investigation-passive-index:verification:20260820T162056Z]
+[investigation-history-only:verification:shodan-history-only-canary-20260820-2007]
