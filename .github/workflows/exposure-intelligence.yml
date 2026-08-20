@@ -1,0 +1,56 @@
+name: Private Exposure Intelligence
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '7,22,37,52 * * * *'
+  push:
+    branches:
+      - main
+    paths:
+      - '.github/workflows/exposure-intelligence.yml'
+      - 'runtime/exposure_queue_worker.mjs'
+      - 'runtime/test_exposure_queue_worker.mjs'
+      - 'runtime/exposure-intelligence/**'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: private-exposure-intelligence
+  cancel-in-progress: false
+
+jobs:
+  passive-read:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - name: Checkout owner-controlled public runtime
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - name: Regression-test passive exposure boundary
+        run: node --test runtime/exposure-intelligence/test/*.test.mjs runtime/test_exposure_queue_worker.mjs
+
+      - name: Execute one authorized private task
+        shell: bash
+        env:
+          COMMAND_CENTER_TOKEN: ${{ secrets.COMMAND_CENTER_TOKEN }}
+          SHODAN_API_KEY: ${{ secrets.SHODAN_API_KEY }}
+          CENSYS_PLATFORM_TOKEN: ${{ secrets.CENSYS_PLATFORM_TOKEN }}
+          CENSYS_ORGANIZATION_ID: ${{ secrets.CENSYS_ORGANIZATION_ID }}
+          NETLAS_API_KEY: ${{ secrets.NETLAS_API_KEY }}
+        run: |
+          set -euo pipefail
+          set +x
+          test -n "$COMMAND_CENTER_TOKEN" || { echo '{"capability":"exposure.lookup","status":"WORKER_FAILED","error_code":"COMMAND_CENTER_TOKEN_MISSING"}'; exit 2; }
+          echo "::add-mask::$COMMAND_CENTER_TOKEN"
+          if [[ -n "$SHODAN_API_KEY" ]]; then echo "::add-mask::$SHODAN_API_KEY"; fi
+          if [[ -n "$CENSYS_PLATFORM_TOKEN" ]]; then echo "::add-mask::$CENSYS_PLATFORM_TOKEN"; fi
+          if [[ -n "$CENSYS_ORGANIZATION_ID" ]]; then echo "::add-mask::$CENSYS_ORGANIZATION_ID"; fi
+          if [[ -n "$NETLAS_API_KEY" ]]; then echo "::add-mask::$NETLAS_API_KEY"; fi
+          node runtime/exposure_queue_worker.mjs

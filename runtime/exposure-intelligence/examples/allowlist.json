@@ -1,0 +1,14 @@
+{
+  "schemaVersion": 1,
+  "authorization": "owned_or_explicitly_authorized",
+  "assets": [
+    {
+      "type": "domain",
+      "value": "example.com"
+    },
+    {
+      "type": "cidr",
+      "value": "192.0.2.0/24"
+    }
+  ]
+}

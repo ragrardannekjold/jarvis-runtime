@@ -15,7 +15,9 @@ Do not commit or upload:
 
 Any workflow with access to `COMMAND_CENTER_TOKEN` must run only from trusted code on the default branch or manual/scheduled events controlled by the repository owner. Do not use `pull_request_target`.
 
-The same trigger boundary applies to `SHODAN_API_KEY`. Shodan readback output must remain finite and redacted: never print the credential, request URL, plan name, exact balances, or provider response body. Credential validation may call only `/api-info`; searches and scans require separate target authorization and execution gates.
+The same trigger boundary applies to provider credentials. Shodan readback output must remain finite and redacted: never print the credential, request URL, plan name, exact balances, or provider response body. Credential validation may call only `/api-info`.
+
+Passive searches may run only through `exposure-intelligence.yml` after a strict private task readback. The task must be unexpired, owner-approved, exact-target authorized, passive-only, and capped at one page and one Shodan query credit. The workflow writes a private fail-closed start marker before the provider call; an ambiguous outcome must never trigger an automatic retry or fallback. Active-scan endpoints are outside this runtime's capability contract.
 
 The bridge schedule stays disabled until the secrets exist and a manual bridge test passes.
 
