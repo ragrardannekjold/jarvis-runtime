@@ -168,7 +168,9 @@ test("completed queue entries are skipped so a later task can execute", async ()
     }
     if (parsed.pathname.endsWith(`/runtime/exposure/queue/pending/${first.task_id}.json`)) return jsonResponse(githubFile(first));
     if (parsed.pathname.endsWith(`/runtime/exposure/queue/pending/${second.task_id}.json`)) return jsonResponse(githubFile(second));
-    if (parsed.pathname.endsWith(`/runtime/exposure/results/${first.task_id}.json`)) return jsonResponse(githubFile({ status: "COMPLETE" }));
+    if (parsed.pathname.endsWith(`/runtime/exposure/results/${first.task_id}.json`)) {
+      return jsonResponse(githubFile({ status: "COMPLETE", evidence_padding: "x".repeat(70 * 1024) }));
+    }
     if (parsed.pathname.endsWith(`/runtime/exposure/results/${second.task_id}.json`)) return jsonResponse({ message: "not found" }, 404);
     throw new Error(`unexpected path ${parsed.pathname}`);
   };
