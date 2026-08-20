@@ -208,6 +208,28 @@ test("ambiguous paid search is never retried and reports a credit range", async 
   assert.deepEqual(paths, ["/shodan/host/count", "/api-info", "/shodan/host/search"]);
 });
 
+test("oversized paid search preserves the diagnostic while remaining non-retryable", async () => {
+  const paths = [];
+  const result = await executePassiveIndexTask(task(), {
+    env: { SHODAN_API_KEY: "secret" },
+    now,
+    fetchImpl: async (url) => {
+      const path = new URL(url).pathname;
+      paths.push(path);
+      if (path === "/shodan/host/count") return jsonResponse({ total: 1 });
+      if (path === "/api-info") return jsonResponse({ query_credits: 5 });
+      return new Response("{}", {
+        status: 200,
+        headers: { "content-type": "application/json", "content-length": String((16 * 1024 * 1024) + 1) },
+      });
+    },
+  });
+  assert.equal(result.status, "PARTIAL");
+  assert.equal(result.anchors[0].search.error_code, "SHODAN_SEARCH_RESPONSE_TOO_LARGE");
+  assert.equal(result.query_credit_semantics, "AMBIGUOUS_NO_AUTO_RETRY");
+  assert.deepEqual(paths, ["/shodan/host/count", "/api-info", "/shodan/host/search"]);
+});
+
 test("provider and credential failures remain non-blocking sensor states", async () => {
   let requests = 0;
   const missing = await executePassiveIndexTask(task(), {

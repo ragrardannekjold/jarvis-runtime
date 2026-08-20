@@ -8,7 +8,7 @@ const MAX_ANCHORS = 4;
 const PAGE_SIZE = 50;
 const MAX_HISTORY_HOSTS = 2;
 const MAX_COUNT_BYTES = 64 * 1024;
-const MAX_SEARCH_BYTES = 2 * 1024 * 1024;
+const MAX_SEARCH_BYTES = 16 * 1024 * 1024;
 const MAX_HISTORY_BYTES = 4 * 1024 * 1024;
 const SHODAN_ORIGIN = "https://api.shodan.io";
 const SEARCH_FIELDS = [
@@ -357,7 +357,12 @@ async function searchAnchor(anchor, { apiKey, fetchImpl, now }) {
   let document;
   let rawBytes;
   try { ({ document, rawBytes } = await readBoundedJsonResponse(response, { provider: "shodan_search", maxBytes: MAX_SEARCH_BYTES })); }
-  catch { return { ...base, status: "AMBIGUOUS", error_code: "SHODAN_SEARCH_RESPONSE_AMBIGUOUS", credit_min: 0, credit_max: 1, observations: [], candidates: [] }; }
+  catch (error) {
+    const errorCode = typeof error?.code === "string" && /^SHODAN_SEARCH_[A-Z0-9_]{2,80}$/.test(error.code)
+      ? error.code
+      : "SHODAN_SEARCH_RESPONSE_AMBIGUOUS";
+    return { ...base, status: "AMBIGUOUS", error_code: errorCode, credit_min: 0, credit_max: 1, observations: [], candidates: [] };
+  }
   if (!Array.isArray(document?.matches) || !Number.isSafeInteger(document?.total) || document.total < 0) {
     return { ...base, status: "AMBIGUOUS", error_code: "SHODAN_SEARCH_SCHEMA_AMBIGUOUS", credit_min: 0, credit_max: 1, observations: [], candidates: [], response_sha256: sha256(rawBytes) };
   }
