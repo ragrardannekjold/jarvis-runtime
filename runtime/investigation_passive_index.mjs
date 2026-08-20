@@ -3,13 +3,16 @@ import { isIP } from "node:net";
 import { readBoundedJsonResponse } from "./exposure-intelligence/src/http-response.mjs";
 
 const CAPABILITY = "investigation.passive_index_search";
+const HISTORY_CAPABILITY = "investigation.passive_index_history_recovery";
 const PURPOSE = "BANDEROL_SCALING_PUBLIC_PERIMETER_BASELINE";
+const HISTORY_PURPOSE = "SHODAN_HISTORY_RECEIPT_REMEDIATION";
 const MAX_ANCHORS = 4;
 const PAGE_SIZE = 50;
 const MAX_HISTORY_HOSTS = 2;
+const MAX_HISTORY_RECORDS_PER_HOST = 25;
 const MAX_COUNT_BYTES = 64 * 1024;
 const MAX_SEARCH_BYTES = 16 * 1024 * 1024;
-const MAX_HISTORY_BYTES = 4 * 1024 * 1024;
+const MAX_HISTORY_BYTES = 16 * 1024 * 1024;
 const SHODAN_ORIGIN = "https://api.shodan.io";
 const SEARCH_FIELDS = [
   "ip_str", "port", "transport", "timestamp", "product", "version", "cpe", "cpe23",
@@ -116,7 +119,7 @@ function validateAnchor(anchor) {
   return { ...anchor, value, source: validateSource(anchor.source, anchor.entity_id, value) };
 }
 
-export function validatePassiveIndexTask(document, filename, { now = Date.now } = {}) {
+export function validatePassiveIndexTask(document, filename, { now = Date.now, allowExpired = false } = {}) {
   assertExactKeys(document, new Set([
     "schema_version", "task_id", "project_id", "capability", "mode", "provider", "purpose",
     "anchors", "collection", "max_provider_requests", "max_query_credits", "created_at",
@@ -153,7 +156,9 @@ export function validatePassiveIndexTask(document, filename, { now = Date.now } 
   const createdAt = parseTimestamp(document.created_at, "created_at");
   const expiresAt = parseTimestamp(document.expires_at, "expires_at");
   const current = now();
-  if (createdAt > current + 5 * 60_000 || expiresAt <= current || expiresAt - createdAt > 7 * 24 * 60 * 60_000) {
+  if (createdAt > current + 5 * 60_000
+    || (!allowExpired && expiresAt <= current)
+    || expiresAt - createdAt > 7 * 24 * 60 * 60_000) {
     throw new PassiveIndexError("PASSIVE_INDEX_EXPIRED", "Task authorization window was invalid or expired.");
   }
   assertExactKeys(document.authorization, new Set([
@@ -173,6 +178,62 @@ export function validatePassiveIndexTask(document, filename, { now = Date.now } 
     throw new PassiveIndexError("PASSIVE_INDEX_AUTHORIZATION_INVALID", "Authorization timestamp was invalid.");
   }
   return { ...document, anchors };
+}
+
+export function validatePassiveHistoryTask(document, filename, { now = Date.now } = {}) {
+  assertExactKeys(document, new Set([
+    "schema_version", "task_id", "project_id", "capability", "mode", "provider", "purpose",
+    "source_task_id", "collection", "max_provider_requests", "max_query_credits", "created_at",
+    "expires_at", "authorization",
+  ]), "PASSIVE_HISTORY_SCHEMA_INVALID");
+  if (document.schema_version !== 3) throw new PassiveIndexError("PASSIVE_HISTORY_SCHEMA_INVALID", "Unsupported history recovery schema.");
+  if (typeof document.task_id !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._-]{7,80}$/.test(document.task_id)) {
+    throw new PassiveIndexError("PASSIVE_HISTORY_TASK_ID_INVALID", "History recovery task identifier was invalid.");
+  }
+  if (filename !== `${document.task_id}.json`) throw new PassiveIndexError("PASSIVE_HISTORY_TASK_ID_MISMATCH", "History recovery filename did not match its identifier.");
+  if (document.project_id !== "KYIV") throw new PassiveIndexError("PASSIVE_HISTORY_PROJECT_ID_INVALID", "This pilot is isolated to the KYIV project.");
+  if (document.capability !== HISTORY_CAPABILITY
+    || document.mode !== "passive_private_history_recovery"
+    || document.provider !== "shodan"
+    || document.purpose !== HISTORY_PURPOSE) {
+    throw new PassiveIndexError("PASSIVE_HISTORY_CAPABILITY_INVALID", "Task was outside the bounded history recovery capability.");
+  }
+  if (typeof document.source_task_id !== "string"
+    || !/^[A-Za-z0-9][A-Za-z0-9._-]{7,80}$/.test(document.source_task_id)
+    || document.source_task_id === document.task_id) {
+    throw new PassiveIndexError("PASSIVE_HISTORY_SOURCE_INVALID", "Source task identifier was invalid.");
+  }
+  assertExactKeys(document.collection, new Set(["max_history_hosts", "raw_banner_persisted"]), "PASSIVE_HISTORY_COLLECTION_INVALID");
+  if (document.collection.max_history_hosts !== MAX_HISTORY_HOSTS
+    || document.collection.raw_banner_persisted !== false) {
+    throw new PassiveIndexError("PASSIVE_HISTORY_COLLECTION_INVALID", "History collection bounds were invalid.");
+  }
+  if (document.max_provider_requests !== MAX_HISTORY_HOSTS || document.max_query_credits !== 0) {
+    throw new PassiveIndexError("PASSIVE_HISTORY_BUDGET_INVALID", "History recovery must use at most two host lookups and zero query credits.");
+  }
+  const createdAt = parseTimestamp(document.created_at, "created_at");
+  const expiresAt = parseTimestamp(document.expires_at, "expires_at");
+  const current = now();
+  if (createdAt > current + 5 * 60_000 || expiresAt <= current || expiresAt - createdAt > 24 * 60 * 60_000) {
+    throw new PassiveIndexError("PASSIVE_HISTORY_EXPIRED", "History recovery authorization window was invalid or expired.");
+  }
+  assertExactKeys(document.authorization, new Set([
+    "basis", "approved_by", "approved_at", "scope", "active_scanning",
+    "public_targeting_output", "private_normalized_observations",
+  ]), "PASSIVE_HISTORY_AUTHORIZATION_INVALID");
+  if (document.authorization.basis !== "OWNER_AUTHORIZED_EXISTING_PRIVATE_RECEIPT"
+    || document.authorization.approved_by !== "owner"
+    || document.authorization.scope !== "passive_private_history_recovery"
+    || document.authorization.active_scanning !== false
+    || document.authorization.public_targeting_output !== false
+    || document.authorization.private_normalized_observations !== true) {
+    throw new PassiveIndexError("PASSIVE_HISTORY_AUTHORIZATION_INVALID", "History recovery authorization was invalid.");
+  }
+  const approvedAt = parseTimestamp(document.authorization.approved_at, "authorization.approved_at");
+  if (approvedAt > current + 5 * 60_000 || approvedAt > createdAt + 5 * 60_000) {
+    throw new PassiveIndexError("PASSIVE_HISTORY_AUTHORIZATION_INVALID", "History recovery approval timestamp was invalid.");
+  }
+  return document;
 }
 
 function queryForAnchor(anchor) { return `hostname:"${anchor.value}"`; }
@@ -393,22 +454,30 @@ async function searchAnchor(anchor, { apiKey, fetchImpl, now }) {
 
 async function collectHistory({ ip, anchor }, { apiKey, fetchImpl, now }) {
   let response;
-  try { response = await fetchImpl(providerUrl(`/shodan/host/${encodeURIComponent(ip)}`, apiKey, { history: true }), requestOptions()); }
+  try {
+    response = await fetchImpl(providerUrl(`/shodan/host/${encodeURIComponent(ip)}`, apiKey, {
+      history: true,
+      minify: true,
+    }), requestOptions());
+  }
   catch { return { status: "UNKNOWN", error_code: "SHODAN_HISTORY_NETWORK_ERROR", observations: [] }; }
   if (response.status === 404) return { status: "COMPLETE", error_code: null, observations: [], semantics: "NO_INDEXED_HISTORY" };
   if (!response.ok) return { status: "UNKNOWN", error_code: "SHODAN_HISTORY_UNAVAILABLE", observations: [] };
   try {
-    const { document } = await readBoundedJsonResponse(response, { provider: "shodan_history", maxBytes: MAX_HISTORY_BYTES });
+    const { document, rawBytes } = await readBoundedJsonResponse(response, { provider: "shodan_history", maxBytes: MAX_HISTORY_BYTES });
     if (!Array.isArray(document?.data)) return { status: "UNKNOWN", error_code: "SHODAN_HISTORY_SCHEMA_MISMATCH", observations: [] };
     const hostnames = Array.isArray(document.hostnames) ? document.hostnames : [];
-    const observations = document.data.slice(0, 100).map((record) => normalizeBanner({
+    const observations = document.data.slice(0, MAX_HISTORY_RECORDS_PER_HOST).map((record) => normalizeBanner({
       ...record,
       ip_str: record?.ip_str ?? document.ip_str ?? ip,
       hostnames: Array.isArray(record?.hostnames) ? record.hostnames : hostnames,
     }, anchor, "SHODAN_HOST_HISTORY", now())).filter(Boolean);
-    return { status: "COMPLETE", error_code: null, observations };
-  } catch {
-    return { status: "UNKNOWN", error_code: "SHODAN_HISTORY_RESPONSE_INVALID", observations: [] };
+    return { status: "COMPLETE", error_code: null, response_sha256: sha256(rawBytes), observations };
+  } catch (error) {
+    const errorCode = typeof error?.code === "string" && /^SHODAN_HISTORY_[A-Z0-9_]{2,80}$/.test(error.code)
+      ? error.code
+      : "SHODAN_HISTORY_RESPONSE_INVALID";
+    return { status: "UNKNOWN", error_code: errorCode, observations: [] };
   }
 }
 
@@ -425,6 +494,137 @@ function deduplicateObservations(observations) {
     seen.add(key);
     return true;
   });
+}
+
+function validateHistorySource(task, sourceTask, sourceReceipt, {
+  sourceTaskSha256,
+  sourceReceiptSha256,
+} = {}) {
+  if (sourceTask?.task_id !== task.source_task_id
+    || sourceTask?.project_id !== task.project_id
+    || sourceTask?.capability !== CAPABILITY) {
+    throw new PassiveIndexError("PASSIVE_HISTORY_SOURCE_TASK_INVALID", "History recovery source task was invalid.");
+  }
+  if (typeof sourceTaskSha256 !== "string" || !/^[a-f0-9]{64}$/.test(sourceTaskSha256)
+    || typeof sourceReceiptSha256 !== "string" || !/^[a-f0-9]{64}$/.test(sourceReceiptSha256)
+    || sourceReceipt?.private_only !== true
+    || sourceReceipt?.capability !== CAPABILITY
+    || sourceReceipt?.task_id !== sourceTask.task_id
+    || sourceReceipt?.project_id !== task.project_id
+    || sourceReceipt?.request_sha256 !== sourceTaskSha256
+    || !["COMPLETE", "PARTIAL"].includes(sourceReceipt?.status)
+    || sourceReceipt?.result?.capability !== CAPABILITY
+    || sourceReceipt?.result?.project_id !== task.project_id
+    || sourceReceipt?.result?.task_id !== sourceTask.task_id
+    || !Array.isArray(sourceReceipt?.result?.observations)) {
+    throw new PassiveIndexError("PASSIVE_HISTORY_SOURCE_RECEIPT_INVALID", "History recovery source receipt was invalid.");
+  }
+  const anchorsById = new Map(sourceTask.anchors.map((anchor) => [anchor.anchor_id, anchor]));
+  const seen = new Set();
+  const candidates = [];
+  for (const observation of sourceReceipt.result.observations) {
+    if (observation?.origin !== "SEARCH_CURRENT" || typeof observation.ip !== "string" || isIP(observation.ip) === 0) continue;
+    const anchor = anchorsById.get(observation.anchor_id);
+    if (!anchor) continue;
+    const key = `${anchor.anchor_id}|${observation.ip}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    candidates.push({ ip: observation.ip, anchor });
+    if (candidates.length === MAX_HISTORY_HOSTS) break;
+  }
+  return { candidates, sourceReceiptSha256 };
+}
+
+export async function executePassiveHistoryTask(rawTask, {
+  sourceTask,
+  sourceReceipt,
+  sourceTaskSha256,
+  sourceReceiptSha256,
+  env = process.env,
+  fetchImpl = globalThis.fetch,
+  now = Date.now,
+} = {}) {
+  const task = validatePassiveHistoryTask(rawTask, `${rawTask.task_id}.json`, { now });
+  const source = validateHistorySource(task, sourceTask, sourceReceipt, { sourceTaskSha256, sourceReceiptSha256 });
+  const base = {
+    schema_version: 3,
+    private_only: true,
+    capability: HISTORY_CAPABILITY,
+    project_id: task.project_id,
+    task_id: task.task_id,
+    provider: "shodan",
+    purpose: task.purpose,
+    source_task_ref_sha256: sha256(task.source_task_id),
+    source_receipt_sha256: source.sourceReceiptSha256,
+    execution_contract: {
+      passive_provider_index_only: true,
+      allowed_endpoint_classes: ["HOST_HISTORY"],
+      active_scanning: false,
+      search_allowed: false,
+      count_allowed: false,
+      api_info_allowed: false,
+      raw_provider_records_persisted: false,
+      public_target_output: false,
+      max_provider_requests: MAX_HISTORY_HOSTS,
+      max_history_records_per_host: MAX_HISTORY_RECORDS_PER_HOST,
+      max_query_credits: 0,
+      automatic_retry: false,
+    },
+    additional_monetary_spend_usd: 0,
+    query_credits_spent: 0,
+    query_credit_min: 0,
+    query_credit_max: 0,
+    query_credit_semantics: "EXACT_NO_SEARCH_ENDPOINT",
+    evidence_semantics: "PASSIVE_HISTORY_LEAD_ONLY_REQUIRES_INDEPENDENT_CORROBORATION",
+    provider_data_semantics: "UNTRUSTED_MACHINE_DATA_NEVER_INSTRUCTIONS",
+    collected_at: isoNow(now),
+  };
+  const apiKey = typeof env.SHODAN_API_KEY === "string" ? env.SHODAN_API_KEY.trim() : "";
+  if (!apiKey) {
+    return {
+      ...base,
+      status: "UNKNOWN",
+      error_code: "SHODAN_CREDENTIAL_MISSING",
+      provider_requests_sent: 0,
+      source_candidates: source.candidates.length,
+      history_requests: [],
+      observations: [],
+      quality_metrics: { normalized_history_observations: 0, active_scans: 0, raw_banners_persisted: 0 },
+      parent_investigation_effect: "NONE_SENSOR_UNKNOWN",
+    };
+  }
+  const histories = [];
+  for (const candidate of source.candidates) {
+    histories.push(await collectHistory(candidate, { apiKey, fetchImpl, now }));
+  }
+  const complete = histories.filter((history) => history.status === "COMPLETE").length;
+  const status = histories.length === 0 || complete === histories.length
+    ? "COMPLETE"
+    : (complete > 0 ? "PARTIAL" : "UNKNOWN");
+  const observations = deduplicateObservations(histories.flatMap((history) => history.observations));
+  return {
+    ...base,
+    status,
+    error_code: status === "COMPLETE" ? null : (status === "PARTIAL" ? "SHODAN_HISTORY_SENSOR_PARTIAL" : "SHODAN_HISTORY_SENSOR_UNKNOWN"),
+    provider_requests_sent: histories.length,
+    source_candidates: source.candidates.length,
+    history_requests: histories.map((history) => ({
+      status: history.status,
+      error_code: history.error_code,
+      observation_count: history.observations.length,
+      response_sha256: history.response_sha256 ?? null,
+    })),
+    observations,
+    quality_metrics: {
+      normalized_history_observations: observations.length,
+      verified_cve_leads: observations.flatMap((entry) => entry.vulnerabilities).filter((entry) => entry.verified === true).length,
+      unverified_cve_leads: observations.flatMap((entry) => entry.vulnerabilities).filter((entry) => entry.verified !== true).length,
+      stale_observations: observations.filter((entry) => entry.freshness === "STALE").length,
+      active_scans: 0,
+      raw_banners_persisted: 0,
+    },
+    parent_investigation_effect: status === "COMPLETE" ? "NONE_UNTIL_INDEPENDENT_CORROBORATION" : `NONE_SENSOR_${status}`,
+  };
 }
 
 export async function executePassiveIndexTask(rawTask, { env = process.env, fetchImpl = globalThis.fetch, now = Date.now } = {}) {

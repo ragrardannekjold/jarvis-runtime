@@ -6,11 +6,14 @@ import path from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
 import {
+  executePassiveHistoryTask,
   executePassiveIndexTask,
+  validatePassiveHistoryTask,
   validatePassiveIndexTask,
 } from "./investigation_passive_index.mjs";
 
 const CAPABILITY = "investigation.passive_index_search";
+const HISTORY_CAPABILITY = "investigation.passive_index_history_recovery";
 const PRIVATE_REPO = "ragrardannekjold/jarvis-command-center";
 const STATE_BRANCH = "jarvis-runtime-state";
 const PENDING_DIRECTORY = "runtime/investigation/queue/pending";
@@ -155,7 +158,7 @@ async function writePrivateJson(fetchImpl, token, privatePath, document, { sha =
 
 function publicStatus(status, extra = {}) {
   return {
-    capability: CAPABILITY,
+    capability: extra.capability ?? CAPABILITY,
     status,
     private_anchor_logged: false,
     private_result_logged: false,
@@ -164,16 +167,18 @@ function publicStatus(status, extra = {}) {
 }
 
 function initialReceipt(task, requestHash, startedAt) {
+  const isHistoryRecovery = task.capability === HISTORY_CAPABILITY;
   return {
-    schema_version: 2,
+    schema_version: task.schema_version,
     private_only: true,
-    capability: CAPABILITY,
+    capability: task.capability,
     task_id: task.task_id,
     project_id: task.project_id,
     status: "STARTED_FAIL_CLOSED",
     request_sha256: requestHash,
     started_at: startedAt,
-    anchor_refs: task.anchors.map((anchor) => ({
+    source_task_ref_sha256: isHistoryRecovery ? sha256(task.source_task_id) : null,
+    anchor_refs: (task.anchors ?? []).map((anchor) => ({
       anchor_id: anchor.anchor_id,
       entity_id: anchor.entity_id,
       source_publisher: anchor.source.publisher,
@@ -182,7 +187,7 @@ function initialReceipt(task, requestHash, startedAt) {
     execution_contract: {
       passive_provider_index_only: true,
       active_scanning: false,
-      allowed_endpoint_classes: ["COUNT", "API_INFO", "SEARCH", "HOST_HISTORY"],
+      allowed_endpoint_classes: isHistoryRecovery ? ["HOST_HISTORY"] : ["COUNT", "API_INFO", "SEARCH", "HOST_HISTORY"],
       arbitrary_query_allowed: false,
       max_provider_requests: task.max_provider_requests,
       max_query_credits: task.max_query_credits,
@@ -190,7 +195,35 @@ function initialReceipt(task, requestHash, startedAt) {
       public_target_output: false,
       private_normalized_observations: true,
       ambiguous_paid_request_auto_retry: false,
+      search_allowed: !isHistoryRecovery,
     },
+  };
+}
+
+function validateQueuedTask(document, filename, { now }) {
+  if (document?.capability === HISTORY_CAPABILITY) {
+    return validatePassiveHistoryTask(document, filename, { now });
+  }
+  return validatePassiveIndexTask(document, filename, { now });
+}
+
+async function readHistorySource(fetchImpl, token, task, now) {
+  const sourceTaskPath = `${PENDING_DIRECTORY}/${task.source_task_id}.json`;
+  const sourceReceiptPath = `${RESULT_DIRECTORY}/${task.source_task_id}.json`;
+  const sourceTaskFile = await readPrivateJson(fetchImpl, token, sourceTaskPath);
+  if (sourceTaskFile === null) throw new WorkerError("PASSIVE_HISTORY_SOURCE_TASK_MISSING", "History recovery source task was unavailable.");
+  const sourceTask = validatePassiveIndexTask(sourceTaskFile.document, `${task.source_task_id}.json`, { now, allowExpired: true });
+  const sourceReceiptFile = await readPrivateJson(fetchImpl, token, sourceReceiptPath, { maxBytes: MAX_RECEIPT_BYTES });
+  if (sourceReceiptFile === null) throw new WorkerError("PASSIVE_HISTORY_SOURCE_RECEIPT_MISSING", "History recovery source receipt was unavailable.");
+  const sourceTaskSha256 = sha256(sourceTaskFile.raw);
+  if (sourceReceiptFile.document.request_sha256 !== sourceTaskSha256) {
+    throw new WorkerError("PASSIVE_HISTORY_SOURCE_RECEIPT_MISMATCH", "History recovery source receipt did not match the source task.");
+  }
+  return {
+    sourceTask,
+    sourceReceipt: sourceReceiptFile.document,
+    sourceTaskSha256,
+    sourceReceiptSha256: sha256(sourceReceiptFile.raw),
   };
 }
 
@@ -210,7 +243,7 @@ export async function runOne({
     const fallbackTaskId = queueEntry.name.slice(0, -".json".length);
     let task;
     try {
-      task = validatePassiveIndexTask(taskFile.document, queueEntry.name, { now });
+      task = validateQueuedTask(taskFile.document, queueEntry.name, { now });
     } catch (error) {
       const rejectionPath = `${RESULT_DIRECTORY}/${fallbackTaskId}.json`;
       const existing = await readPrivateJson(fetchImpl, token, rejectionPath, { maxBytes: MAX_RECEIPT_BYTES });
@@ -218,7 +251,7 @@ export async function runOne({
       const rejected = {
         schema_version: 2,
         private_only: true,
-        capability: CAPABILITY,
+        capability: taskFile.document?.capability === HISTORY_CAPABILITY ? HISTORY_CAPABILITY : CAPABILITY,
         task_id: fallbackTaskId,
         status: "REJECTED",
         error_code: safeErrorCode(error),
@@ -229,7 +262,7 @@ export async function runOne({
       await writePrivateJson(fetchImpl, token, rejectionPath, rejected, {
         message: `investigation passive index task rejected ${fallbackTaskId}`,
       });
-      return publicStatus("REJECTED", { error_code: rejected.error_code });
+      return publicStatus("REJECTED", { capability: rejected.capability, error_code: rejected.error_code });
     }
 
     const receiptPath = `${RESULT_DIRECTORY}/${task.task_id}.json`;
@@ -241,11 +274,37 @@ export async function runOne({
       continue;
     }
 
+    let historySource = null;
+    if (task.capability === HISTORY_CAPABILITY) {
+      try {
+        historySource = await readHistorySource(fetchImpl, token, task, now);
+      } catch (error) {
+        const rejected = {
+          schema_version: task.schema_version,
+          private_only: true,
+          capability: task.capability,
+          task_id: task.task_id,
+          project_id: task.project_id,
+          status: "REJECTED",
+          error_code: safeErrorCode(error),
+          request_sha256: sha256(taskFile.raw),
+          rejected_at: isoNow(now),
+          provider_request_sent: false,
+        };
+        await writePrivateJson(fetchImpl, token, receiptPath, rejected, {
+          message: `investigation passive history task rejected ${task.task_id}`,
+        });
+        return publicStatus("REJECTED", { capability: task.capability, error_code: rejected.error_code });
+      }
+    }
+
     const started = initialReceipt(task, sha256(taskFile.raw), isoNow(now));
     const startedSha = await writePrivateJson(fetchImpl, token, receiptPath, started, {
       message: `investigation passive index task started ${task.task_id}`,
     });
-    const result = await executePassiveIndexTask(task, { env, fetchImpl, now });
+    const result = task.capability === HISTORY_CAPABILITY
+      ? await executePassiveHistoryTask(task, { ...historySource, env, fetchImpl, now })
+      : await executePassiveIndexTask(task, { env, fetchImpl, now });
     const completed = {
       ...started,
       status: result.status,
@@ -258,8 +317,14 @@ export async function runOne({
     });
     const completedHash = sha256(Buffer.from(`${JSON.stringify(completed, null, 2)}\n`, "utf8"));
     return publicStatus(result.status, {
+      capability: task.capability,
       provider: "shodan",
-      completed_anchor_count: result.anchors.filter((entry) => entry.status === "COMPLETE").length,
+      completed_anchor_count: Array.isArray(result.anchors)
+        ? result.anchors.filter((entry) => entry.status === "COMPLETE").length
+        : 0,
+      completed_history_request_count: Array.isArray(result.history_requests)
+        ? result.history_requests.filter((entry) => entry.status === "COMPLETE").length
+        : 0,
       normalized_observation_count: result.observations.length,
       query_credits_spent: result.query_credits_spent,
       query_credit_min: result.query_credit_min,

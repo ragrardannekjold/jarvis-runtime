@@ -149,7 +149,7 @@
     }
   },
   "investigation_passive_index_search": {
-    "status": "IMPLEMENTED_TESTED_LIVE_READBACK_PENDING",
+    "status": "LIVE_SEARCH_VERIFIED_HISTORY_RECOVERY_TESTED_READBACK_PENDING",
     "private_queue_branch": "jarvis-runtime-state",
     "provider": "shodan",
     "endpoint_class": "PASSIVE_COUNT_SEARCH_AND_BOUNDED_HISTORY",
@@ -162,6 +162,16 @@
     "public_target_or_result_output": false,
     "active_scanning_available": false,
     "ambiguous_paid_request_auto_retry": false,
+    "history_only_recovery": {
+      "source": "EXISTING_PRIVATE_RECEIPT_ONLY",
+      "max_host_history_requests": 2,
+      "max_normalized_records_per_host": 25,
+      "allowed_endpoint_class": "HOST_HISTORY_ONLY",
+      "search_count_and_api_info_allowed": false,
+      "max_query_credits": 0,
+      "raw_banner_persisted": false,
+      "public_target_output": false
+    },
     "provider_text_trusted_as_instructions": false,
     "provider_failure_stops_parent_investigation": false,
     "material_claim_requires_independent_corroboration": true,
