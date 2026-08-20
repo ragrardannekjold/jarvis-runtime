@@ -1,0 +1,42 @@
+name: Shodan Runtime Readback
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - '.github/workflows/shodan-runtime-readback.yml'
+      - 'runtime/shodan_readback.py'
+      - 'runtime/test_shodan_readback.py'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: shodan-runtime-readback
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 4
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Regression-test credential boundary
+        run: python -m unittest runtime/test_shodan_readback.py -v
+
+      - name: Verify Shodan credential without search spend
+        shell: bash
+        env:
+          SHODAN_API_KEY: ${{ secrets.SHODAN_API_KEY }}
+        run: |
+          set -euo pipefail
+          set +x
+          if [[ -z "$SHODAN_API_KEY" ]]; then
+            echo '{"provider":"shodan","credential_status":"FAILED","reason":"SHODAN_CREDENTIAL_MISSING"}'
+            exit 1
+          fi
+          echo "::add-mask::$SHODAN_API_KEY"
+          python runtime/shodan_readback.py

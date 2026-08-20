@@ -15,6 +15,8 @@ Do not commit or upload:
 
 Any workflow with access to `COMMAND_CENTER_TOKEN` must run only from trusted code on the default branch or manual/scheduled events controlled by the repository owner. Do not use `pull_request_target`.
 
+The same trigger boundary applies to `SHODAN_API_KEY`. Shodan readback output must remain finite and redacted: never print the credential, request URL, plan name, exact balances, or provider response body. Credential validation may call only `/api-info`; searches and scans require separate target authorization and execution gates.
+
 The bridge schedule stays disabled until the secrets exist and a manual bridge test passes.
 
 ## Token scope
