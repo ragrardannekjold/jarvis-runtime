@@ -20,7 +20,10 @@ def now_utc() -> datetime:
 
 
 def github_latest_v3_created(github_token: str, repository: str) -> datetime | None:
-    url = f"https://api.github.com/repos/{repository}/actions/workflows/{q.WORKFLOW}/runs?branch=main&per_page=1"
+    url = (
+        f"https://api.github.com/repos/{repository}/actions/workflows/{q.WORKFLOW}/runs"
+        "?branch=main&status=success&per_page=1"
+    )
     req = urllib.request.Request(
         url,
         headers={
