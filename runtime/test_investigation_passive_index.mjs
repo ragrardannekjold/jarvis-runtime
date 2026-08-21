@@ -139,6 +139,28 @@ test("near-expiry attested context stops before every provider request", async (
   assert.equal(providerRequests, 0);
 });
 
+test("a context deadline reached after admission still blocks the next provider request", async () => {
+  const times = [
+    Date.parse("2026-08-20T13:30:00.000Z"),
+    Date.parse("2026-08-20T13:30:01.000Z"),
+    Date.parse("2026-08-20T13:41:00.000Z"),
+  ];
+  const advancingNow = () => times.shift() ?? Date.parse("2026-08-20T13:41:00.000Z");
+  let providerRequests = 0;
+  await assert.rejects(
+    executePassiveIndexTask(task({ expires_at: "2026-08-20T13:40:00.000Z" }), {
+      env: { SHODAN_API_KEY: "secret-must-not-be-used" },
+      now: advancingNow,
+      fetchImpl: async () => {
+        providerRequests += 1;
+        throw new Error("provider must not run");
+      },
+    }),
+    { code: "PASSIVE_INDEX_EXECUTION_WINDOW_EXPIRED" },
+  );
+  assert.equal(providerRequests, 0);
+});
+
 test("history recovery validation physically excludes search and paid query credits", () => {
   const parsed = validatePassiveHistoryTask(historyTask(), "shodan-history-recovery-20260820-001.json", { now });
   assert.equal(parsed.max_provider_requests, 2);

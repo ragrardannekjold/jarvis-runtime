@@ -250,6 +250,15 @@ export function validatePassiveHistoryTask(document, filename, { now = Date.now 
   return document;
 }
 
+function assertProviderRequestWithinTaskWindow(task, now) {
+  if (now() >= parseTimestamp(task.expires_at, "expires_at")) {
+    throw new PassiveIndexError(
+      "PASSIVE_INDEX_EXECUTION_WINDOW_EXPIRED",
+      "Attested task lifetime ended before the next provider request.",
+    );
+  }
+}
+
 function queryForAnchor(anchor) { return `hostname:"${anchor.value}"`; }
 
 function baseAnchorResult(anchor, query) {
@@ -676,6 +685,7 @@ export async function executePassiveIndexTask(rawTask, { env = process.env, fetc
   let providerRequests = 0;
   const counts = [];
   for (const anchor of task.anchors) {
+    assertProviderRequestWithinTaskWindow(task, now);
     counts.push(await collectCount(anchor, { apiKey, fetchImpl }));
     providerRequests += 1;
   }
@@ -697,6 +707,7 @@ export async function executePassiveIndexTask(rawTask, { env = process.env, fetc
     };
   }
 
+  assertProviderRequestWithinTaskWindow(task, now);
   const apiInfo = await readApiInfo({ apiKey, fetchImpl });
   providerRequests += 1;
   if (apiInfo.status !== "COMPLETE" || apiInfo.query_credits < positiveAnchors.length) {
@@ -716,12 +727,14 @@ export async function executePassiveIndexTask(rawTask, { env = process.env, fetc
 
   const searches = [];
   for (const anchor of positiveAnchors) {
+    assertProviderRequestWithinTaskWindow(task, now);
     searches.push(await searchAnchor(anchor, { apiKey, fetchImpl, now }));
     providerRequests += 1;
   }
   const candidates = searches.flatMap((search) => search.candidates).slice(0, MAX_HISTORY_HOSTS);
   const histories = [];
   for (const candidate of candidates) {
+    assertProviderRequestWithinTaskWindow(task, now);
     histories.push(await collectHistory(candidate, { apiKey, fetchImpl, now }));
     providerRequests += 1;
   }

@@ -8,7 +8,7 @@ import json
 import unittest
 
 
-GOLDEN_MAC = "11532b7d12998c2a3c283cec34efd50b011b789b62be709c477482275748358f"
+GOLDEN_MAC = "f8fbbaaacc934716313773031140017477479afd16b9295afb4254d946ce8cbe"
 TEST_KEY = bytes.fromhex("11" * 32)
 
 
@@ -30,7 +30,7 @@ def golden_receipt() -> dict[str, object]:
             "public_target_output": False,
             "runtime_validator": {
                 "path": "runtime/investigation_passive_index.mjs",
-                "git_blob_sha": "43196e1b81ae8d30a03df036795c1b288075c09e",
+                "git_blob_sha": "ba3ea46885ccaeb1735c2efaf3a142084f2513c3",
             },
         },
         "result": {
