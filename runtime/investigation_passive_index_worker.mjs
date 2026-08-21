@@ -24,7 +24,7 @@ const CAPRND_RUNTIME_RECEIPT_KEY_ENV = "JARVIS_CAPRND_RUNTIME_RECEIPT_HMAC_KEY_H
 const CAPRND_RECEIPT_TTL_MS = 60 * 60_000;
 const CAPRND_RUNTIME_VALIDATOR = Object.freeze({
   path: "runtime/investigation_passive_index.mjs",
-  git_blob_sha: "cb2bcdd847389627b8e2774fb1e8c28d9b61b4ab",
+  git_blob_sha: "43196e1b81ae8d30a03df036795c1b288075c09e",
 });
 const CAPRND_ATTESTATION_DOMAIN = Object.freeze({
   schema_version: 1,

@@ -200,7 +200,7 @@ test("worker keeps normalized intelligence private and exposes only safe status 
   assert.equal(puts[1].runtime_context_binding_sha256, privateTask.runtime_context_binding_sha256);
   assert.deepEqual(puts[1].execution_contract.runtime_validator, {
     path: "runtime/investigation_passive_index.mjs",
-    git_blob_sha: "cb2bcdd847389627b8e2774fb1e8c28d9b61b4ab",
+    git_blob_sha: "43196e1b81ae8d30a03df036795c1b288075c09e",
   });
   assert.equal(puts[1].attestation.algorithm, "HMAC-SHA256");
   assert.equal(puts[1].attestation.issuer, "capability.private-runtime");
@@ -249,7 +249,7 @@ test("receipt signing uses only the fixed purpose-separated key and rejects tamp
     completedAt,
     { env },
   );
-  assert.equal(receipt.attestation.mac, "d7653e96e2719f24de3787771cc325813a2a09edb2ce28416d7328c4afa0e436");
+  assert.equal(receipt.attestation.mac, "11532b7d12998c2a3c283cec34efd50b011b789b62be709c477482275748358f");
   assert.equal(verifyCapabilityRndReceipt(receipt, { env }), receipt);
 
   const tampered = structuredClone(receipt);

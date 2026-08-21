@@ -123,6 +123,22 @@ test("validation binds the pilot, request budget, passive mode, and exact author
   );
 });
 
+test("near-expiry attested context stops before every provider request", async () => {
+  let providerRequests = 0;
+  await assert.rejects(
+    executePassiveIndexTask(task({ expires_at: "2026-08-20T13:34:00.000Z" }), {
+      env: { SHODAN_API_KEY: "secret-must-not-be-used" },
+      now,
+      fetchImpl: async () => {
+        providerRequests += 1;
+        throw new Error("provider must not run");
+      },
+    }),
+    { code: "PASSIVE_INDEX_EXECUTION_WINDOW_INSUFFICIENT" },
+  );
+  assert.equal(providerRequests, 0);
+});
+
 test("history recovery validation physically excludes search and paid query credits", () => {
   const parsed = validatePassiveHistoryTask(historyTask(), "shodan-history-recovery-20260820-001.json", { now });
   assert.equal(parsed.max_provider_requests, 2);

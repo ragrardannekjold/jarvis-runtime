@@ -10,6 +10,7 @@ const MAX_ANCHORS = 4;
 const PAGE_SIZE = 50;
 const MAX_HISTORY_HOSTS = 2;
 const MAX_HISTORY_RECORDS_PER_HOST = 25;
+const MIN_EXECUTION_HEADROOM_MS = 5 * 60_000;
 const MAX_COUNT_BYTES = 64 * 1024;
 const MAX_SEARCH_BYTES = 16 * 1024 * 1024;
 const MAX_HISTORY_BYTES = 16 * 1024 * 1024;
@@ -167,6 +168,12 @@ export function validatePassiveIndexTask(document, filename, { now = Date.now, a
     || (!allowExpired && expiresAt <= current)
     || expiresAt - createdAt > 7 * 24 * 60 * 60_000) {
     throw new PassiveIndexError("PASSIVE_INDEX_EXPIRED", "Task authorization window was invalid or expired.");
+  }
+  if (!allowExpired && expiresAt - current < MIN_EXECUTION_HEADROOM_MS) {
+    throw new PassiveIndexError(
+      "PASSIVE_INDEX_EXECUTION_WINDOW_INSUFFICIENT",
+      "Task did not retain enough attested-context lifetime for bounded execution.",
+    );
   }
   assertExactKeys(document.authorization, new Set([
     "basis", "approved_by", "approved_at", "scope", "active_scanning",
