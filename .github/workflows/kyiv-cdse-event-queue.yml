@@ -6,12 +6,16 @@ on:
       - main
     paths:
       - "runtime/kyiv-v3/cdse_event_queue.py"
+      - "runtime/kyiv-v3/cdse_public_delta.py"
       - "runtime/kyiv-v3/test_cdse_event_queue.py"
+      - "runtime/kyiv-v3/test_cdse_public_delta.py"
       - ".github/workflows/kyiv-cdse-event-queue.yml"
   pull_request:
     paths:
       - "runtime/kyiv-v3/cdse_event_queue.py"
+      - "runtime/kyiv-v3/cdse_public_delta.py"
       - "runtime/kyiv-v3/test_cdse_event_queue.py"
+      - "runtime/kyiv-v3/test_cdse_public_delta.py"
       - ".github/workflows/kyiv-cdse-event-queue.yml"
   workflow_dispatch:
   schedule:
@@ -38,13 +42,24 @@ jobs:
 
       - name: Syntax and safety regression gate
         run: |
-          python -m py_compile runtime/kyiv-v3/cdse_event_queue.py runtime/kyiv-v3/test_cdse_event_queue.py
-          python -m unittest runtime/kyiv-v3/test_cdse_event_queue.py -v
+          python -m py_compile \
+            runtime/kyiv-v3/cdse_event_queue.py \
+            runtime/kyiv-v3/cdse_public_delta.py \
+            runtime/kyiv-v3/test_cdse_event_queue.py \
+            runtime/kyiv-v3/test_cdse_public_delta.py
+          python -m unittest discover -s runtime/kyiv-v3 -p "test_cdse_*.py" -v
 
-      - name: Drain Copernicus scene-event queue
+      - name: Consume new Copernicus scene events
         if: github.event_name != 'push' && github.event_name != 'pull_request'
         env:
           CDSE_USERNAME: ${{ secrets.CDSE_USERNAME }}
           CDSE_PASSWORD: ${{ secrets.CDSE_PASSWORD }}
           GITHUB_TOKEN: ${{ github.token }}
-        run: python runtime/kyiv-v3/cdse_event_queue.py
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -n "${CDSE_USERNAME:-}" && -n "${CDSE_PASSWORD:-}" ]]; then
+            python runtime/kyiv-v3/cdse_event_queue.py
+          else
+            python runtime/kyiv-v3/cdse_public_delta.py
+          fi
