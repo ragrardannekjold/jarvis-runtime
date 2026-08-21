@@ -1,5 +1,11 @@
 name: Kyiv Early Warning Fast Watch
 
+# Fast-path revision 12:
+# - V1 predictive delivery remains retired;
+# - sanitized low-bandwidth status/readback is a separate priority-1 path;
+# - inactive official alert state is never represented as citywide safety;
+# - stale or incomplete state fails closed to UNKNOWN;
+# - ntfy HTTP 200 is SERVER_ACCEPTED_UNVERIFIED, never device receipt.
 # Fast-path revision 11:
 # - V1 is retired from user-facing delivery; runtime stays collection/state/backtest only;
 # - workflow_dispatch is the independent ~5-minute watcher loop;
@@ -108,7 +114,15 @@ jobs:
           python-version: '3.12'
 
       - name: Syntax check fast watcher safety layer
-        run: python -m py_compile command-center/scripts/runtime_kyiv_fast_watch.py command-center/scripts/runtime_kyiv_fast_watch_entrypoint.py command-center/scripts/runtime_kyiv_fast_watch_reconcile.py command-center/scripts/test_runtime_kyiv_fast_watch_entrypoint.py command-center/scripts/test_runtime_kyiv_fast_watch_reconcile.py
+        run: >-
+          python -m py_compile
+          command-center/scripts/runtime_kyiv_fast_watch.py
+          command-center/scripts/runtime_kyiv_fast_watch_entrypoint.py
+          command-center/scripts/runtime_kyiv_fast_watch_reconcile.py
+          command-center/scripts/runtime_kyiv_fast_watch_readback.py
+          command-center/scripts/test_runtime_kyiv_fast_watch_entrypoint.py
+          command-center/scripts/test_runtime_kyiv_fast_watch_reconcile.py
+          command-center/scripts/test_runtime_kyiv_fast_watch_readback.py
 
       - name: Regression test newest-transition safety layer
         run: python -m unittest discover -s command-center/scripts -p 'test_runtime_kyiv_fast_watch_*.py' -v
@@ -131,6 +145,14 @@ jobs:
           COMMAND_CENTER_TOKEN: ${{ secrets.COMMAND_CENTER_TOKEN }}
           COMMAND_CENTER_REPO: ragrardannekjold/jarvis-command-center
         run: python command-center/scripts/runtime_kyiv_fast_watch_reconcile.py
+
+      - name: Publish sanitized low-bandwidth status readback
+        if: always()
+        shell: bash
+        env:
+          COMMAND_CENTER_TOKEN: ${{ secrets.COMMAND_CENTER_TOKEN }}
+          COMMAND_CENTER_REPO: ragrardannekjold/jarvis-command-center
+        run: python command-center/scripts/runtime_kyiv_fast_watch_readback.py
 
       - name: Bootstrap fast-watch chain after workflow repair
         if: always() && github.event_name == 'push'
