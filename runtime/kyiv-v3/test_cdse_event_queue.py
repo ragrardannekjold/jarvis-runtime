@@ -3,12 +3,14 @@ from __future__ import annotations
 
 import importlib.util
 import pathlib
+import sys
 import unittest
 
 HERE = pathlib.Path(__file__).resolve().parent
 SPEC = importlib.util.spec_from_file_location("cdse_event_queue", HERE / "cdse_event_queue.py")
 assert SPEC and SPEC.loader
 m = importlib.util.module_from_spec(SPEC)
+sys.modules[SPEC.name] = m
 SPEC.loader.exec_module(m)
 
 
