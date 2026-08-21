@@ -5,11 +5,63 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import subprocess
 import unittest
+from pathlib import Path
 
 
-GOLDEN_MAC = "f8fbbaaacc934716313773031140017477479afd16b9295afb4254d946ce8cbe"
+GOLDEN_MAC = "97605d02ca8524668ff45a7791dc32679c26c3e6170fad5ca35ac98531a510c3"
 TEST_KEY = bytes.fromhex("11" * 32)
+ROOT = Path(__file__).resolve().parents[1]
+
+
+def node_emitted_receipt() -> dict[str, object]:
+    script = r"""
+import { buildCapabilityRndReceipt } from './runtime/investigation_passive_index_worker.mjs';
+const task = {
+  task_id: 'banderol-perimeter-baseline-20260820-001',
+  project_id: 'KYIV',
+  capability: 'investigation.passive_index_search',
+  max_provider_requests: 5,
+  max_query_credits: 1,
+  runtime_context_binding_sha256: '7'.repeat(64),
+};
+const result = {
+  status: 'COMPLETE',
+  error_code: null,
+  additional_monetary_spend_usd: 0,
+  provider_requests_sent: 1,
+  query_credits_spent: 0,
+  query_credit_min: 0,
+  query_credit_max: 0,
+  collected_at: '2026-08-20T13:31:00.000Z',
+  observations: [],
+  quality_metrics: {
+    normalized_observations: 0,
+    dropped_out_of_exact_scope: 0,
+    active_scans: 0,
+    raw_banners_persisted: 0,
+  },
+};
+const receipt = buildCapabilityRndReceipt(
+  task,
+  'a'.repeat(64),
+  result,
+  '2026-08-20T13:30:00.000Z',
+  '2026-08-20T13:31:00.000Z',
+  { env: { JARVIS_CAPRND_RUNTIME_RECEIPT_HMAC_KEY_HEX: '11'.repeat(32) } },
+);
+process.stdout.write(JSON.stringify(receipt));
+"""
+    completed = subprocess.run(
+        ["node", "--input-type=module"],
+        input=script,
+        text=True,
+        capture_output=True,
+        check=True,
+        cwd=ROOT,
+    )
+    return json.loads(completed.stdout)
 
 
 def golden_receipt() -> dict[str, object]:
@@ -65,7 +117,7 @@ def golden_receipt() -> dict[str, object]:
             "purpose": "CAPABILITY_RND_RUNTIME_RECEIPT",
             "issued_at": "2026-08-20T13:31:00.000Z",
             "expires_at": "2026-08-20T14:31:00.000Z",
-            "nonce": "caprnd-c33de1a4f9443d860bcd31adc69952461f01e1f59308efa4",
+            "nonce": "receipt-banderol-perimeter-baseline-20260820-001",
             "mac": GOLDEN_MAC,
         },
     }
@@ -73,7 +125,8 @@ def golden_receipt() -> dict[str, object]:
 
 class CapabilityRndReceiptCompatibilityTests(unittest.TestCase):
     def test_python_command_center_canonicalization_matches_node_emitter(self) -> None:
-        receipt = golden_receipt()
+        receipt = node_emitted_receipt()
+        self.assertEqual(receipt, golden_receipt())
         attestation = dict(receipt["attestation"])
         observed = attestation.pop("mac")
         payload = {key: value for key, value in receipt.items() if key != "attestation"}

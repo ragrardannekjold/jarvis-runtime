@@ -249,7 +249,8 @@ test("receipt signing uses only the fixed purpose-separated key and rejects tamp
     completedAt,
     { env },
   );
-  assert.equal(receipt.attestation.mac, "f8fbbaaacc934716313773031140017477479afd16b9295afb4254d946ce8cbe");
+  assert.equal(receipt.attestation.nonce, `receipt-${privateTask.task_id}`);
+  assert.equal(receipt.attestation.mac, "97605d02ca8524668ff45a7791dc32679c26c3e6170fad5ca35ac98531a510c3");
   assert.equal(verifyCapabilityRndReceipt(receipt, { env }), receipt);
 
   const tampered = structuredClone(receipt);

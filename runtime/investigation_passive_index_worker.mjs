@@ -144,7 +144,7 @@ export function signCapabilityRndReceipt(receipt, { env = process.env } = {}) {
     ...CAPRND_ATTESTATION_DOMAIN,
     issued_at: completedAt,
     expires_at: new Date(completedMillis + CAPRND_RECEIPT_TTL_MS).toISOString(),
-    nonce: `caprnd-${sha256(`${receipt.task_id}|${completedAt}`).slice(0, 48)}`,
+    nonce: `receipt-${receipt.task_id}`,
     mac: "",
   };
   const signed = { ...receipt, attestation };
@@ -215,7 +215,7 @@ export function verifyCapabilityRndReceipt(receipt, { env = process.env } = {}) 
     throw new WorkerError("CAPRND_RECEIPT_ATTESTATION_INVALID", "Receipt attestation window was invalid.");
   }
   if (typeof receipt.attestation.nonce !== "string"
-    || !/^[A-Za-z0-9][A-Za-z0-9._-]{7,80}$/.test(receipt.attestation.nonce)
+    || !/^[A-Za-z0-9][A-Za-z0-9._-]{7,100}$/.test(receipt.attestation.nonce)
     || typeof receipt.attestation.mac !== "string"
     || !/^[0-9a-f]{64}$/.test(receipt.attestation.mac)) {
     throw new WorkerError("CAPRND_RECEIPT_ATTESTATION_INVALID", "Receipt attestation metadata was invalid.");
