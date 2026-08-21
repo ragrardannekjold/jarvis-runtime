@@ -1,0 +1,50 @@
+name: Kyiv CDSE scene-event queue
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "runtime/kyiv-v3/cdse_event_queue.py"
+      - "runtime/kyiv-v3/test_cdse_event_queue.py"
+      - ".github/workflows/kyiv-cdse-event-queue.yml"
+  pull_request:
+    paths:
+      - "runtime/kyiv-v3/cdse_event_queue.py"
+      - "runtime/kyiv-v3/test_cdse_event_queue.py"
+      - ".github/workflows/kyiv-cdse-event-queue.yml"
+  workflow_dispatch:
+  schedule:
+    - cron: "1-59/5 * * * *"
+
+permissions:
+  contents: read
+  actions: write
+
+concurrency:
+  group: kyiv-cdse-event-queue
+  cancel-in-progress: false
+
+jobs:
+  validate-and-drain:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Syntax and safety regression gate
+        run: |
+          python -m py_compile runtime/kyiv-v3/cdse_event_queue.py runtime/kyiv-v3/test_cdse_event_queue.py
+          python -m unittest runtime/kyiv-v3/test_cdse_event_queue.py -v
+
+      - name: Drain Copernicus scene-event queue
+        if: github.event_name != 'push' && github.event_name != 'pull_request'
+        env:
+          CDSE_USERNAME: ${{ secrets.CDSE_USERNAME }}
+          CDSE_PASSWORD: ${{ secrets.CDSE_PASSWORD }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python runtime/kyiv-v3/cdse_event_queue.py
