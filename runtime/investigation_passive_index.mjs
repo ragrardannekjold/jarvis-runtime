@@ -123,7 +123,7 @@ export function validatePassiveIndexTask(document, filename, { now = Date.now, a
   assertExactKeys(document, new Set([
     "schema_version", "task_id", "project_id", "capability", "mode", "provider", "purpose",
     "anchors", "collection", "max_provider_requests", "max_query_credits", "created_at",
-    "expires_at", "authorization",
+    "expires_at", "runtime_context_binding_sha256", "authorization",
   ]), "PASSIVE_INDEX_SCHEMA_INVALID");
   if (document.schema_version !== 2) throw new PassiveIndexError("PASSIVE_INDEX_SCHEMA_INVALID", "Unsupported task schema.");
   if (typeof document.task_id !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._-]{7,80}$/.test(document.task_id)) {
@@ -152,6 +152,13 @@ export function validatePassiveIndexTask(document, filename, { now = Date.now, a
   if (document.max_provider_requests !== expectedRequests
     || document.max_query_credits !== anchors.length || document.max_query_credits > MAX_ANCHORS) {
     throw new PassiveIndexError("PASSIVE_INDEX_BUDGET_INVALID", "Request or query-credit budget was invalid.");
+  }
+  if (typeof document.runtime_context_binding_sha256 !== "string"
+    || !/^[0-9a-f]{64}$/.test(document.runtime_context_binding_sha256)) {
+    throw new PassiveIndexError(
+      "PASSIVE_INDEX_RUNTIME_CONTEXT_BINDING_INVALID",
+      "Task runtime-context binding was missing or invalid.",
+    );
   }
   const createdAt = parseTimestamp(document.created_at, "created_at");
   const expiresAt = parseTimestamp(document.expires_at, "expires_at");

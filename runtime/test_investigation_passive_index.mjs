@@ -34,6 +34,7 @@ function task(overrides = {}) {
     max_query_credits: 1,
     created_at: "2026-08-20T13:25:00.000Z",
     expires_at: "2026-08-21T13:25:00.000Z",
+    runtime_context_binding_sha256: "7".repeat(64),
     authorization: {
       basis: "PUBLIC_AUTHORITATIVE_ENTITY_ANCHORS",
       approved_by: "owner",
@@ -107,11 +108,19 @@ test("validation binds the pilot, request budget, passive mode, and exact author
     task({ mode: "active" }),
     task({ project_id: "OTHER" }),
     task({ max_query_credits: 10 }),
+    task({ runtime_context_binding_sha256: "0".repeat(63) }),
+    task({ expires_at: "2026-08-20T13:29:00.000Z" }),
     task({ collection: { page_size: 1000, max_pages: 10, max_history_hosts: 100, raw_banner_persisted: true } }),
     task({ raw_query: "vuln:CVE-2025-0001" }),
   ]) {
     assert.throws(() => validatePassiveIndexTask(invalid, `${invalid.task_id}.json`, { now }));
   }
+  const missingBinding = task();
+  delete missingBinding.runtime_context_binding_sha256;
+  assert.throws(
+    () => validatePassiveIndexTask(missingBinding, `${missingBinding.task_id}.json`, { now }),
+    { code: "PASSIVE_INDEX_RUNTIME_CONTEXT_BINDING_INVALID" },
+  );
 });
 
 test("history recovery validation physically excludes search and paid query credits", () => {
