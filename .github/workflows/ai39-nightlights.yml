@@ -1,0 +1,84 @@
+name: AI39 Black Marble night lights
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  nightlights:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install --disable-pip-version-check requests pillow numpy
+      - name: Compare daily gap-filled BRDF-adjusted night lights
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          python - <<'PY'
+          import io, json
+          from datetime import datetime, timezone
+          import requests, numpy as np
+          from PIL import Image
+
+          WMS='https://gibs.earthdata.nasa.gov/wms/epsg4326/best/wms.cgi'
+          LAYER='VIIRS_SNPP_GapFilled_BRDF_Corrected_DayNightBand_Radiance'
+          BBOX='37.65,48.45,38.25,48.90'; W,H=800,600
+          DATES=['2026-08-15','2026-08-16','2026-08-17','2026-08-18','2026-08-19','2026-08-20','2026-08-21']
+          days=[]; arrays={}
+          for date in DATES:
+              params={'SERVICE':'WMS','VERSION':'1.1.1','REQUEST':'GetMap','TIME':date+'T00:00:00Z','LAYERS':LAYER,'FORMAT':'image/png','STYLES':'','HEIGHT':H,'SRS':'epsg:4326','WIDTH':W,'BBOX':BBOX,'TRANSPARENT':'TRUE'}
+              r=requests.get(WMS,params=params,timeout=90); r.raise_for_status()
+              if 'image' not in r.headers.get('content-type','').lower():
+                  days.append({'date':date,'status':'NON_IMAGE'}); continue
+              im=Image.open(io.BytesIO(r.content)).convert('RGBA'); a=np.array(im)
+              alpha=a[:,:,3]>0
+              rgb=a[:,:,:3].astype(np.float32)
+              # Same layer/colormap across dates: rendered luma is used only for relative broad-sector comparison, not raw radiance.
+              luma=0.2126*rgb[:,:,0]+0.7152*rgb[:,:,1]+0.0722*rgb[:,:,2]
+              luma[~alpha]=np.nan
+              arrays[date]=luma
+              im.save(f'out/{date}.png',optimize=True)
+              rec={'date':date,'status':'OK','valid_percent':round(float(np.isfinite(luma).mean()*100),2),'cells_4x4':[]}
+              for rr in range(4):
+                  for cc in range(4):
+                      ys=slice(rr*H//4,(rr+1)*H//4); xs=slice(cc*W//4,(cc+1)*W//4); z=luma[ys,xs]; v=z[np.isfinite(z)]
+                      rec['cells_4x4'].append({'row':rr,'col':cc,'median_luma':round(float(np.median(v)),3) if v.size else None,'p90_luma':round(float(np.percentile(v,90)),3) if v.size else None,'valid_percent':round(float(np.isfinite(z).mean()*100),2)})
+              days.append(rec)
+
+          # Compare pre-event 15-17 median sector luma to post-event 20-21 median, normalized to each day's AOI median to suppress global display/lunar variation.
+          norm={}
+          for date,a in arrays.items():
+              med=float(np.nanmedian(a)); norm[date]=a/max(med,1e-6)
+          cells=[]
+          pre=[d for d in ['2026-08-15','2026-08-16','2026-08-17'] if d in norm]
+          post=[d for d in ['2026-08-20','2026-08-21'] if d in norm]
+          for rr in range(4):
+              for cc in range(4):
+                  ys=slice(rr*H//4,(rr+1)*H//4); xs=slice(cc*W//4,(cc+1)*W//4)
+                  pv=[]; qv=[]
+                  for d in pre:
+                      v=norm[d][ys,xs]; vals=v[np.isfinite(v)];
+                      if vals.size: pv.append(float(np.median(vals)))
+                  for d in post:
+                      v=norm[d][ys,xs]; vals=v[np.isfinite(v)];
+                      if vals.size: qv.append(float(np.median(vals)))
+                  rec={'row':rr,'col':cc,'pre_days':len(pv),'post_days':len(qv)}
+                  if pv and qv:
+                      p=float(np.median(pv)); q=float(np.median(qv)); rec.update({'pre_norm_median':round(p,4),'post_norm_median':round(q,4),'relative_change_pct':round((q-p)/max(abs(p),1e-6)*100,2)})
+                  cells.append(rec)
+          out={'generated_utc':datetime.now(timezone.utc).isoformat(),'source':'NASA GIBS VNP46A2 daily gap-filled BRDF-adjusted nighttime lights rendered WMS','layer':LAYER,'days':days,'pre_vs_post_cells_4x4':cells,'interpretation_limit':'Rendered WMS luma is a relative broad-sector proxy, not raw radiance. Gap filling and colormap/rendering limit quantitative interpretation. Use only to discriminate whether a persistent broad night-light change is visible.','safety':'Broad 4x4 sectors only; no coordinates or target-level interpretation.'}
+          json.dump(out,open('out/analysis.json','w'),indent=2); print(json.dumps(out,indent=2))
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ai39-nightlights
+          path: out/
+          if-no-files-found: error
+          retention-days: 2
