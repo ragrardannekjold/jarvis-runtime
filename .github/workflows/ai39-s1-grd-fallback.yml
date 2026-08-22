@@ -1,0 +1,86 @@
+name: AI39 Sentinel-1 GRD fallback
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  grd:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install --disable-pip-version-check requests rasterio numpy
+      - name: Same-platform same-orbit raw-GRD fallback
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          python - <<'PY'
+          import json
+          from datetime import datetime, timezone
+          import requests, numpy as np, rasterio
+          from rasterio.vrt import WarpedVRT
+          from rasterio.enums import Resampling
+          from rasterio.transform import from_bounds
+
+          STAC='https://earth-search.aws.element84.com/v1/search'
+          BBOX=[37.65,48.45,38.25,48.90]; W,H=800,600
+          ids=[
+            'S1D_IW_GRDH_1SDV_20260810T034651_20260810T034716_004058_007649',
+            'S1D_IW_GRDH_1SDV_20260822T034651_20260822T034716_004233_007C63'
+          ]
+          r=requests.post(STAC,json={'collections':['sentinel-1-grd'],'ids':ids,'limit':10},timeout=60); r.raise_for_status()
+          items={x['id']:x for x in r.json().get('features',[])}
+          if not all(i in items for i in ids):
+              out={'status':'MISSING_GRD_PAIR','found':sorted(items)}; json.dump(out,open('out/analysis.json','w'),indent=2); print(json.dumps(out)); raise SystemExit(0)
+          transform=from_bounds(*BBOX,W,H)
+          def read(it,key):
+              href=it['assets'][key]['href']
+              with rasterio.Env(AWS_NO_SIGN_REQUEST='YES',GDAL_DISABLE_READDIR_ON_OPEN='EMPTY_DIR'):
+                  with rasterio.open(href) as ds:
+                      with WarpedVRT(ds,crs='EPSG:4326',transform=transform,width=W,height=H,resampling=Resampling.bilinear,nodata=np.nan) as vrt:
+                          x=vrt.read(1).astype(np.float32)
+              x[~np.isfinite(x)]=np.nan
+              x[np.abs(x)<1e-12]=np.nan
+              return x
+          a,b=items[ids[0]],items[ids[1]]
+          avv,avh=read(a,'vv'),read(a,'vh'); bvv,bvh=read(b,'vv'),read(b,'vh')
+          valid=np.isfinite(avv)&np.isfinite(avh)&np.isfinite(bvv)&np.isfinite(bvh)
+          if valid.mean()<0.35:
+              out={'status':'INSUFFICIENT_GRD_OVERLAP','generated_utc':datetime.now(timezone.utc).isoformat(),'pair':['2026-08-10','2026-08-22'],'product_ids':ids,'valid_overlap_percent':round(float(valid.mean()*100),3),'value_summary':{}}
+              for name,x in [('avv',avv),('avh',avh),('bvv',bvv),('bvh',bvh)]:
+                  v=x[np.isfinite(x)]; out['value_summary'][name]={'count':int(v.size),'min':float(np.min(v)) if v.size else None,'median':float(np.median(v)) if v.size else None,'max':float(np.max(v)) if v.size else None}
+              json.dump(out,open('out/analysis.json','w'),indent=2); print(json.dumps(out,indent=2)); raise SystemExit(0)
+          def centered_db(x):
+              med=float(np.nanmedian(x[valid]))
+              if med<0:
+                  return x-med,'already_db'
+              return 20*np.log10(np.maximum(x/med,1e-8)),'positive_amplitude_like'
+          avv_n,svv1=centered_db(avv); bvv_n,svv2=centered_db(bvv); avh_n,svh1=centered_db(avh); bvh_n,svh2=centered_db(bvh)
+          dvv=bvv_n-avv_n; dvh=bvh_n-avh_n; mag=np.sqrt((dvv*dvv+dvh*dvh)/2)
+          cells=[]
+          for rr in range(4):
+              for cc in range(4):
+                  ys=slice(rr*H//4,(rr+1)*H//4); xs=slice(cc*W//4,(cc+1)*W//4); m=valid[ys,xs]
+                  rec={'row':rr,'col':cc,'valid_percent':round(float(m.mean()*100),2)}
+                  if m.sum()>200:
+                      z=mag[ys,xs][m]
+                      rec.update({'median_change_mag_db':round(float(np.median(z)),3),'p90_change_mag_db':round(float(np.percentile(z,90)),3),'pct_ge_3db':round(float((z>=3).mean()*100),3)})
+                  cells.append(rec)
+          scored=[c for c in cells if 'p90_change_mag_db' in c]; scored.sort(key=lambda c:(c['pct_ge_3db'],c['p90_change_mag_db']),reverse=True)
+          for i,c in enumerate(scored,1): c['relative_rank']=i
+          out={'status':'PARTIAL_RAW_GRD_CONTROL','generated_utc':datetime.now(timezone.utc).isoformat(),'pair':['2026-08-10','2026-08-22'],'product_ids':ids,'geometry':{'platform':'sentinel-1d','relative_orbit':167,'orbit_state':'descending'},'valid_overlap_percent':round(float(valid.mean()*100),2),'scale_detection':{'vv_a':svv1,'vv_b':svv2,'vh_a':svh1,'vh_b':svh2},'cells_4x4':cells,'interpretation_limit':'Scene-median-centered GRD fallback only; lower evidentiary weight than RTC. Speckle, soil moisture, precipitation, calibration, roughness, vegetation and geometry remain competing explanations.','safety':'Broad 4x4 sector statistics only; no coordinates or target-level interpretation.'}
+          json.dump(out,open('out/analysis.json','w'),indent=2); print(json.dumps(out,indent=2))
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ai39-s1-grd-fallback
+          path: out/analysis.json
+          if-no-files-found: error
+          retention-days: 2
