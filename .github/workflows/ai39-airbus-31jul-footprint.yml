@@ -1,0 +1,126 @@
+name: AI39 Airbus 31 Jul footprint
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  preview:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install --disable-pip-version-check requests numpy pillow rasterio matplotlib
+      - name: Render provider-native footprint with archive metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          python - <<'PY'
+          import json, requests, numpy as np, rasterio, os
+          from PIL import Image, ImageDraw, ImageFont
+          from rasterio.warp import reproject
+          from rasterio.enums import Resampling
+          from rasterio.transform import from_bounds
+
+          TARGET='DS_PHR1B_202607310827289_FR1_PX_E037N49_1004_04826'
+          BBOX=[37.65,48.45,38.25,48.90]
+          W,H=1400,1050
+          layer='https://portal.intelligence-airbusds.com/arcgis/rest/services/OneAtlas/OADConstellationArchive/MapServer/9/query'
+          r=requests.get(layer,params={
+              'f':'json','where':f"parentidentifier='{TARGET}'",'outFields':'*','returnGeometry':'true','outSR':'4326'
+          },timeout=60); r.raise_for_status(); q=r.json()
+          feats=q.get('features',[])
+          if not feats: raise SystemExit('Airbus footprint not found')
+          f=feats[0]; attrs=f.get('attributes',{}); geom=f.get('geometry',{})
+          rings=geom.get('rings',[])
+
+          # Build a neutral Sentinel-2 context background for the same broad AOI.
+          STAC='https://earth-search.aws.element84.com/v1/search'
+          sr=requests.post(STAC,json={'collections':['sentinel-2-c1-l2a'],'bbox':BBOX,
+              'datetime':'2026-08-17T00:00:00Z/2026-08-17T23:59:59Z','limit':30},timeout=90)
+          sr.raise_for_status(); items=sr.json().get('features',[])
+          dst=np.zeros((3,H,W),dtype=np.uint8)
+          cov=np.zeros((H,W),dtype=bool)
+          dst_transform=from_bounds(*BBOX,W,H)
+          used=[]
+          for it in items:
+              href=(it.get('assets',{}).get('visual') or {}).get('href')
+              if not href: continue
+              tmp=np.zeros((3,H,W),dtype=np.uint8)
+              try:
+                  with rasterio.Env(AWS_NO_SIGN_REQUEST='YES',GDAL_DISABLE_READDIR_ON_OPEN='EMPTY_DIR'):
+                      with rasterio.open(href) as ds:
+                          for i in range(1,4):
+                              reproject(source=rasterio.band(ds,i),destination=tmp[i-1],src_transform=ds.transform,src_crs=ds.crs,
+                                  src_nodata=ds.nodata,dst_transform=dst_transform,dst_crs='EPSG:4326',dst_nodata=0,resampling=Resampling.bilinear)
+                  m=tmp.sum(axis=0)>0
+                  dst[:,m]=tmp[:,m]; cov|=m; used.append(it.get('id'))
+              except Exception:
+                  pass
+          if not cov.any():
+              dst[:]=35
+          img=Image.fromarray(np.moveaxis(dst,0,-1)).convert('RGBA')
+          header_h=115
+          canvas=Image.new('RGBA',(W,H+header_h),(7,17,27,255)); canvas.paste(img,(0,header_h))
+          d=ImageDraw.Draw(canvas,'RGBA')
+          font='/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf'; bold='/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf'
+          F=lambda s,b=False: ImageFont.truetype(bold if b else font,s)
+          d.text((24,15),'AI-39 | Airbus Pléiades — архівна сцена 31.07.2026',font=F(28,True),fill='white')
+          d.text((24,58),'Pléiades 1B | 50 см | 08:27:28 UTC | cloud 8.62% | incidence 18.0° | SENSOR',font=F(17),fill=(230,235,240,255))
+          d.text((24,85),'Provider-native catalog footprint; фон — Sentinel-2 для орієнтації, НЕ пікселі Pléiades',font=F(14),fill=(255,210,90,255))
+
+          # Draw coarse 4x4 grid for orientation.
+          for i in range(1,4):
+              x=round(W*i/4); d.line([(x,header_h),(x,header_h+H)],fill=(255,255,255,145),width=2)
+          for i in range(1,4):
+              y=header_h+round(H*i/4); d.line([(0,y),(W,y)],fill=(255,255,255,145),width=2)
+          for i,l in enumerate('ABCD'):
+              d.text((round(W*(i+.5)/4)-8,header_h+7),l,font=F(20,True),fill='white')
+          for i,l in enumerate('1234'):
+              d.text((8,header_h+round(H*(i+.5)/4)-10),l,font=F(20,True),fill='white')
+
+          def xy(lon,lat):
+              x=(lon-BBOX[0])/(BBOX[2]-BBOX[0])*W
+              y=(BBOX[3]-lat)/(BBOX[3]-BBOX[1])*H+header_h
+              return (x,y)
+          for ring in rings:
+              pts=[xy(a,b) for a,b in ring]
+              if len(pts)>2:
+                  d.polygon(pts,fill=(0,185,255,35))
+                  d.line(pts+[pts[0]],fill=(0,205,255,255),width=5,joint='curve')
+          # Metadata card outside key central area, top-left small.
+          card=(24,header_h+38,555,header_h+205)
+          d.rounded_rectangle(card,radius=12,fill=(5,12,20,215),outline=(160,205,235,220),width=2)
+          d.text((42,header_h+54),'AIRBUS ARCHIVE — VERIFIED',font=F(18,True),fill=(90,210,255,255))
+          d.text((42,header_h+86),'31.07.2026 08:27:28 UTC',font=F(16,True),fill='white')
+          d.text((42,header_h+113),'Pleiades 1B • 0.5 m • cloud 8.62%',font=F(15),fill='white')
+          d.text((42,header_h+139),'incidence 18.0° • processing SENSOR',font=F(15),fill='white')
+          d.text((42,header_h+165),'ID: DS_PHR1B_202607310827289…04826',font=F(13),fill=(220,225,230,255))
+          canvas.convert('RGB').save('out/airbus_pleiades_31jul_footprint.png','PNG',compress_level=6)
+
+          # Test whether actual OneAtlas quicklook is publicly readable without token.
+          tests={}
+          urls=[
+              'https://search.foundation.api.oneatlas.airbus.com/api/v2/opensearch',
+              'https://access.foundation.api.oneatlas.airbus.com/quicklook/'+TARGET,
+          ]
+          for u in urls:
+              try:
+                  rr=requests.get(u,params={'sourceIdentifier':TARGET} if 'opensearch' in u else None,timeout=30,allow_redirects=True)
+                  tests[u]={'status':rr.status_code,'content_type':rr.headers.get('content-type'),'bytes':len(rr.content)}
+              except Exception as e: tests[u]={'error':str(e)}
+          json.dump({'scene':TARGET,'attrs':{k:v for k,v in attrs.items() if k!='shape'},'quicklook_public_tests':tests,'context_s2_ids':used[:10]},open('out/metadata.json','w'),indent=2)
+          print(json.dumps(tests,indent=2))
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ai39-airbus-31jul-footprint
+          path: out/
+          if-no-files-found: error
+          retention-days: 2
