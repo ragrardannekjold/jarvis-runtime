@@ -1,0 +1,77 @@
+name: AI39 landcover correction
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  landcover:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install --disable-pip-version-check numpy rasterio pystac-client planetary-computer
+      - name: Separate built area from crops and bare ground
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          python - <<'PY'
+          import json
+          import numpy as np
+          import rasterio
+          from rasterio.warp import reproject
+          from rasterio.enums import Resampling
+          from rasterio.transform import from_bounds
+          from pystac_client import Client
+          import planetary_computer
+
+          BBOX=[37.65,48.45,38.25,48.90]
+          W,H=1200,900
+          dst_tr=from_bounds(*BBOX,W,H)
+          cat=Client.open('https://planetarycomputer.microsoft.com/api/stac/v1', modifier=planetary_computer.sign_inplace)
+          sr=cat.search(collections=['io-lulc-9-class'],bbox=BBOX,datetime='2023-01-01/2023-12-31')
+          items=list(sr.items())
+          lc=np.zeros((H,W),np.uint8)
+          used=[]
+          for it in items:
+              asset=it.assets.get('data') or it.assets.get('map') or next((a for a in it.assets.values() if a.href.lower().endswith(('.tif','.tiff'))),None)
+              if not asset: continue
+              tmp=np.zeros((H,W),np.uint8)
+              try:
+                  with rasterio.open(asset.href) as ds:
+                      reproject(source=rasterio.band(ds,1),destination=tmp,src_transform=ds.transform,src_crs=ds.crs,
+                                src_nodata=ds.nodata,dst_transform=dst_tr,dst_crs='EPSG:4326',dst_nodata=0,resampling=Resampling.nearest)
+                  m=tmp>0; lc[m]=tmp[m]; used.append(it.id)
+              except Exception:
+                  pass
+          if (lc>0).mean()<0.5:
+              raise SystemExit('Insufficient IO LULC coverage')
+          labels={1:'water',2:'trees',4:'flooded_vegetation',5:'crops',7:'built_area',8:'bare_ground',9:'snow_ice',10:'clouds',11:'rangeland'}
+          cells=[]
+          for rr in range(4):
+              for cc in range(4):
+                  ys=slice(rr*H//4,(rr+1)*H//4); xs=slice(cc*W//4,(cc+1)*W//4)
+                  a=lc[ys,xs]; valid=(a>0)&(a!=10)
+                  rec={'sector':f"{'ABCD'[cc]}{rr+1}", 'valid_percent':round(float(valid.mean()*100),1)}
+                  if valid.sum()>100:
+                      for val,name in labels.items():
+                          if val==10: continue
+                          rec[name+'_percent']=round(float((a[valid]==val).mean()*100),1)
+                  cells.append(rec)
+          out={'source':'Impact Observatory Maps for Good / Planetary Computer io-lulc-9-class','year':2023,
+               'role':'baseline land-cover context only; not evidence of current 2026 condition','items':used,'cells':cells}
+          json.dump(out,open('out/landcover_2023.json','w'),indent=2)
+          print(json.dumps(out,indent=2))
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ai39-landcover-correction
+          path: out/landcover_2023.json
+          if-no-files-found: error
+          retention-days: 2
