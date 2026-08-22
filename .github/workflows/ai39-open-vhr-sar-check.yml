@@ -1,0 +1,78 @@
+name: AI39 open VHR SAR check
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install --disable-pip-version-check pystac requests
+      - name: Search Capella and Umbra public STAC catalogs
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          python - <<'PY'
+          import json, datetime, pystac
+
+          BBOX=[37.65,48.45,38.25,48.90]
+          START=datetime.datetime(2026,7,23,tzinfo=datetime.timezone.utc)
+          END=datetime.datetime(2026,8,23,tzinfo=datetime.timezone.utc)
+          catalogs={
+            'Capella Open Data':'https://capella-open-data.s3.us-west-2.amazonaws.com/stac/catalog.json',
+            'Umbra Open Data':'https://s3.us-west-2.amazonaws.com/umbra-open-data-catalog/stac/catalog.json'
+          }
+
+          def intersects(b):
+              if not b or len(b)<4: return False
+              return not (b[2] < BBOX[0] or b[0] > BBOX[2] or b[3] < BBOX[1] or b[1] > BBOX[3])
+
+          out={'window':['2026-07-23','2026-08-22'],'scope':'Broad AI-39 corridor; public open-data VHR SAR availability only','catalogs':{}}
+          for name,url in catalogs.items():
+              rec={'matches_30d':[],'total_items_scanned':0,'errors':[]}
+              try:
+                  cat=pystac.Catalog.from_file(url)
+                  for item in cat.get_all_items():
+                      rec['total_items_scanned'] += 1
+                      dt=item.datetime
+                      if dt is None:
+                          s=item.properties.get('start_datetime') or item.properties.get('datetime')
+                          if isinstance(s,str):
+                              try: dt=datetime.datetime.fromisoformat(s.replace('Z','+00:00'))
+                              except: dt=None
+                      if dt and dt.tzinfo is None: dt=dt.replace(tzinfo=datetime.timezone.utc)
+                      if not dt or not (START <= dt < END): continue
+                      if not intersects(item.bbox): continue
+                      props=item.properties
+                      rec['matches_30d'].append({
+                         'id':item.id,
+                         'acquisition_utc':dt.isoformat(),
+                         'platform':props.get('platform'),
+                         'mode':props.get('sar:instrument_mode'),
+                         'resolution_range':props.get('sar:resolution_range'),
+                         'resolution_azimuth':props.get('sar:resolution_azimuth'),
+                         'product_type':props.get('sar:product_type')
+                      })
+              except Exception as e:
+                  rec['errors'].append(str(e))
+              rec['matches_count']=len(rec['matches_30d'])
+              out['catalogs'][name]=rec
+          out['safety']='No exact footprints or tactical coordinates retained.'
+          print(json.dumps(out,indent=2))
+          with open('out/open_vhr_sar_check.json','w') as f: json.dump(out,f,indent=2)
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ai39-open-vhr-sar-check
+          path: out/open_vhr_sar_check.json
+          if-no-files-found: error
+          retention-days: 2
