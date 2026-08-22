@@ -1,0 +1,71 @@
+name: AI39 EO thumbnails
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  thumbnails:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Query and download broad T37UDP thumbnails
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          python - <<'PY'
+          import json, urllib.request, os
+          from datetime import datetime, timezone
+
+          ENDPOINT='https://earth-search.aws.element84.com/v1/search'
+          BBOX=[37.65,48.45,38.25,48.90]
+          START='2026-08-09T00:00:00Z'; END='2026-08-21T23:59:59Z'
+          TARGET_DATES=['2026-08-10','2026-08-13','2026-08-17','2026-08-18','2026-08-20']
+
+          body=json.dumps({'collections':['sentinel-2-c1-l2a'],'bbox':BBOX,'datetime':f'{START}/{END}','limit':100,
+                           'sortby':[{'field':'properties.datetime','direction':'desc'}]}).encode()
+          req=urllib.request.Request(ENDPOINT,data=body,headers={'Content-Type':'application/json','User-Agent':'jarvis-ai39-eo-thumbnails/1.0'},method='POST')
+          with urllib.request.urlopen(req,timeout=90) as r: items=json.load(r).get('features',[])
+
+          candidates=[]
+          for it in items:
+              iid=it.get('id',''); p=it.get('properties',{}); dt=p.get('datetime','')
+              if '_T37UDP_' not in iid: continue
+              date=dt[:10]
+              if date not in TARGET_DATES: continue
+              href=(it.get('assets',{}).get('thumbnail') or {}).get('href') or (it.get('assets',{}).get('preview') or {}).get('href')
+              if not href: continue
+              candidates.append((date,float(p.get('eo:cloud_cover') or 100),iid,dt,href,p.get('platform')))
+
+          best={}
+          for row in candidates:
+              date=row[0]
+              if date not in best or row[1] < best[date][1]: best[date]=row
+
+          meta=[]
+          for date in sorted(best):
+              date,cloud,iid,dt,href,platform=best[date]
+              fn=f'out/{date}_{iid}.jpg'
+              req=urllib.request.Request(href,headers={'User-Agent':'jarvis-ai39-eo-thumbnails/1.0'})
+              with urllib.request.urlopen(req,timeout=90) as r, open(fn,'wb') as f: f.write(r.read())
+              meta.append({'date':date,'datetime':dt,'product_id':iid,'cloud_cover':cloud,'platform':platform,'file':os.path.basename(fn)})
+
+          rec={'generated_utc':datetime.now(timezone.utc).isoformat(),'scope':'Full T37UDP tile thumbnails; broad visual triage only',
+               'selected':meta,'warning':'Thumbnail visual triage is not change proof. Seasonal, smoke, illumination and processing effects require corroboration.'}
+          json.dump(rec,open('out/metadata.json','w'),indent=2)
+          print(json.dumps(rec,indent=2))
+          if len(meta)<2: raise SystemExit('Insufficient selected scenes')
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ai39-eo-thumbnails
+          path: out/
+          if-no-files-found: error
+          retention-days: 2
