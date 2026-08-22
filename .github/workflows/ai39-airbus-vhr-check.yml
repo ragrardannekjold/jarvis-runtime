@@ -10,155 +10,91 @@ permissions:
 jobs:
   check:
     runs-on: ubuntu-latest
-    timeout-minutes: 12
+    timeout-minutes: 10
     steps:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
       - name: Install dependency
         run: python -m pip install --disable-pip-version-check requests
-      - name: Inspect public Airbus Archive Preview backend
+      - name: Query Airbus public VHR archive metadata
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p out
           python - <<'PY'
-          import json, re, requests, datetime, urllib.parse
-          from collections import deque
+          import json, requests, datetime
 
-          PORTAL='https://portal.intelligence-airbusds.com/portal/sharing/rest'
-          APP='49e5e928d6604a948b86ca6bb4f2fd73'
+          BASE='https://portal.intelligence-airbusds.com/arcgis/rest/services/OneAtlas/OADConstellationArchive/MapServer'
+          # Broad AI-39 corridor only; no footprint geometry retained.
           BBOX=[37.65,48.45,38.25,48.90]
-          START=datetime.datetime(2026,8,18,tzinfo=datetime.timezone.utc)
-          END=datetime.datetime(2026,8,23,tzinfo=datetime.timezone.utc)
-          S=requests.Session(); S.headers.update({'User-Agent':'AI39-public-archive-metadata-check/1.0'})
+          NOW=datetime.datetime(2026,8,22,23,59,59,tzinfo=datetime.timezone.utc)
+          START=NOW-datetime.timedelta(days=30)
+          EVENT=datetime.datetime(2026,8,18,tzinfo=datetime.timezone.utc)
+          layers={4:'Pleiades Neo 30cm',9:'Pleiades 50cm',14:'SPOT 1.5m'}
+          S=requests.Session(); S.headers.update({'User-Agent':'AI39-airbus-archive-check/2.0'})
 
-          def get_json(url, params=None):
-              r=S.get(url,params=params,timeout=45)
-              r.raise_for_status()
-              return r.json()
-
-          def item_meta(i): return get_json(f'{PORTAL}/content/items/{i}',{'f':'json'})
-          def item_data(i): return get_json(f'{PORTAL}/content/items/{i}/data',{'f':'json'})
-
-          hex_re=re.compile(r'(?<![0-9a-fA-F])([0-9a-fA-F]{32})(?![0-9a-fA-F])')
-          url_re=re.compile(r'https?://[^\s\"\'<>]+')
-          discovered_ids=set([APP]); service_urls=set(); raw_urls=set()
-
-          def walk(x):
-              if isinstance(x,dict):
-                  for v in x.values(): walk(v)
-              elif isinstance(x,list):
-                  for v in x: walk(v)
-              elif isinstance(x,str):
-                  for m in hex_re.findall(x): discovered_ids.add(m)
-                  for u in url_re.findall(x):
-                      raw_urls.add(u.rstrip('),.;'))
-                      if any(k in u for k in ('FeatureServer','MapServer','ImageServer')):
-                          service_urls.add(u.rstrip('),.;'))
-
-          item_records=[]
-          q=deque([(APP,0)]); seen=set()
-          while q:
-              iid,depth=q.popleft()
-              if iid in seen or depth>2: continue
-              seen.add(iid)
-              try:
-                  meta=item_meta(iid); data=item_data(iid)
-                  item_records.append({'id':iid,'title':meta.get('title'),'type':meta.get('type'),'url':meta.get('url'),'access':meta.get('access')})
-                  walk(meta); walk(data)
-                  if meta.get('url') and any(k in meta['url'] for k in ('FeatureServer','MapServer','ImageServer')): service_urls.add(meta['url'])
-                  if depth<2:
-                      for nid in discovered_ids-seen:
-                          q.append((nid,depth+1))
-              except Exception as e:
-                  item_records.append({'id':iid,'error':str(e)})
-
-          try:
-              sr=get_json(f'{PORTAL}/search',{'f':'json','q':'(archive OR imagery) AND (Pleiades OR optical OR OneAtlas)','num':100})
-              for it in sr.get('results',[]):
-                  title=(it.get('title') or '').lower()
-                  if any(k in title for k in ('archive','pleiades','optical','imagery')):
-                      iid=it.get('id')
-                      item_records.append({'id':iid,'title':it.get('title'),'type':it.get('type'),'url':it.get('url'),'access':it.get('access'),'via':'portal_search'})
-                      if it.get('url') and any(k in it['url'] for k in ('FeatureServer','MapServer','ImageServer')): service_urls.add(it['url'])
-          except Exception as e:
-              item_records.append({'portal_search_error':str(e)})
-
-          service_urls={u.split('?')[0].rstrip('/') for u in service_urls}
-
-          def parse_dt(v):
+          def parse_ms(v):
               if v is None: return None
-              if isinstance(v,(int,float)):
-                  try:
-                      if v>1e11: return datetime.datetime.fromtimestamp(v/1000,tz=datetime.timezone.utc)
-                      if v>1e9: return datetime.datetime.fromtimestamp(v,tz=datetime.timezone.utc)
-                  except: return None
-              if isinstance(v,str):
-                  s=v.strip().replace('Z','+00:00')
-                  for candidate in [s, s[:10]]:
-                      try:
-                          d=datetime.datetime.fromisoformat(candidate)
-                          if d.tzinfo is None: d=d.replace(tzinfo=datetime.timezone.utc)
-                          return d
-                      except: pass
-              return None
+              try: return datetime.datetime.fromtimestamp(float(v)/1000,tz=datetime.timezone.utc)
+              except: return None
 
-          def record_date(attrs):
-              candidates=[]
-              for k,v in attrs.items():
-                  lk=k.lower()
-                  if any(t in lk for t in ('acq','date','time','start','end','capture','imaging')):
-                      d=parse_dt(v)
-                      if d: candidates.append((k,d))
-              return candidates
+          results={}
+          all_rows=[]
+          for lid,label in layers.items():
+              url=f'{BASE}/{lid}/query'
+              params={
+                  'f':'json','where':'1=1','geometry':','.join(map(str,BBOX)),
+                  'geometryType':'esriGeometryEnvelope','inSR':'4326','spatialRel':'esriSpatialRelIntersects',
+                  'outFields':'parentidentifier,cloudcover,incidenceangle,processinglevel,publicationdate,acquisitiondate,snowcover',
+                  'returnGeometry':'false','resultRecordCount':2000,'orderByFields':'acquisitiondate DESC'
+              }
+              r=S.get(url,params=params,timeout=60); r.raise_for_status(); data=r.json()
+              rows=[]
+              for feat in data.get('features',[]):
+                  a=feat.get('attributes') or {}
+                  dt=parse_ms(a.get('acquisitiondate'))
+                  if not dt or not (START <= dt <= NOW): continue
+                  row={
+                      'sensor_class':label,
+                      'acquisition_utc':dt.isoformat(),
+                      'days_from_event':round((dt-EVENT).total_seconds()/86400,2),
+                      'parentidentifier':a.get('parentidentifier'),
+                      'cloudcover':a.get('cloudcover'),
+                      'incidenceangle':a.get('incidenceangle'),
+                      'processinglevel':a.get('processinglevel'),
+                      'snowcover':a.get('snowcover')
+                  }
+                  rows.append(row); all_rows.append(row)
+              rows.sort(key=lambda x:x['acquisition_utc'],reverse=True)
+              post=[x for x in rows if x['days_from_event']>=0]
+              pre=[x for x in rows if x['days_from_event']<0]
+              results[str(lid)]={
+                  'sensor_class':label,
+                  'count_30d':len(rows),
+                  'count_post_event_to_aug22':len(post),
+                  'nearest_post_event':min(post,key=lambda x:x['days_from_event']) if post else None,
+                  'nearest_pre_event':max(pre,key=lambda x:x['days_from_event']) if pre else None,
+                  'rows':rows[:100]
+              }
 
-          services=[]; matches=[]
-          for root in sorted(service_urls):
-              try:
-                  meta=get_json(root,{'f':'json'})
-                  services.append({'url':root,'name':meta.get('name'),'type':meta.get('type'),'layers':meta.get('layers'),'fields':meta.get('fields')})
-                  layer_urls=[]
-                  if meta.get('layers'):
-                      for lyr in meta['layers'][:30]: layer_urls.append(root+'/'+str(lyr['id']))
-                  elif meta.get('fields'):
-                      layer_urls=[root]
-                  for lu in layer_urls:
-                      try:
-                          qurl=lu+'/query'
-                          params={'f':'json','where':'1=1','geometry':','.join(map(str,BBOX)),
-                                  'geometryType':'esriGeometryEnvelope','inSR':'4326','spatialRel':'esriSpatialRelIntersects',
-                                  'outFields':'*','returnGeometry':'false','resultRecordCount':500}
-                          qr=get_json(qurl,params)
-                          for feat in qr.get('features',[]):
-                              a=feat.get('attributes') or {}
-                              in_window=[(k,d) for k,d in record_date(a) if START<=d<END]
-                              if in_window:
-                                  keep={}
-                                  for k,v in a.items():
-                                      lk=k.lower()
-                                      if any(t in lk for t in ('date','time','acq','sensor','sat','mission','platform','cloud','angle','incidence','resolution','gsd','product','id')) and not any(t in lk for t in ('geometry','latitude','longitude','coord')):
-                                          keep[k]=v
-                                  matches.append({'layer':lu,'dates':[(k,d.isoformat()) for k,d in in_window],'metadata':keep})
-                      except Exception as e:
-                          services.append({'layer_error':lu,'error':str(e)})
-              except Exception as e:
-                  services.append({'service_error':root,'error':str(e)})
-
-          out={'generated_utc':datetime.datetime.now(datetime.timezone.utc).isoformat(),
-               'source':'Airbus public Archive Preview / ArcGIS backend',
-               'window':'2026-08-18 through 2026-08-22 UTC',
-               'scope':'Broad AI-39 corridor; metadata-only availability check',
-               'app_items':item_records,'service_urls':sorted(service_urls),'services':services,
-               'matches_count':len(matches),'matches':matches,
-               'raw_url_hints':sorted([u for u in raw_urls if 'airbus' in u.lower() or 'oneatlas' in u.lower()])[:100],
-               'safety':'No exact VHR footprint geometries or tactical coordinates retained.'}
-          with open('out/airbus_vhr_check.json','w') as f: json.dump(out,f,indent=2,default=str)
-          print(json.dumps(out,indent=2,default=str)[:60000])
+          all_rows.sort(key=lambda x:abs(x['days_from_event']))
+          out={
+              'generated_utc':datetime.datetime.now(datetime.timezone.utc).isoformat(),
+              'window_utc':[START.isoformat(),NOW.isoformat()],
+              'event_anchor_utc':EVENT.isoformat(),
+              'scope':'Broad AI-39 corridor; Airbus archive metadata only',
+              'by_sensor':results,
+              'nearest_any':all_rows[:20],
+              'strict_post_event_vhr':[x for x in all_rows if x['days_from_event']>=0 and x['sensor_class'] in ('Pleiades Neo 30cm','Pleiades 50cm')][:20],
+              'safety':'No exact footprint geometries or tactical coordinates retained.'
+          }
+          with open('out/airbus_vhr_30d.json','w') as f: json.dump(out,f,indent=2)
+          print(json.dumps(out,indent=2)[:60000])
           PY
       - uses: actions/upload-artifact@v4
         with:
-          name: ai39-airbus-vhr-check
-          path: out/airbus_vhr_check.json
+          name: ai39-airbus-vhr-30d
+          path: out/airbus_vhr_30d.json
           if-no-files-found: error
           retention-days: 2
