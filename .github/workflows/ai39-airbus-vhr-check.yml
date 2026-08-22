@@ -15,6 +15,8 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+      - name: Install dependency
+        run: python -m pip install --disable-pip-version-check requests
       - name: Inspect public Airbus Archive Preview backend
         shell: bash
         run: |
@@ -64,7 +66,7 @@ jobs:
               try:
                   meta=item_meta(iid); data=item_data(iid)
                   item_records.append({'id':iid,'title':meta.get('title'),'type':meta.get('type'),'url':meta.get('url'),'access':meta.get('access')})
-                  walk(meta); before=set(discovered_ids); walk(data)
+                  walk(meta); walk(data)
                   if meta.get('url') and any(k in meta['url'] for k in ('FeatureServer','MapServer','ImageServer')): service_urls.add(meta['url'])
                   if depth<2:
                       for nid in discovered_ids-seen:
@@ -72,7 +74,6 @@ jobs:
               except Exception as e:
                   item_records.append({'id':iid,'error':str(e)})
 
-          # Portal search fallback for likely archive web maps/services.
           try:
               sr=get_json(f'{PORTAL}/search',{'f':'json','q':'(archive OR imagery) AND (Pleiades OR optical OR OneAtlas)','num':100})
               for it in sr.get('results',[]):
@@ -84,18 +85,12 @@ jobs:
           except Exception as e:
               item_records.append({'portal_search_error':str(e)})
 
-          # Normalize service roots / layer URLs.
-          norm=set()
-          for u in service_urls:
-              u=u.split('?')[0].rstrip('/')
-              norm.add(u)
-          service_urls=norm
+          service_urls={u.split('?')[0].rstrip('/') for u in service_urls}
 
           def parse_dt(v):
               if v is None: return None
               if isinstance(v,(int,float)):
                   try:
-                      # ArcGIS dates usually epoch ms
                       if v>1e11: return datetime.datetime.fromtimestamp(v/1000,tz=datetime.timezone.utc)
                       if v>1e9: return datetime.datetime.fromtimestamp(v,tz=datetime.timezone.utc)
                   except: return None
@@ -119,12 +114,10 @@ jobs:
               return candidates
 
           services=[]; matches=[]
-          # Explore service metadata and query footprint-like layers intersecting AOI.
           for root in sorted(service_urls):
               try:
                   meta=get_json(root,{'f':'json'})
-                  rec={'url':root,'name':meta.get('name'),'type':meta.get('type'),'layers':meta.get('layers'),'fields':meta.get('fields')}
-                  services.append(rec)
+                  services.append({'url':root,'name':meta.get('name'),'type':meta.get('type'),'layers':meta.get('layers'),'fields':meta.get('fields')})
                   layer_urls=[]
                   if meta.get('layers'):
                       for lyr in meta['layers'][:30]: layer_urls.append(root+'/'+str(lyr['id']))
@@ -132,48 +125,34 @@ jobs:
                       layer_urls=[root]
                   for lu in layer_urls:
                       try:
-                          lm=get_json(lu,{'f':'json'})
-                          fields=[f.get('name') for f in lm.get('fields',[]) if f.get('name')]
-                          # Query all footprints intersecting broad AOI; no exact target output is retained.
                           qurl=lu+'/query'
-                          params={
-                              'f':'json','where':'1=1','geometry':','.join(map(str,BBOX)),
-                              'geometryType':'esriGeometryEnvelope','inSR':'4326','spatialRel':'esriSpatialRelIntersects',
-                              'outFields':'*','returnGeometry':'false','resultRecordCount':500
-                          }
+                          params={'f':'json','where':'1=1','geometry':','.join(map(str,BBOX)),
+                                  'geometryType':'esriGeometryEnvelope','inSR':'4326','spatialRel':'esriSpatialRelIntersects',
+                                  'outFields':'*','returnGeometry':'false','resultRecordCount':500}
                           qr=get_json(qurl,params)
-                          feats=qr.get('features',[])
-                          for feat in feats:
+                          for feat in qr.get('features',[]):
                               a=feat.get('attributes') or {}
-                              dts=record_date(a)
-                              in_window=[(k,d) for k,d in dts if START<=d<END]
+                              in_window=[(k,d) for k,d in record_date(a) if START<=d<END]
                               if in_window:
-                                  # retain non-sensitive acquisition metadata only
                                   keep={}
                                   for k,v in a.items():
                                       lk=k.lower()
-                                      if any(t in lk for t in ('date','time','acq','sensor','sat','mission','platform','cloud','angle','incidence','resolution','gsd','product','id')):
-                                          if not any(t in lk for t in ('geometry','latitude','longitude','coord')):
-                                              keep[k]=v
+                                      if any(t in lk for t in ('date','time','acq','sensor','sat','mission','platform','cloud','angle','incidence','resolution','gsd','product','id')) and not any(t in lk for t in ('geometry','latitude','longitude','coord')):
+                                          keep[k]=v
                                   matches.append({'layer':lu,'dates':[(k,d.isoformat()) for k,d in in_window],'metadata':keep})
                       except Exception as e:
                           services.append({'layer_error':lu,'error':str(e)})
               except Exception as e:
                   services.append({'service_error':root,'error':str(e)})
 
-          out={
-              'generated_utc':datetime.datetime.now(datetime.timezone.utc).isoformat(),
-              'source':'Airbus public Archive Preview / ArcGIS backend',
-              'window':'2026-08-18 through 2026-08-22 UTC',
-              'scope':'Broad AI-39 corridor; metadata-only availability check',
-              'app_items':item_records,
-              'service_urls':sorted(service_urls),
-              'services':services,
-              'matches_count':len(matches),
-              'matches':matches,
-              'raw_url_hints':sorted([u for u in raw_urls if 'airbus' in u.lower() or 'oneatlas' in u.lower()])[:100],
-              'safety':'No exact VHR footprint geometries or tactical coordinates retained.'
-          }
+          out={'generated_utc':datetime.datetime.now(datetime.timezone.utc).isoformat(),
+               'source':'Airbus public Archive Preview / ArcGIS backend',
+               'window':'2026-08-18 through 2026-08-22 UTC',
+               'scope':'Broad AI-39 corridor; metadata-only availability check',
+               'app_items':item_records,'service_urls':sorted(service_urls),'services':services,
+               'matches_count':len(matches),'matches':matches,
+               'raw_url_hints':sorted([u for u in raw_urls if 'airbus' in u.lower() or 'oneatlas' in u.lower()])[:100],
+               'safety':'No exact VHR footprint geometries or tactical coordinates retained.'}
           with open('out/airbus_vhr_check.json','w') as f: json.dump(out,f,indent=2,default=str)
           print(json.dumps(out,indent=2,default=str)[:60000])
           PY
