@@ -1,0 +1,194 @@
+name: AI39 OAKOC what-if context
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  context:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install --disable-pip-version-check requests numpy rasterio pystac-client planetary-computer
+      - name: Build broad terrain and what-if context
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          python - <<'PY'
+          import json, math, warnings
+          from datetime import datetime, timezone
+          import numpy as np
+          import requests, rasterio
+          from rasterio.warp import reproject
+          from rasterio.enums import Resampling
+          from rasterio.transform import from_bounds
+
+          warnings.filterwarnings('ignore')
+          BBOX=[37.65,48.45,38.25,48.90]
+          W,H=1200,900
+          tr=from_bounds(*BBOX,W,H)
+          STAC='https://earth-search.aws.element84.com/v1/search'
+
+          def rp(href, dtype='float32', resampling=Resampling.bilinear):
+              out=np.zeros((H,W),dtype=dtype)
+              with rasterio.Env(AWS_NO_SIGN_REQUEST='YES',GDAL_DISABLE_READDIR_ON_OPEN='EMPTY_DIR'):
+                  with rasterio.open(href) as ds:
+                      reproject(source=rasterio.band(ds,1),destination=out,src_transform=ds.transform,src_crs=ds.crs,
+                                src_nodata=ds.nodata,dst_transform=tr,dst_crs='EPSG:4326',dst_nodata=0,resampling=resampling)
+              return out
+
+          def search_s2(day):
+              r=requests.post(STAC,json={'collections':['sentinel-2-c1-l2a'],'bbox':BBOX,
+                  'datetime':day+'T00:00:00Z/'+day+'T23:59:59Z','limit':100},timeout=90)
+              r.raise_for_status(); return r.json().get('features',[])
+
+          def mosaic(day):
+              items=search_s2(day)
+              red=np.zeros((H,W),np.float32); green=np.zeros_like(red); nir=np.zeros_like(red); swir=np.zeros_like(red); scl=np.zeros((H,W),np.uint8)
+              ids=[]
+              for it in items:
+                  a=it.get('assets',{}); req=['red','green','nir08','swir16','swir22','scl']
+                  if not all((a.get(k) or {}).get('href') for k in req): continue
+                  try:
+                      rr=rp(a['red']['href']); gg=rp(a['green']['href']); nn=rp(a['nir08']['href']); s16=rp(a['swir16']['href']); s22=rp(a['swir22']['href']); cc=rp(a['scl']['href'],'uint8',Resampling.nearest)
+                  except Exception:
+                      continue
+                  m=(rr>0)&(gg>0)&(nn>0)&(s16>0)&(s22>0)
+                  red[m]=rr[m]; green[m]=gg[m]; nir[m]=nn[m]; swir[m]=s16[m]; scl[m]=cc[m]
+                  ids.append(it.get('id'))
+              valid=(red>0)&(green>0)&(nir>0)&(swir>0)
+              clear=valid & np.isin(scl,[2,4,5,6,7])
+              ndvi=np.full((H,W),np.nan,np.float32); ndwi=np.full_like(ndvi,np.nan); ndbi=np.full_like(ndvi,np.nan); nbr=np.full_like(ndvi,np.nan)
+              ndvi[clear]=(nir[clear]-red[clear])/(nir[clear]+red[clear]+1e-6)
+              ndwi[clear]=(green[clear]-nir[clear])/(green[clear]+nir[clear]+1e-6)
+              ndbi[clear]=(swir[clear]-nir[clear])/(swir[clear]+nir[clear]+1e-6)
+              # Use SWIR16 as a stable context proxy here; event dNBR workflow used SWIR22.
+              nbr[clear]=(nir[clear]-swir[clear])/(nir[clear]+swir[clear]+1e-6)
+              return {'ids':ids,'clear':clear,'ndvi':ndvi,'ndwi':ndwi,'ndbi':ndbi,'nbr':nbr}
+
+          s17=mosaic('2026-08-17'); s20=mosaic('2026-08-20')
+          overlap=s17['clear']&s20['clear']
+          dnbr=s20['nbr']-s17['nbr']
+
+          # Optional Copernicus DEM from Planetary Computer. Failure does not invalidate optical context.
+          dem=np.full((H,W),np.nan,np.float32); dem_ok=False; dem_ids=[]
+          try:
+              from pystac_client import Client
+              import planetary_computer
+              cat=Client.open('https://planetarycomputer.microsoft.com/api/stac/v1')
+              sr=cat.search(collections=['cop-dem-glo-30'],bbox=BBOX)
+              its=list(sr.items())
+              for it in its[:20]:
+                  planetary_computer.sign_inplace(it)
+                  # collection usually exposes 'data' asset
+                  asset=it.assets.get('data') or next((a for a in it.assets.values() if 'tif' in a.href.lower()),None)
+                  if not asset: continue
+                  try:
+                      tmp=np.full((H,W),np.nan,np.float32)
+                      with rasterio.open(asset.href) as ds:
+                          reproject(source=rasterio.band(ds,1),destination=tmp,src_transform=ds.transform,src_crs=ds.crs,
+                                    src_nodata=ds.nodata,dst_transform=tr,dst_crs='EPSG:4326',dst_nodata=np.nan,resampling=Resampling.bilinear)
+                      m=np.isfinite(tmp)
+                      dem[m]=tmp[m]; dem_ids.append(it.id)
+                  except Exception:
+                      pass
+              dem_ok=np.isfinite(dem).mean()>0.5
+          except Exception as e:
+              dem_error=str(e)
+
+          # Slope proxy from DEM in metres per pixel, approximate local scale.
+          slope=np.full((H,W),np.nan,np.float32)
+          if dem_ok:
+              lat=(BBOX[1]+BBOX[3])/2
+              dx=((BBOX[2]-BBOX[0])*111320*math.cos(math.radians(lat)))/W
+              dy=((BBOX[3]-BBOX[1])*110540)/H
+              gy,gx=np.gradient(dem,dy,dx)
+              slope=np.degrees(np.arctan(np.sqrt(gx*gx+gy*gy)))
+
+          cells=[]
+          for rr in range(4):
+              for cc in range(4):
+                  ys=slice(rr*H//4,(rr+1)*H//4); xs=slice(cc*W//4,(cc+1)*W//4)
+                  cl=s20['clear'][ys,xs]; ov=overlap[ys,xs]
+                  n=s20['ndvi'][ys,xs]; w=s20['ndwi'][ys,xs]; b=s20['ndbi'][ys,xs]; db=dnbr[ys,xs]
+                  rec={'sector':f"{'ABCD'[cc]}{rr+1}", 'clear_percent':round(float(cl.mean()*100),1), 'pair_overlap_percent':round(float(ov.mean()*100),1)}
+                  if cl.sum()>100:
+                      rec['vegetation_percent']=round(float(((n>0.45)&cl).sum()/cl.sum()*100),1)
+                      rec['water_percent']=round(float(((w>0.15)&cl).sum()/cl.sum()*100),1)
+                      rec['built_bare_proxy_percent']=round(float((((b>0.05)&(n<0.35)&(w<0.10))&cl).sum()/cl.sum()*100),1)
+                  if ov.sum()>100:
+                      vals=db[ov]
+                      rec['surface_change_strong_percent']=round(float((np.abs(vals)>=0.15).mean()*100),1)
+                      rec['burn_loss_like_percent']=round(float((vals<=-0.20).mean()*100),1)
+                      rec['median_abs_delta_nbr']=round(float(np.median(np.abs(vals))),3)
+                  if dem_ok:
+                      dd=dem[ys,xs]; ss=slope[ys,xs]; m=np.isfinite(dd)&np.isfinite(ss)
+                      if m.sum()>100:
+                          rec['elev_range_m']=round(float(np.nanpercentile(dd[m],95)-np.nanpercentile(dd[m],5)),1)
+                          rec['slope_median_deg']=round(float(np.nanmedian(ss[m])),1)
+                          rec['steep_percent']=round(float((ss[m]>8).mean()*100),1)
+                  # OAKOC-derived broad context scores 0-10; not route or presence inference.
+                  veg=rec.get('vegetation_percent',0)/100; wat=rec.get('water_percent',0)/100; bb=rec.get('built_bare_proxy_percent',0)/100
+                  steep=rec.get('steep_percent',0)/100
+                  obs=max(0,min(1,1-(0.60*veg+0.45*bb+0.35*steep+0.25*wat)))
+                  obstacles=max(0,min(1,0.55*steep+0.35*wat+0.30*veg))
+                  conceal=max(0,min(1,0.55*veg+0.45*bb+0.20*steep))
+                  access=max(0,min(1,0.45*(1-steep)+0.35*(1-wat)+0.20*bb))
+                  functional=max(0,min(1,0.55*bb+0.30*access+0.15*(1-veg)))
+                  rec['context_scores_0_10']={
+                      'observation_openness':round(obs*10,1),
+                      'access_potential_broad':round(access*10,1),
+                      'functional_concentration_proxy':round(functional*10,1),
+                      'obstacle_load':round(obstacles*10,1),
+                      'cover_concealment_proxy':round(conceal*10,1),
+                  }
+                  # Search priority asks where additional sensors would reduce uncertainty, not where people are.
+                  ch=rec.get('surface_change_strong_percent',0)/100
+                  context=0.35*ch+0.25*functional+0.20*bb+0.20*access
+                  rec['followup_priority_0_10']=round(min(1,context)*10,1)
+                  cells.append(rec)
+
+          cells_sorted=sorted(cells,key=lambda x:x['followup_priority_0_10'],reverse=True)
+          what_if=[
+            {'id':'W1','scenario':'Persistent human use resumed','expected':['repeated/persistent surface changes','functional/built context','night-light or infrastructure recovery proxy','multiple dates rather than one spike'],'falsifiers':['single transient signal only','agricultural geometry/seasonality explains optical change','no persistence across later dates']},
+            {'id':'W2','scenario':'Repair or clearance without persistent habitation','expected':['structural/ground change persists','possible SAR change','weak or absent recurring night-light/thermal signal'],'falsifiers':['repeated independent activity proxies continue after works']},
+            {'id':'W3','scenario':'Agricultural/vegetation false positive','expected':['regular field-scale pattern','strong NDVI/NBR seasonality','low functional/built context'],'falsifiers':['persistent structural/VHR change','urban/infrastructure context plus independent recovery signals']},
+            {'id':'W4','scenario':'Moisture/weather-driven SAR change','expected':['SAR change without matching durable optical structure change','short persistence','regional rather than localized pattern'],'falsifiers':['VHR/optical structural change persists across dry dates']},
+            {'id':'W5','scenario':'Fire/hot episode','expected':['thermal spike then decline','negative optical surface-change signature','possible SAR response'],'falsifiers':['no thermal timing support and change predates heat substantially']},
+            {'id':'W6','scenario':'Legacy damage or old change misread as new','expected':['same anomaly already visible in earlier baseline'],'falsifiers':['clean pre-event baseline followed by onset on multiple sensors']},
+            {'id':'W7','scenario':'Sensor/processing artifact','expected':['one sensor or one viewing geometry only','poor cloud/overlap quality'],'falsifiers':['independent sensor families agree in time and broad location']},
+          ]
+
+          out={
+            'generated_utc':datetime.now(timezone.utc).isoformat(),
+            'scope':'AI-39 broad 4x4 research sectors; context only, no route or target-level output',
+            'optical_pair':['2026-08-17','2026-08-20'],
+            's2_product_ids':{'2026-08-17':s17['ids'],'2026-08-20':s20['ids']},
+            'dem_status':'available' if dem_ok else 'unavailable',
+            'dem_ids':dem_ids,
+            'cells':cells,
+            'priority_order':[{'sector':c['sector'],'followup_priority_0_10':c['followup_priority_0_10']} for c in cells_sorted],
+            'what_if_matrix':what_if,
+            'interpretation_rules':[
+              'OAKOC-derived scores are terrain/context priors, not evidence that people are present.',
+              'Human-activity inference requires persistence plus independent sensor or infrastructure corroboration.',
+              'Absence of a signal is not proof of absence of people.',
+              'Broad sectors are intentionally non-route-specific and non-targetable.'
+            ]
+          }
+          json.dump(out,open('out/oakoc_whatif.json','w'),indent=2)
+          print(json.dumps({'dem_status':out['dem_status'],'priority_order':out['priority_order'],'top3':[cells_sorted[i] for i in range(min(3,len(cells_sorted)))]},indent=2))
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ai39-oakoc-whatif
+          path: out/oakoc_whatif.json
+          if-no-files-found: error
+          retention-days: 2
