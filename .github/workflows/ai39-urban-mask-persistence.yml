@@ -1,0 +1,210 @@
+name: AI39 corrected urban-mask persistence
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  urban:
+    runs-on: ubuntu-latest
+    timeout-minutes: 22
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install --disable-pip-version-check requests numpy rasterio pystac-client planetary-computer
+      - name: Analyze persistent change inside historic built-area mask
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          python - <<'PY'
+          import json
+          from collections import defaultdict
+          from datetime import datetime, timezone
+          import numpy as np, requests, rasterio
+          from rasterio.warp import reproject
+          from rasterio.enums import Resampling
+          from rasterio.transform import from_bounds
+          from pystac_client import Client
+          import planetary_computer
+
+          BBOX=[37.65,48.45,38.25,48.90]
+          W,H=480,360
+          DST_TR=from_bounds(*BBOX,W,H)
+          TARGET_SECTORS=['C2','B3','C3','A4','A1']
+
+          def reproj(href,resampling,dtype='float32'):
+              dst=np.zeros((H,W),dtype=dtype)
+              with rasterio.Env(AWS_NO_SIGN_REQUEST='YES',GDAL_DISABLE_READDIR_ON_OPEN='EMPTY_DIR',GDAL_HTTP_MULTIRANGE='YES'):
+                  with rasterio.open(href) as ds:
+                      reproject(source=rasterio.band(ds,1),destination=dst,
+                                src_transform=ds.transform,src_crs=ds.crs,src_nodata=ds.nodata,
+                                dst_transform=DST_TR,dst_crs='EPSG:4326',dst_nodata=0,
+                                resampling=resampling,num_threads=2)
+              return dst
+
+          # Historic built-area prior (2023). Context mask only, never treated as current occupancy evidence.
+          pc=Client.open('https://planetarycomputer.microsoft.com/api/stac/v1',modifier=planetary_computer.sign_inplace)
+          lc_items=list(pc.search(collections=['io-lulc-9-class'],bbox=BBOX,datetime='2023-01-01/2023-12-31').items())
+          lc=np.zeros((H,W),np.uint8); lc_ids=[]
+          for it in lc_items:
+              asset=it.assets.get('data') or it.assets.get('map') or next((a for a in it.assets.values() if a.href.lower().endswith(('.tif','.tiff'))),None)
+              if not asset: continue
+              tmp=np.zeros((H,W),np.uint8)
+              try:
+                  with rasterio.open(asset.href) as ds:
+                      reproject(source=rasterio.band(ds,1),destination=tmp,src_transform=ds.transform,src_crs=ds.crs,
+                                src_nodata=ds.nodata,dst_transform=DST_TR,dst_crs='EPSG:4326',dst_nodata=0,
+                                resampling=Resampling.nearest)
+                  m=tmp>0; lc[m]=tmp[m]; lc_ids.append(it.id)
+              except Exception:
+                  pass
+          if (lc>0).mean()<0.5: raise SystemExit('Insufficient land-cover coverage')
+          built=(lc==7)
+
+          # Sentinel-2 30-day inventory.
+          STAC='https://earth-search.aws.element84.com/v1/search'
+          r=requests.post(STAC,json={'collections':['sentinel-2-c1-l2a'],'bbox':BBOX,
+                                    'datetime':'2026-07-24T00:00:00Z/2026-08-22T23:59:59Z','limit':500},timeout=120)
+          r.raise_for_status(); items=r.json().get('features',[])
+          groups=defaultdict(list)
+          for it in items:
+              p=it.get('properties',{}); dt=p.get('datetime') or ''
+              if dt: groups[(dt[:16],p.get('platform') or 'unknown')].append(it)
+
+          scenes=[]
+          for (dtminute,platform),its in sorted(groups.items()):
+              arrs={k:np.zeros((H,W),np.float32) for k in ['blue','red','nir','swir1','swir2']}
+              scl=np.zeros((H,W),np.uint8); pids=[]
+              for it in its:
+                  a=it.get('assets',{})
+                  keys={'blue':'blue','red':'red','nir':'nir08','swir1':'swir16','swir2':'swir22','scl':'scl'}
+                  if not all((a.get(v) or {}).get('href') for v in keys.values()): continue
+                  try:
+                      tmp={k:reproj(a[v]['href'],Resampling.bilinear) for k,v in keys.items() if k!='scl'}
+                      cc=reproj(a['scl']['href'],Resampling.nearest,'uint8')
+                  except Exception:
+                      continue
+                  m=np.ones((H,W),bool)
+                  for v in tmp.values(): m &= v>0
+                  fill=m & (arrs['red']<=0)
+                  for k,v in tmp.items(): arrs[k][fill]=v[fill]
+                  scl[fill]=cc[fill]; pids.append(it.get('id'))
+              valid=np.ones((H,W),bool)
+              for v in arrs.values(): valid &= v>0
+              if valid.mean()<0.30: continue
+              clear=valid & np.isin(scl,[2,4,5,6,7])
+              if clear.mean()<0.12: continue
+              b,r0,n,s1,s2=arrs['blue'],arrs['red'],arrs['nir'],arrs['swir1'],arrs['swir2']
+              def idx(num,den):
+                  out=np.full((H,W),np.nan,np.float32); out[clear]=num[clear]/(den[clear]+1e-6); return out
+              ndvi=idx(n-r0,n+r0)
+              nbr=idx(n-s2,n+s2)
+              ndbi=idx(s1-n,s1+n)  # correct NDBI uses SWIR1, not SWIR2
+              bsi=idx((s1+r0)-(n+b),(s1+r0)+(n+b))
+              scenes.append({'date':dtminute[:10],'datetime':dtminute+':00Z','platform':platform,'ids':sorted(pids),
+                             'clear':clear,'ndvi':ndvi,'nbr':nbr,'ndbi':ndbi,'bsi':bsi,'clear_pct':float(clear.mean()*100)})
+
+          # Best acquisition per day.
+          byday=defaultdict(list)
+          for s in scenes: byday[s['date']].append(s)
+          daily=[]
+          for day,ss in sorted(byday.items()):
+              ss.sort(key=lambda x:x['clear_pct'],reverse=True); daily.append(ss[0])
+          if len(daily)<4: raise SystemExit(f'Only {len(daily)} usable daily scenes')
+
+          letters='ABCD'
+          def sec_slice(sec):
+              cc=letters.index(sec[0]); rr=int(sec[1])-1
+              return slice(rr*H//4,(rr+1)*H//4),slice(cc*W//4,(cc+1)*W//4)
+
+          # Per-date summaries inside historic built pixels only.
+          per_sector={}
+          for sec in TARGET_SECTORS:
+              ys,xs=sec_slice(sec); bm=built[ys,xs]
+              records=[]
+              for s in daily:
+                  m=bm & s['clear'][ys,xs]
+                  rec={'date':s['date'],'built_clear_pixels':int(m.sum()),'built_clear_percent_of_sector':round(float(m.mean()*100),2)}
+                  if m.sum()>=40:
+                      for name in ['ndvi','nbr','ndbi','bsi']:
+                          vals=s[name][ys,xs][m]
+                          rec['median_'+name]=round(float(np.nanmedian(vals)),4)
+                      rec['built_surface_proxy_percent']=round(float(((s['ndbi'][ys,xs][m]>0)&(s['bsi'][ys,xs][m]>-0.1)).mean()*100),2)
+                  records.append(rec)
+              per_sector[sec]={'historic_built_percent_of_sector':round(float(bm.mean()*100),2),'dates':records}
+
+          # Early-vs-late robust pixel state, built pixels only.
+          summaries=[]
+          for sec in TARGET_SECTORS:
+              ys,xs=sec_slice(sec); bm=built[ys,xs]
+              if bm.sum()<40:
+                  summaries.append({'sector':sec,'status':'INSUFFICIENT_BUILT_MASK'}); continue
+              # first and last up to 3 daily scenes; median per pixel with >=2 observations in each epoch
+              early=daily[:min(3,len(daily))]; late=daily[max(0,len(daily)-3):]
+              stacks={}
+              for name in ['ndvi','nbr','ndbi','bsi']:
+                  E=np.stack([s[name][ys,xs] for s in early]); L=np.stack([s[name][ys,xs] for s in late])
+                  ec=np.sum(np.isfinite(E),axis=0); lc2=np.sum(np.isfinite(L),axis=0)
+                  with np.errstate(all='ignore'):
+                      em=np.nanmedian(E,axis=0); lm=np.nanmedian(L,axis=0)
+                  stacks[name]=(em,lm,ec,lc2)
+              valid=bm.copy()
+              for em,lm,ec,lc2 in stacks.values(): valid &= (ec>=2)&(lc2>=2)&np.isfinite(em)&np.isfinite(lm)
+              rec={'sector':sec,'historic_built_percent_of_sector':round(float(bm.mean()*100),2),
+                   'valid_early_late_built_pixels':int(valid.sum()),
+                   'early_dates':[s['date'] for s in early],'late_dates':[s['date'] for s in late]}
+              if valid.sum()>=40:
+                  deltas={name:(lm-em) for name,(em,lm,_,_) in stacks.items()}
+                  for name,delta in deltas.items():
+                      rec['median_delta_'+name]=round(float(np.nanmedian(delta[valid])),4)
+                      rec['pct_abs_delta_'+name+'_ge_0_10']=round(float((np.abs(delta[valid])>=0.10).mean()*100),2)
+                  # Heuristic: independent built/ground indices change while vegetation shift is modest.
+                  structurallike=((np.abs(deltas['ndbi'])>=0.10)|(np.abs(deltas['bsi'])>=0.10)) & (np.abs(deltas['ndvi'])<0.10)
+                  burnlike=(deltas['nbr']<=-0.20)
+                  rec['built_surface_change_like_percent']=round(float(structurallike[valid].mean()*100),2)
+                  rec['burn_loss_like_percent']=round(float(burnlike[valid].mean()*100),2)
+                  # Persistence test across consecutive daily pairs inside built mask.
+                  pair_fracs=[]
+                  for a,z in zip(daily[:-1],daily[1:]):
+                      pm=bm & a['clear'][ys,xs] & z['clear'][ys,xs]
+                      if pm.sum()<40: continue
+                      ddn=z['ndbi'][ys,xs]-a['ndbi'][ys,xs]
+                      ddb=z['bsi'][ys,xs]-a['bsi'][ys,xs]
+                      ddv=z['ndvi'][ys,xs]-a['ndvi'][ys,xs]
+                      pp=(((np.abs(ddn)>=0.10)|(np.abs(ddb)>=0.10))&(np.abs(ddv)<0.10)&pm)
+                      pair_fracs.append({'from':a['date'],'to':z['date'],'valid_built_pixels':int(pm.sum()),
+                                         'built_surface_change_like_percent':round(float(pp.sum()/pm.sum()*100),2)})
+                  rec['pairwise']=pair_fracs
+                  strong_pairs=[p for p in pair_fracs if p['built_surface_change_like_percent']>=1.0]
+                  rec['repeat_pairs_ge_1pct']=len(strong_pairs)
+                  rec['max_pair_change_percent']=max([p['built_surface_change_like_percent'] for p in pair_fracs] or [0])
+                  rec['status']='MEASURED'
+              else: rec['status']='INSUFFICIENT_CLEAR_BUILT_PIXELS'
+              rec['interpretation']='Broad built-mask spectral change triage only. It can support repair/clearance/surface-change hypotheses but cannot identify people, occupancy, a building, or a route.'
+              summaries.append(rec)
+
+          out={'generated_utc':datetime.now(timezone.utc).isoformat(),
+               'scope':'Broad 4x4 sector urban-mask persistence; non-route, non-target-level',
+               'window':['2026-07-24','2026-08-22'],'usable_dates':[s['date'] for s in daily],
+               'landcover_source':'Impact Observatory / io-lulc-9-class 2023; class 7 built-area used only as historic context mask',
+               'landcover_items':lc_ids,'indices':{
+                 'NDVI':'(NIR-Red)/(NIR+Red)','NBR':'(NIR-SWIR2)/(NIR+SWIR2)',
+                 'NDBI':'(SWIR1-NIR)/(SWIR1+NIR)','BSI':'((SWIR1+Red)-(NIR+Blue))/((SWIR1+Red)+(NIR+Blue))'},
+               'sector_series':per_sector,'summaries':summaries,
+               'guardrails':['No presence/occupancy claim from EO alone.','2023 built mask is a prior, not 2026 truth.',
+                             'Broad spectral indices cannot detect individual new buildings at Sentinel-2 resolution.',
+                             'VHR imagery is required for building-level confirmation.']}
+          json.dump(out,open('out/urban_mask_persistence.json','w'),indent=2)
+          print(json.dumps({'usable_dates':out['usable_dates'],'summaries':summaries},indent=2))
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ai39-urban-mask-persistence
+          path: out/urban_mask_persistence.json
+          if-no-files-found: error
+          retention-days: 2
