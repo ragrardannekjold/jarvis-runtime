@@ -1,0 +1,76 @@
+name: AI39 VIIRS thermal
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  thermal:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install --disable-pip-version-check requests pillow numpy
+      - name: Query NASA GIBS thermal-anomaly layers
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          python - <<'PY'
+          import io,json
+          from datetime import datetime,timezone
+          import requests,numpy as np
+          from PIL import Image
+
+          WMS='https://gibs.earthdata.nasa.gov/wms/epsg4326/best/wms.cgi'
+          BBOX='37.65,48.45,38.25,48.90'
+          W,H=800,600
+          DATES=['2026-08-17','2026-08-18','2026-08-19','2026-08-20']
+          LAYERS=[
+            'VIIRS_SNPP_Thermal_Anomalies_375m_All',
+            'VIIRS_NOAA20_Thermal_Anomalies_375m_All',
+            'VIIRS_NOAA21_Thermal_Anomalies_375m_All',
+          ]
+          out=[]
+          for date in DATES:
+              daily={'date':date,'layers':[],'cells_4x4':[]}
+              union=np.zeros((H,W),dtype=bool)
+              for layer in LAYERS:
+                  params={'SERVICE':'WMS','VERSION':'1.1.1','REQUEST':'GetMap','TIME':date+'T00:00:00Z','LAYERS':layer,
+                          'FORMAT':'image/png','STYLES':'','HEIGHT':H,'SRS':'epsg:4326','WIDTH':W,'BBOX':BBOX,'TRANSPARENT':'TRUE'}
+                  r=requests.get(WMS,params=params,timeout=90); r.raise_for_status()
+                  ctype=r.headers.get('content-type','')
+                  if 'image' not in ctype.lower():
+                      raise RuntimeError(f'{layer} {date} returned {ctype}: {r.text[:300]}')
+                  im=Image.open(io.BytesIO(r.content)).convert('RGBA'); a=np.array(im)
+                  mask=a[:,:,3]>0
+                  union|=mask
+                  im.save(f'out/{date}_{layer}.png',optimize=True)
+                  daily['layers'].append({'layer':layer,'nontransparent_pixels':int(mask.sum()),'coverage_fraction':round(float(mask.mean()),8)})
+              # Coarse sector support only; pixel counts are rendered-symbol area, not fire counts.
+              for rr in range(4):
+                  for cc in range(4):
+                      ys=slice(rr*H//4,(rr+1)*H//4); xs=slice(cc*W//4,(cc+1)*W//4)
+                      m=union[ys,xs]
+                      daily['cells_4x4'].append({'row':rr,'col':cc,'thermal_symbol_pixels':int(m.sum()),'presence':bool(m.any())})
+              daily['union_nontransparent_pixels']=int(union.sum())
+              # save union visualization
+              rgba=np.zeros((H,W,4),np.uint8); rgba[union]=[255,0,0,255]
+              Image.fromarray(rgba).save(f'out/{date}_union.png',optimize=True)
+              out.append(daily)
+          rec={'generated_utc':datetime.now(timezone.utc).isoformat(),'source':'NASA GIBS VIIRS thermal anomaly WMS',
+               'dates':out,'interpretation_limit':'Rendered thermal-symbol pixels indicate VIIRS thermal-anomaly detections, not burned area or cause. Fires, hot smoke, industrial heat and other hot sources are possible; sector counts are deliberately coarse and not detection counts.',
+               'safety':'Broad 4x4 sector corroboration only; no coordinates.'}
+          json.dump(rec,open('out/analysis.json','w'),indent=2); print(json.dumps(rec,indent=2))
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ai39-viirs-thermal
+          path: out/
+          if-no-files-found: error
+          retention-days: 2
