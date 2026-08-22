@@ -1,0 +1,100 @@
+name: AI39 EO visual COG
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  visual:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install --disable-pip-version-check requests numpy pillow rasterio
+      - name: Render broad corridor from archive-native visual COGs
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          python - <<'PY'
+          import json, os
+          from datetime import datetime, timezone
+          import requests, numpy as np, rasterio
+          from PIL import Image
+          from rasterio.warp import reproject
+          from rasterio.enums import Resampling
+          from rasterio.transform import from_bounds
+
+          STAC='https://earth-search.aws.element84.com/v1/search'
+          BBOX=[37.65,48.45,38.25,48.90]
+          W,H=1200,900
+          TARGET=['2026-08-10','2026-08-17','2026-08-18','2026-08-20']
+
+          payload={'collections':['sentinel-2-c1-l2a'],'bbox':BBOX,'datetime':'2026-08-09T00:00:00Z/2026-08-21T23:59:59Z','limit':100,
+                   'sortby':[{'field':'properties.datetime','direction':'desc'}]}
+          r=requests.post(STAC,json=payload,timeout=90); r.raise_for_status(); items=r.json().get('features',[])
+          best={}
+          for it in items:
+              iid=it.get('id',''); p=it.get('properties',{}); dt=p.get('datetime',''); date=dt[:10]
+              if '_T37UDP_' not in iid or date not in TARGET: continue
+              href=(it.get('assets',{}).get('visual') or {}).get('href')
+              if not href: continue
+              cloud=float(p.get('eo:cloud_cover') or 100)
+              row=(cloud,it,href)
+              if date not in best or cloud<best[date][0]: best[date]=row
+
+          dst_transform=from_bounds(*BBOX,W,H)
+          records=[]; arrays={}
+          for date in sorted(best):
+              cloud,it,href=best[date]
+              dst=np.zeros((3,H,W),dtype=np.uint8)
+              with rasterio.Env(AWS_NO_SIGN_REQUEST='YES',GDAL_DISABLE_READDIR_ON_OPEN='EMPTY_DIR'):
+                  with rasterio.open(href) as ds:
+                      for i in range(1,4):
+                          reproject(source=rasterio.band(ds,i),destination=dst[i-1],src_transform=ds.transform,src_crs=ds.crs,
+                                    src_nodata=ds.nodata,dst_transform=dst_transform,dst_crs='EPSG:4326',dst_nodata=0,resampling=Resampling.bilinear)
+              arrays[date]=dst
+              Image.fromarray(np.moveaxis(dst,0,-1)).save(f'out/{date}.png',optimize=True)
+              p=it.get('properties',{})
+              records.append({'date':date,'datetime':p.get('datetime'),'product_id':it.get('id'),'platform':p.get('platform'),'cloud_cover':cloud})
+
+          # Coarse, non-targetable 4x4 visual-change triage only.
+          pairs=[]
+          for a,b in [('2026-08-10','2026-08-18'),('2026-08-18','2026-08-20')]:
+              if a not in arrays or b not in arrays: continue
+              x=arrays[a].astype(np.float32); y=arrays[b].astype(np.float32)
+              valid=(x.sum(axis=0)>0)&(y.sum(axis=0)>0)
+              # Normalize each scene globally to reduce illumination/gain effects.
+              xn=x/(np.median(x[:,valid],axis=1)[:,None,None]+1e-3)
+              yn=y/(np.median(y[:,valid],axis=1)[:,None,None]+1e-3)
+              diff=np.mean(np.abs(xn-yn),axis=0)
+              cells=[]
+              for rr in range(4):
+                  for cc in range(4):
+                      ys=slice(rr*H//4,(rr+1)*H//4); xs=slice(cc*W//4,(cc+1)*W//4)
+                      v=valid[ys,xs]; d=diff[ys,xs]
+                      score=float(np.median(d[v])) if v.any() else None
+                      cells.append({'row':rr,'col':cc,'score':round(score,4) if score is not None else None})
+              vals=[c['score'] for c in cells if c['score'] is not None]
+              for c in cells:
+                  if c['score'] is not None:
+                      c['relative_rank']=1+sorted(vals,reverse=True).index(c['score'])
+              pairs.append({'pair':[a,b],'cells_4x4':cells,'interpretation_limit':'Relative visual-change triage only; seasonal agriculture, smoke, illumination and combat effects remain competing explanations.'})
+
+          rec={'generated_utc':datetime.now(timezone.utc).isoformat(),'scope':'Broad corridor render; no precise finding output',
+               'scenes':records,'coarse_change':pairs,'safety':'4x4 relative sectors only; no coordinates or target-level interpretation.'}
+          json.dump(rec,open('out/analysis.json','w'),indent=2)
+          print(json.dumps(rec,indent=2))
+          if len(records)<2: raise SystemExit('Insufficient visual scenes')
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ai39-eo-visual-cog
+          path: out/
+          if-no-files-found: error
+          retention-days: 2
