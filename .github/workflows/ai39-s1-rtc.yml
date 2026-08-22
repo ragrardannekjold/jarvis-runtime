@@ -22,11 +22,10 @@ jobs:
           set -euo pipefail
           mkdir -p out
           python - <<'PY'
-          import json, math
+          import json
           from collections import defaultdict
           from datetime import datetime, timezone
-          import numpy as np
-          import rasterio
+          import numpy as np, rasterio
           from rasterio.vrt import WarpedVRT
           from rasterio.enums import Resampling
           from rasterio.transform import from_bounds
@@ -34,104 +33,59 @@ jobs:
           import planetary_computer
           from pystac_client import Client
 
-          BBOX=[37.65,48.45,38.25,48.90]
-          W,H=800,600
-          catalog=Client.open('https://planetarycomputer.microsoft.com/api/stac/v1', modifier=planetary_computer.sign_inplace)
-          search=catalog.search(collections=['sentinel-1-rtc'], bbox=BBOX, datetime='2026-07-23/2026-08-22', max_items=300)
-          items=list(search.items())
-
+          BBOX=[37.65,48.45,38.25,48.90]; W,H=800,600
+          cat=Client.open('https://planetarycomputer.microsoft.com/api/stac/v1',modifier=planetary_computer.sign_inplace)
+          items=list(cat.search(collections=['sentinel-1-rtc'],bbox=BBOX,datetime='2026-07-23/2026-08-22',max_items=300).items())
           groups=defaultdict(list)
           for it in items:
-              p=it.properties
-              dt=it.datetime or datetime.fromisoformat((p.get('datetime') or '').replace('Z','+00:00'))
-              date=dt.date().isoformat()
-              platform=str(p.get('platform') or '').lower()
-              rel=p.get('sat:relative_orbit')
-              state=p.get('sat:orbit_state')
-              if rel is None or not platform: continue
-              if 'vv' not in it.assets or 'vh' not in it.assets: continue
-              groups[(platform,int(rel),state,date)].append(it)
-
-          # Choose a recent same-platform/same-relative-orbit pair with 8-16 day separation.
-          candidates=[]
+              p=it.properties; dt=it.datetime; date=dt.date().isoformat() if dt else (p.get('datetime') or '')[:10]
+              platform=str(p.get('platform') or '').lower(); rel=p.get('sat:relative_orbit'); state=p.get('sat:orbit_state')
+              if rel is not None and platform and 'vv' in it.assets and 'vh' in it.assets:
+                  groups[(platform,int(rel),state,date)].append(it)
           bygeom=defaultdict(dict)
-          for (platform,rel,state,date),its in groups.items():
-              bygeom[(platform,rel,state)][date]=its
-          for geom, dates in bygeom.items():
+          for (platform,rel,state,date),its in groups.items(): bygeom[(platform,rel,state)][date]=its
+          cand=[]
+          for geom,dates in bygeom.items():
               ds=sorted(dates)
               for i,a in enumerate(ds):
-                  da=datetime.fromisoformat(a)
                   for b in ds[i+1:]:
-                      db=datetime.fromisoformat(b); sep=(db-da).days
-                      if 8<=sep<=16 and b>='2026-08-20':
-                          # prefer latest endpoint, separation nearest 12d, S1D if available
-                          platform=geom[0]
-                          score=(b, -abs(sep-12), 1 if '1d' in platform else 0)
-                          candidates.append((score,geom,a,b,dates[a],dates[b]))
-          if not candidates:
-              out={'status':'NO_USABLE_RTC_PAIR','item_count':len(items),'generated_utc':datetime.now(timezone.utc).isoformat()}
-              json.dump(out,open('out/analysis.json','w'),indent=2); print(json.dumps(out,indent=2)); raise SystemExit(0)
-          candidates.sort(key=lambda x:x[0],reverse=True)
-          _,geom,date_a,date_b,items_a,items_b=candidates[0]
-
+                      sep=(datetime.fromisoformat(b)-datetime.fromisoformat(a)).days
+                      if 8<=sep<=16 and b>='2026-08-20': cand.append(((b,-abs(sep-12),1 if '1d' in geom[0] else 0),geom,a,b,dates[a],dates[b]))
+          if not cand:
+              out={'status':'NO_USABLE_RTC_PAIR','item_count':len(items)}; json.dump(out,open('out/analysis.json','w'),indent=2); print(json.dumps(out)); raise SystemExit(0)
+          cand.sort(key=lambda x:x[0],reverse=True); _,geom,date_a,date_b,ia,ib=cand[0]
           transform=from_bounds(*BBOX,W,H)
-          def mosaic(its, key):
-              dst=np.full((H,W),np.nan,np.float32)
-              ids=[]
+          def mosaic(its,key):
+              dst=np.full((H,W),np.nan,np.float32); ids=[]
               for it in its:
                   ids.append(it.id)
-                  href=it.assets[key].href
-                  with rasterio.open(href) as ds:
-                      with WarpedVRT(ds,crs='EPSG:4326',transform=transform,width=W,height=H,resampling=Resampling.bilinear,nodata=np.nan) as vrt:
-                          a=vrt.read(1).astype(np.float32)
-                  m=np.isfinite(a)&(a>0)
-                  # Overlap: keep median-ish by averaging existing and new values.
-                  both=m&np.isfinite(dst)
-                  dst[both]=(dst[both]+a[both])/2
-                  only=m&~np.isfinite(dst)
-                  dst[only]=a[only]
+                  with rasterio.open(it.assets[key].href) as ds:
+                      with WarpedVRT(ds,crs='EPSG:4326',transform=transform,width=W,height=H,resampling=Resampling.bilinear,nodata=np.nan) as vrt: a=vrt.read(1).astype(np.float32)
+                  m=np.isfinite(a)&(a!=0)
+                  both=m&np.isfinite(dst); dst[both]=(dst[both]+a[both])/2
+                  only=m&~np.isfinite(dst); dst[only]=a[only]
               return dst,sorted(ids)
-
-          va,ids_a=mosaic(items_a,'vv'); ha,_=mosaic(items_a,'vh')
-          vb,ids_b=mosaic(items_b,'vv'); hb,_=mosaic(items_b,'vh')
-          valid=np.isfinite(va)&np.isfinite(ha)&np.isfinite(vb)&np.isfinite(hb)&(va>0)&(ha>0)&(vb>0)&(hb>0)
+          va,ids_a=mosaic(ia,'vv'); ha,_=mosaic(ia,'vh'); vb,ids_b=mosaic(ib,'vv'); hb,_=mosaic(ib,'vh')
+          valid=np.isfinite(va)&np.isfinite(ha)&np.isfinite(vb)&np.isfinite(hb)&(va!=0)&(ha!=0)&(vb!=0)&(hb!=0)
           if valid.mean()<0.35:
-              out={'status':'INSUFFICIENT_RTC_OVERLAP','pair':[date_a,date_b],'valid_percent':round(float(valid.mean()*100),2),'ids_a':ids_a,'ids_b':ids_b}
-              json.dump(out,open('out/analysis.json','w'),indent=2); print(json.dumps(out,indent=2)); raise SystemExit(0)
-
-          vv_a=10*np.log10(np.maximum(va,1e-12)); vv_b=10*np.log10(np.maximum(vb,1e-12))
-          vh_a=10*np.log10(np.maximum(ha,1e-12)); vh_b=10*np.log10(np.maximum(hb,1e-12))
-          dvv=vv_b-vv_a; dvh=vh_b-vh_a
-          dratio=(vv_b-vh_b)-(vv_a-vh_a)
-          mag=np.sqrt((dvv**2+dvh**2)/2)
-
+              out={'status':'INSUFFICIENT_RTC_OVERLAP','pair':[date_a,date_b],'valid_percent':round(float(valid.mean()*100),2),'ids_a':ids_a,'ids_b':ids_b}; json.dump(out,open('out/analysis.json','w'),indent=2); print(json.dumps(out)); raise SystemExit(0)
+          def to_db(x):
+              med=float(np.nanmedian(x[valid]));
+              return x.copy() if med<0 else 10*np.log10(np.maximum(x,1e-12))
+          vv_a,vv_b,vh_a,vh_b=map(to_db,[va,vb,ha,hb])
+          dvv=vv_b-vv_a; dvh=vh_b-vh_a; dr=(vv_b-vh_b)-(vv_a-vh_a); mag=np.sqrt((dvv*dvv+dvh*dvh)/2)
           cells=[]
           for rr in range(4):
               for cc in range(4):
-                  ys=slice(rr*H//4,(rr+1)*H//4); xs=slice(cc*W//4,(cc+1)*W//4)
-                  m=valid[ys,xs]; rec={'row':rr,'col':cc,'valid_percent':round(float(m.mean()*100),2)}
+                  ys=slice(rr*H//4,(rr+1)*H//4); xs=slice(cc*W//4,(cc+1)*W//4); m=valid[ys,xs]; rec={'row':rr,'col':cc,'valid_percent':round(float(m.mean()*100),2)}
                   if m.sum()>200:
-                      vv=dvv[ys,xs][m]; vh=dvh[ys,xs][m]; rt=dratio[ys,xs][m]; mg=mag[ys,xs][m]
-                      rec.update({'median_abs_dvv_db':round(float(np.median(np.abs(vv))),3),
-                                  'median_abs_dvh_db':round(float(np.median(np.abs(vh))),3),
-                                  'p90_change_mag_db':round(float(np.percentile(mg,90)),3),
-                                  'pct_change_mag_ge_3db':round(float((mg>=3).mean()*100),3),
-                                  'median_abs_ratio_change_db':round(float(np.median(np.abs(rt))),3)})
+                      z=mag[ys,xs][m]; r=dr[ys,xs][m]
+                      rec.update({'median_change_mag_db':round(float(np.median(z)),3),'p90_change_mag_db':round(float(np.percentile(z,90)),3),'pct_change_mag_ge_3db':round(float((z>=3).mean()*100),3),'median_abs_ratio_change_db':round(float(np.median(np.abs(r))),3)})
                   cells.append(rec)
-          scored=[c for c in cells if 'p90_change_mag_db' in c]
-          scored.sort(key=lambda c:(c['pct_change_mag_ge_3db'],c['p90_change_mag_db']),reverse=True)
+          scored=[c for c in cells if 'p90_change_mag_db' in c]; scored.sort(key=lambda c:(c['pct_change_mag_ge_3db'],c['p90_change_mag_db']),reverse=True)
           for i,c in enumerate(scored,1): c['relative_rank']=i
-
-          # coarse change heatmap only
-          h=np.zeros((H,W),np.uint8); vals=mag[valid]
-          p99=float(np.percentile(vals,99)) if vals.size else 1
-          h[valid]=np.clip(mag[valid]/max(p99,1e-6)*255,0,255).astype(np.uint8)
-          Image.fromarray(h).save('out/change_mag.png',optimize=True)
-          out={'status':'VERIFIED_RTC_PAIR','generated_utc':datetime.now(timezone.utc).isoformat(),
-               'pair':[date_a,date_b],'geometry':{'platform':geom[0],'relative_orbit':geom[1],'orbit_state':geom[2]},
-               'ids_a':ids_a,'ids_b':ids_b,'valid_overlap_percent':round(float(valid.mean()*100),2),'cells_4x4':cells,
-               'interpretation_limit':'RTC backscatter change is physical surface/structure/moisture/geometry-sensitive evidence, not causal attribution. Vegetation, soil moisture, precipitation, roughness and damage are competing explanations.',
-               'safety':'Broad 4x4 sector statistics only; no coordinates or target-level interpretation.'}
+          h=np.zeros((H,W),np.uint8); vals=mag[valid]; p99=float(np.percentile(vals,99)) if vals.size else 1; h[valid]=np.clip(mag[valid]/max(p99,1e-6)*255,0,255).astype(np.uint8); Image.fromarray(h).save('out/change_mag.png',optimize=True)
+          out={'status':'VERIFIED_RTC_PAIR','generated_utc':datetime.now(timezone.utc).isoformat(),'pair':[date_a,date_b],'geometry':{'platform':geom[0],'relative_orbit':geom[1],'orbit_state':geom[2]},'ids_a':ids_a,'ids_b':ids_b,'valid_overlap_percent':round(float(valid.mean()*100),2),'input_scale_detection':'negative median means already dB; otherwise converted linear power with 10log10','cells_4x4':cells,'interpretation_limit':'RTC backscatter change is physical surface/structure/moisture-sensitive evidence, not causal attribution. Vegetation, soil moisture, precipitation, roughness and damage are competing explanations.','safety':'Broad 4x4 sector statistics only; no coordinates or target-level interpretation.'}
           json.dump(out,open('out/analysis.json','w'),indent=2); print(json.dumps(out,indent=2))
           PY
       - uses: actions/upload-artifact@v4
