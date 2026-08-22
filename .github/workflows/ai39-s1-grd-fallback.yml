@@ -41,20 +41,29 @@ jobs:
               out={'status':'MISSING_GRD_PAIR','found':sorted(items)}; json.dump(out,open('out/analysis.json','w'),indent=2); print(json.dumps(out)); raise SystemExit(0)
           transform=from_bounds(*BBOX,W,H)
           def read(it,key):
-              href=it['assets'][key]['href']; dst=np.full((H,W),np.nan,np.float32)
+              href=it['assets'][key]['href']
               with rasterio.Env(AWS_NO_SIGN_REQUEST='YES',GDAL_DISABLE_READDIR_ON_OPEN='EMPTY_DIR'):
                   with rasterio.open(href) as ds:
                       with WarpedVRT(ds,crs='EPSG:4326',transform=transform,width=W,height=H,resampling=Resampling.bilinear,nodata=np.nan) as vrt:
-                          dst=vrt.read(1).astype(np.float32)
-              dst[dst<=0]=np.nan
-              return dst
+                          x=vrt.read(1).astype(np.float32)
+              x[~np.isfinite(x)]=np.nan
+              x[np.abs(x)<1e-12]=np.nan
+              return x
           a,b=items[ids[0]],items[ids[1]]
           avv,avh=read(a,'vv'),read(a,'vh'); bvv,bvh=read(b,'vv'),read(b,'vh')
           valid=np.isfinite(avv)&np.isfinite(avh)&np.isfinite(bvv)&np.isfinite(bvh)
-          # Raw GRD is not calibrated RTC. Normalize each band by broad-scene median; this is only a fallback relative-change control.
-          def norm(x):
-              med=float(np.nanmedian(x[valid])); return 20*np.log10(np.maximum(x/med,1e-8))
-          dvv=norm(bvv)-norm(avv); dvh=norm(bvh)-norm(avh); mag=np.sqrt((dvv*dvv+dvh*dvh)/2)
+          if valid.mean()<0.35:
+              out={'status':'INSUFFICIENT_GRD_OVERLAP','generated_utc':datetime.now(timezone.utc).isoformat(),'pair':['2026-08-10','2026-08-22'],'product_ids':ids,'valid_overlap_percent':round(float(valid.mean()*100),3),'value_summary':{}}
+              for name,x in [('avv',avv),('avh',avh),('bvv',bvv),('bvh',bvh)]:
+                  v=x[np.isfinite(x)]; out['value_summary'][name]={'count':int(v.size),'min':float(np.min(v)) if v.size else None,'median':float(np.median(v)) if v.size else None,'max':float(np.max(v)) if v.size else None}
+              json.dump(out,open('out/analysis.json','w'),indent=2); print(json.dumps(out,indent=2)); raise SystemExit(0)
+          def centered_db(x):
+              med=float(np.nanmedian(x[valid]))
+              if med<0:
+                  return x-med,'already_db'
+              return 20*np.log10(np.maximum(x/med,1e-8)),'positive_amplitude_like'
+          avv_n,svv1=centered_db(avv); bvv_n,svv2=centered_db(bvv); avh_n,svh1=centered_db(avh); bvh_n,svh2=centered_db(bvh)
+          dvv=bvv_n-avv_n; dvh=bvh_n-avh_n; mag=np.sqrt((dvv*dvv+dvh*dvh)/2)
           cells=[]
           for rr in range(4):
               for cc in range(4):
@@ -66,10 +75,7 @@ jobs:
                   cells.append(rec)
           scored=[c for c in cells if 'p90_change_mag_db' in c]; scored.sort(key=lambda c:(c['pct_ge_3db'],c['p90_change_mag_db']),reverse=True)
           for i,c in enumerate(scored,1): c['relative_rank']=i
-          out={'status':'PARTIAL_RAW_GRD_CONTROL','generated_utc':datetime.now(timezone.utc).isoformat(),'pair':['2026-08-10','2026-08-22'],
-               'product_ids':ids,'geometry':{'platform':'sentinel-1d','relative_orbit':167,'orbit_state':'descending'},'valid_overlap_percent':round(float(valid.mean()*100),2),'cells_4x4':cells,
-               'interpretation_limit':'Raw GRD DN normalized by scene median; lower evidentiary weight than RTC. Speckle, moisture, acquisition/calibration and geometry effects remain competing explanations.',
-               'safety':'Broad 4x4 sector statistics only; no coordinates or target-level interpretation.'}
+          out={'status':'PARTIAL_RAW_GRD_CONTROL','generated_utc':datetime.now(timezone.utc).isoformat(),'pair':['2026-08-10','2026-08-22'],'product_ids':ids,'geometry':{'platform':'sentinel-1d','relative_orbit':167,'orbit_state':'descending'},'valid_overlap_percent':round(float(valid.mean()*100),2),'scale_detection':{'vv_a':svv1,'vv_b':svv2,'vh_a':svh1,'vh_b':svh2},'cells_4x4':cells,'interpretation_limit':'Scene-median-centered GRD fallback only; lower evidentiary weight than RTC. Speckle, soil moisture, precipitation, calibration, roughness, vegetation and geometry remain competing explanations.','safety':'Broad 4x4 sector statistics only; no coordinates or target-level interpretation.'}
           json.dump(out,open('out/analysis.json','w'),indent=2); print(json.dumps(out,indent=2))
           PY
       - uses: actions/upload-artifact@v4
