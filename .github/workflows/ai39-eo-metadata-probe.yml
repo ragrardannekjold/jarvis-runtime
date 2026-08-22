@@ -1,0 +1,79 @@
+name: AI39 EO metadata probe
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  metadata:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Query Earth Search STAC
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          python - <<'PY'
+          import json, urllib.request
+          from datetime import datetime, timezone
+
+          ENDPOINT='https://earth-search.aws.element84.com/v1/search'
+          BBOX=[37.65,48.45,38.25,48.90]
+          START='2026-07-23T00:00:00Z'; END='2026-08-22T23:59:59Z'
+
+          def post(payload):
+              body=json.dumps(payload).encode()
+              req=urllib.request.Request(ENDPOINT,data=body,headers={'Content-Type':'application/json','User-Agent':'jarvis-ai39-eo-probe/1.0'},method='POST')
+              with urllib.request.urlopen(req,timeout=90) as r:
+                  return json.load(r)
+
+          def search(collection,limit=100):
+              return post({'collections':[collection],'bbox':BBOX,'datetime':f'{START}/{END}','limit':limit,
+                           'sortby':[{'field':'properties.datetime','direction':'desc'}]}).get('features',[])
+
+          def slim(it):
+              p=it.get('properties',{})
+              return {
+                'product_id':it.get('id'),
+                'datetime':p.get('datetime'),
+                'collection':it.get('collection'),
+                'cloud_cover':p.get('eo:cloud_cover'),
+                'platform':p.get('platform'),
+                'mgrs_tile':p.get('mgrs:utm_zone') and {
+                    'utm_zone':p.get('mgrs:utm_zone'),'latitude_band':p.get('mgrs:latitude_band'),'grid_square':p.get('mgrs:grid_square')
+                } or None,
+                'orbit_state':p.get('sat:orbit_state'),
+                'relative_orbit':p.get('sat:relative_orbit'),
+                'polarizations':p.get('sar:polarizations'),
+                'assets':sorted(list((it.get('assets') or {}).keys()))
+              }
+
+          s2=search('sentinel-2-c1-l2a',100)
+          s1=search('sentinel-1-grd',100)
+          # Keep newest 30 metadata records; no exact military-site interpretation here.
+          out={
+            'generated_utc':datetime.now(timezone.utc).isoformat(),
+            'window':[START,END],
+            'study_area':'Broad Chasiv Yar–Bakhmut–Soledar corridor; coarse investigation scope',
+            's2_count':len(s2),
+            's2':[slim(x) for x in s2[:30]],
+            's1_count':len(s1),
+            's1':[slim(x) for x in s1[:30]],
+            'safety':'Metadata-only pass; no precise targetable findings.'
+          }
+          with open('out/metadata.json','w') as f: json.dump(out,f,indent=2)
+          print(json.dumps(out,indent=2))
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ai39-eo-metadata
+          path: out/metadata.json
+          if-no-files-found: error
+          retention-days: 2
