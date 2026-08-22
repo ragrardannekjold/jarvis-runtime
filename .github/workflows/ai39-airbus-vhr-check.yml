@@ -1,0 +1,185 @@
+name: AI39 Airbus VHR archive check
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Inspect public Airbus Archive Preview backend
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          python - <<'PY'
+          import json, re, requests, datetime, urllib.parse
+          from collections import deque
+
+          PORTAL='https://portal.intelligence-airbusds.com/portal/sharing/rest'
+          APP='49e5e928d6604a948b86ca6bb4f2fd73'
+          BBOX=[37.65,48.45,38.25,48.90]
+          START=datetime.datetime(2026,8,18,tzinfo=datetime.timezone.utc)
+          END=datetime.datetime(2026,8,23,tzinfo=datetime.timezone.utc)
+          S=requests.Session(); S.headers.update({'User-Agent':'AI39-public-archive-metadata-check/1.0'})
+
+          def get_json(url, params=None):
+              r=S.get(url,params=params,timeout=45)
+              r.raise_for_status()
+              return r.json()
+
+          def item_meta(i): return get_json(f'{PORTAL}/content/items/{i}',{'f':'json'})
+          def item_data(i): return get_json(f'{PORTAL}/content/items/{i}/data',{'f':'json'})
+
+          hex_re=re.compile(r'(?<![0-9a-fA-F])([0-9a-fA-F]{32})(?![0-9a-fA-F])')
+          url_re=re.compile(r'https?://[^\s\"\'<>]+')
+          discovered_ids=set([APP]); service_urls=set(); raw_urls=set()
+
+          def walk(x):
+              if isinstance(x,dict):
+                  for v in x.values(): walk(v)
+              elif isinstance(x,list):
+                  for v in x: walk(v)
+              elif isinstance(x,str):
+                  for m in hex_re.findall(x): discovered_ids.add(m)
+                  for u in url_re.findall(x):
+                      raw_urls.add(u.rstrip('),.;'))
+                      if any(k in u for k in ('FeatureServer','MapServer','ImageServer')):
+                          service_urls.add(u.rstrip('),.;'))
+
+          item_records=[]
+          q=deque([(APP,0)]); seen=set()
+          while q:
+              iid,depth=q.popleft()
+              if iid in seen or depth>2: continue
+              seen.add(iid)
+              try:
+                  meta=item_meta(iid); data=item_data(iid)
+                  item_records.append({'id':iid,'title':meta.get('title'),'type':meta.get('type'),'url':meta.get('url'),'access':meta.get('access')})
+                  walk(meta); before=set(discovered_ids); walk(data)
+                  if meta.get('url') and any(k in meta['url'] for k in ('FeatureServer','MapServer','ImageServer')): service_urls.add(meta['url'])
+                  if depth<2:
+                      for nid in discovered_ids-seen:
+                          q.append((nid,depth+1))
+              except Exception as e:
+                  item_records.append({'id':iid,'error':str(e)})
+
+          # Portal search fallback for likely archive web maps/services.
+          try:
+              sr=get_json(f'{PORTAL}/search',{'f':'json','q':'(archive OR imagery) AND (Pleiades OR optical OR OneAtlas)','num':100})
+              for it in sr.get('results',[]):
+                  title=(it.get('title') or '').lower()
+                  if any(k in title for k in ('archive','pleiades','optical','imagery')):
+                      iid=it.get('id')
+                      item_records.append({'id':iid,'title':it.get('title'),'type':it.get('type'),'url':it.get('url'),'access':it.get('access'),'via':'portal_search'})
+                      if it.get('url') and any(k in it['url'] for k in ('FeatureServer','MapServer','ImageServer')): service_urls.add(it['url'])
+          except Exception as e:
+              item_records.append({'portal_search_error':str(e)})
+
+          # Normalize service roots / layer URLs.
+          norm=set()
+          for u in service_urls:
+              u=u.split('?')[0].rstrip('/')
+              norm.add(u)
+          service_urls=norm
+
+          def parse_dt(v):
+              if v is None: return None
+              if isinstance(v,(int,float)):
+                  try:
+                      # ArcGIS dates usually epoch ms
+                      if v>1e11: return datetime.datetime.fromtimestamp(v/1000,tz=datetime.timezone.utc)
+                      if v>1e9: return datetime.datetime.fromtimestamp(v,tz=datetime.timezone.utc)
+                  except: return None
+              if isinstance(v,str):
+                  s=v.strip().replace('Z','+00:00')
+                  for candidate in [s, s[:10]]:
+                      try:
+                          d=datetime.datetime.fromisoformat(candidate)
+                          if d.tzinfo is None: d=d.replace(tzinfo=datetime.timezone.utc)
+                          return d
+                      except: pass
+              return None
+
+          def record_date(attrs):
+              candidates=[]
+              for k,v in attrs.items():
+                  lk=k.lower()
+                  if any(t in lk for t in ('acq','date','time','start','end','capture','imaging')):
+                      d=parse_dt(v)
+                      if d: candidates.append((k,d))
+              return candidates
+
+          services=[]; matches=[]
+          # Explore service metadata and query footprint-like layers intersecting AOI.
+          for root in sorted(service_urls):
+              try:
+                  meta=get_json(root,{'f':'json'})
+                  rec={'url':root,'name':meta.get('name'),'type':meta.get('type'),'layers':meta.get('layers'),'fields':meta.get('fields')}
+                  services.append(rec)
+                  layer_urls=[]
+                  if meta.get('layers'):
+                      for lyr in meta['layers'][:30]: layer_urls.append(root+'/'+str(lyr['id']))
+                  elif meta.get('fields'):
+                      layer_urls=[root]
+                  for lu in layer_urls:
+                      try:
+                          lm=get_json(lu,{'f':'json'})
+                          fields=[f.get('name') for f in lm.get('fields',[]) if f.get('name')]
+                          # Query all footprints intersecting broad AOI; no exact target output is retained.
+                          qurl=lu+'/query'
+                          params={
+                              'f':'json','where':'1=1','geometry':','.join(map(str,BBOX)),
+                              'geometryType':'esriGeometryEnvelope','inSR':'4326','spatialRel':'esriSpatialRelIntersects',
+                              'outFields':'*','returnGeometry':'false','resultRecordCount':500
+                          }
+                          qr=get_json(qurl,params)
+                          feats=qr.get('features',[])
+                          for feat in feats:
+                              a=feat.get('attributes') or {}
+                              dts=record_date(a)
+                              in_window=[(k,d) for k,d in dts if START<=d<END]
+                              if in_window:
+                                  # retain non-sensitive acquisition metadata only
+                                  keep={}
+                                  for k,v in a.items():
+                                      lk=k.lower()
+                                      if any(t in lk for t in ('date','time','acq','sensor','sat','mission','platform','cloud','angle','incidence','resolution','gsd','product','id')):
+                                          if not any(t in lk for t in ('geometry','latitude','longitude','coord')):
+                                              keep[k]=v
+                                  matches.append({'layer':lu,'dates':[(k,d.isoformat()) for k,d in in_window],'metadata':keep})
+                      except Exception as e:
+                          services.append({'layer_error':lu,'error':str(e)})
+              except Exception as e:
+                  services.append({'service_error':root,'error':str(e)})
+
+          out={
+              'generated_utc':datetime.datetime.now(datetime.timezone.utc).isoformat(),
+              'source':'Airbus public Archive Preview / ArcGIS backend',
+              'window':'2026-08-18 through 2026-08-22 UTC',
+              'scope':'Broad AI-39 corridor; metadata-only availability check',
+              'app_items':item_records,
+              'service_urls':sorted(service_urls),
+              'services':services,
+              'matches_count':len(matches),
+              'matches':matches,
+              'raw_url_hints':sorted([u for u in raw_urls if 'airbus' in u.lower() or 'oneatlas' in u.lower()])[:100],
+              'safety':'No exact VHR footprint geometries or tactical coordinates retained.'
+          }
+          with open('out/airbus_vhr_check.json','w') as f: json.dump(out,f,indent=2,default=str)
+          print(json.dumps(out,indent=2,default=str)[:60000])
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ai39-airbus-vhr-check
+          path: out/airbus_vhr_check.json
+          if-no-files-found: error
+          retention-days: 2
