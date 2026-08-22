@@ -1,0 +1,223 @@
+name: AI39 30d optical persistence
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  persistence:
+    runs-on: ubuntu-latest
+    timeout-minutes: 22
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install --disable-pip-version-check requests numpy rasterio
+      - name: Build 30-day broad-sector optical persistence analysis
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          python - <<'PY'
+          import json, math
+          from collections import defaultdict
+          from datetime import datetime, timezone
+          import requests, numpy as np, rasterio
+          from rasterio.warp import reproject
+          from rasterio.enums import Resampling
+          from rasterio.transform import from_bounds
+
+          STAC='https://earth-search.aws.element84.com/v1/search'
+          BBOX=[37.65,48.45,38.25,48.90]
+          START='2026-07-24T00:00:00Z'; END='2026-08-22T23:59:59Z'
+          W,H=480,360
+          dst_transform=from_bounds(*BBOX,W,H)
+
+          q={'collections':['sentinel-2-c1-l2a'],'bbox':BBOX,'datetime':f'{START}/{END}','limit':500}
+          r=requests.post(STAC,json=q,timeout=120); r.raise_for_status()
+          items=r.json().get('features',[])
+          if not items: raise SystemExit('No Sentinel-2 items found')
+
+          # Group tiles belonging to the same acquisition. A complete acquisition can span several MGRS tiles.
+          groups=defaultdict(list)
+          for it in items:
+              p=it.get('properties',{})
+              dt=p.get('datetime') or ''
+              platform=p.get('platform') or 'unknown'
+              if not dt: continue
+              key=(dt[:16],platform)
+              groups[key].append(it)
+
+          def reproj(href,resampling,dtype='float32'):
+              dst=np.zeros((H,W),dtype=dtype)
+              with rasterio.Env(AWS_NO_SIGN_REQUEST='YES',GDAL_DISABLE_READDIR_ON_OPEN='EMPTY_DIR',GDAL_HTTP_MULTIRANGE='YES'):
+                  with rasterio.open(href) as ds:
+                      reproject(source=rasterio.band(ds,1),destination=dst,
+                                src_transform=ds.transform,src_crs=ds.crs,src_nodata=ds.nodata,
+                                dst_transform=dst_transform,dst_crs='EPSG:4326',dst_nodata=0,
+                                resampling=resampling,num_threads=2)
+              return dst
+
+          scene_candidates=[]
+          for (dtminute,platform),its in sorted(groups.items()):
+              red=np.zeros((H,W),np.float32); nir=np.zeros((H,W),np.float32); swir=np.zeros((H,W),np.float32); scl=np.zeros((H,W),np.uint8)
+              pids=[]
+              for it in its:
+                  a=it.get('assets',{})
+                  if not all((a.get(k) or {}).get('href') for k in ['red','nir08','swir22','scl']): continue
+                  try:
+                      rr=reproj(a['red']['href'],Resampling.bilinear)
+                      nn=reproj(a['nir08']['href'],Resampling.bilinear)
+                      ss=reproj(a['swir22']['href'],Resampling.bilinear)
+                      cc=reproj(a['scl']['href'],Resampling.nearest,'uint8')
+                  except Exception:
+                      continue
+                  m=(rr>0)&(nn>0)&(ss>0)
+                  # Later tiles only fill gaps; avoid arbitrary overwrites at overlaps.
+                  fill=m & (red<=0)
+                  red[fill]=rr[fill]; nir[fill]=nn[fill]; swir[fill]=ss[fill]; scl[fill]=cc[fill]
+                  pids.append(it.get('id'))
+              valid=(red>0)&(nir>0)&(swir>0)
+              if valid.mean()<0.30: continue
+              clear=valid & np.isin(scl,[2,4,5,6,7])
+              clear_pct=float(clear.mean()*100)
+              if clear_pct<12: continue
+              ndvi=np.full((H,W),np.nan,np.float32); nbr=np.full((H,W),np.nan,np.float32); ndbi=np.full((H,W),np.nan,np.float32)
+              ndvi[clear]=(nir[clear]-red[clear])/(nir[clear]+red[clear]+1e-6)
+              nbr[clear]=(nir[clear]-swir[clear])/(nir[clear]+swir[clear]+1e-6)
+              ndbi[clear]=(swir[clear]-nir[clear])/(swir[clear]+nir[clear]+1e-6)
+              scene_candidates.append({'date':dtminute[:10],'datetime':dtminute+':00Z','platform':platform,
+                                       'clear_pct':clear_pct,'valid_pct':float(valid.mean()*100),
+                                       'ids':sorted(pids),'clear':clear,'ndvi':ndvi,'nbr':nbr,'ndbi':ndbi})
+
+          # Keep the best clear acquisition per day.
+          byday=defaultdict(list)
+          for s in scene_candidates: byday[s['date']].append(s)
+          scenes=[]
+          for day,ss in sorted(byday.items()):
+              ss.sort(key=lambda x:(x['clear_pct'],x['valid_pct']),reverse=True)
+              scenes.append(ss[0])
+          if len(scenes)<3: raise SystemExit(f'Only {len(scenes)} usable daily scenes')
+
+          letters='ABCD'
+          def sector_name(rr,cc): return f'{letters[cc]}{rr+1}'
+          def slice_cell(rr,cc): return (slice(rr*H//4,(rr+1)*H//4),slice(cc*W//4,(cc+1)*W//4))
+
+          # Per-date sector summaries.
+          per_scene=[]
+          for s in scenes:
+              cells=[]
+              for rr in range(4):
+                  for cc in range(4):
+                      ys,xs=slice_cell(rr,cc); m=s['clear'][ys,xs]
+                      rec={'sector':sector_name(rr,cc),'clear_percent':round(float(m.mean()*100),1)}
+                      if m.sum()>=80:
+                          vi=s['ndvi'][ys,xs][m]; nb=s['nbr'][ys,xs][m]; bi=s['ndbi'][ys,xs][m]
+                          rec.update({
+                            'median_ndvi':round(float(np.median(vi)),4),
+                            'median_nbr':round(float(np.median(nb)),4),
+                            'median_ndbi':round(float(np.median(bi)),4),
+                            'veg_proxy_percent':round(float((vi>0.35).mean()*100),1),
+                            'bare_built_proxy_percent':round(float(((bi>0.0)&(vi<0.35)).mean()*100),1),
+                          })
+                      cells.append(rec)
+              per_scene.append({'date':s['date'],'datetime':s['datetime'],'platform':s['platform'],
+                                'clear_percent':round(s['clear_pct'],1),'valid_percent':round(s['valid_pct'],1),
+                                'product_ids':s['ids'],'cells':cells})
+
+          # Consecutive-pair spatial change events, using only pixels clear on both dates.
+          pair_events=[]
+          sector_events=defaultdict(list)
+          for a,b in zip(scenes[:-1],scenes[1:]):
+              overlap=a['clear'] & b['clear']
+              dnbr=b['nbr']-a['nbr']; dndbi=b['ndbi']-a['ndbi']; dndvi=b['ndvi']-a['ndvi']
+              pcells=[]
+              for rr in range(4):
+                  for cc in range(4):
+                      ys,xs=slice_cell(rr,cc); m=overlap[ys,xs]
+                      rec={'sector':sector_name(rr,cc),'overlap_percent':round(float(m.mean()*100),1)}
+                      if m.sum()>=80:
+                          nb=dnbr[ys,xs][m]; bi=dndbi[ys,xs][m]; vi=dndvi[ys,xs][m]
+                          strong=(np.abs(nb)>=0.15)|(np.abs(bi)>=0.15)
+                          burnlike=(nb<=-0.20)
+                          structural_like=(np.abs(bi)>=0.15) & (np.abs(vi)<0.12)
+                          rec.update({
+                            'strong_surface_change_percent':round(float(strong.mean()*100),2),
+                            'burn_loss_like_percent':round(float(burnlike.mean()*100),2),
+                            'structural_ground_like_percent':round(float(structural_like.mean()*100),2),
+                            'median_abs_delta_nbr':round(float(np.median(np.abs(nb))),4),
+                            'median_abs_delta_ndbi':round(float(np.median(np.abs(bi))),4),
+                            'median_delta_ndbi':round(float(np.median(bi)),4),
+                          })
+                          sector_events[rec['sector']].append({'from':a['date'],'to':b['date'],**rec})
+                      pcells.append(rec)
+              pair_events.append({'from':a['date'],'to':b['date'],'cells':pcells})
+
+          # Sector persistence: repeated strong events + whether a late state remains shifted vs an early usable baseline.
+          sector_summary=[]
+          for rr in range(4):
+              for cc in range(4):
+                  sec=sector_name(rr,cc); evs=sector_events.get(sec,[])
+                  valid_e=[e for e in evs if 'strong_surface_change_percent' in e]
+                  repeated=sum(1 for e in valid_e if e['strong_surface_change_percent']>=0.5)
+                  struct_rep=sum(1 for e in valid_e if e['structural_ground_like_percent']>=0.25)
+                  maxchg=max([e['strong_surface_change_percent'] for e in valid_e] or [0])
+                  maxstruct=max([e['structural_ground_like_percent'] for e in valid_e] or [0])
+                  maxburn=max([e['burn_loss_like_percent'] for e in valid_e] or [0])
+                  # Find first and last date with enough sector clear data.
+                  vals=[]
+                  for ps in per_scene:
+                      c=next(x for x in ps['cells'] if x['sector']==sec)
+                      if c.get('clear_percent',0)>=35 and 'median_ndbi' in c:
+                          vals.append((ps['date'],c))
+                  baseline_shift=None
+                  if len(vals)>=2:
+                      first,last=vals[0],vals[-1]
+                      baseline_shift={
+                        'from':first[0],'to':last[0],
+                        'delta_median_ndbi':round(last[1]['median_ndbi']-first[1]['median_ndbi'],4),
+                        'delta_bare_built_proxy_pp':round(last[1]['bare_built_proxy_percent']-first[1]['bare_built_proxy_percent'],1),
+                        'delta_veg_proxy_pp':round(last[1]['veg_proxy_percent']-first[1]['veg_proxy_percent'],1),
+                      }
+                  # Score is a triage score only; deliberately capped and not a presence probability.
+                  score=min(10.0, 1.2*repeated + 0.9*struct_rep + min(maxchg,5)*0.55 + min(maxstruct,3)*0.7)
+                  sector_summary.append({
+                    'sector':sec,'usable_pair_count':len(valid_e),'repeated_change_events_ge_0_5pct':repeated,
+                    'repeated_structural_ground_events_ge_0_25pct':struct_rep,
+                    'max_strong_surface_change_percent':round(maxchg,2),
+                    'max_structural_ground_like_percent':round(maxstruct,2),
+                    'max_burn_loss_like_percent':round(maxburn,2),
+                    'first_last_shift':baseline_shift,
+                    'optical_persistence_priority_0_10':round(score,1),
+                    'interpretation':'Broad optical persistence triage only; not evidence of people or a specific cause.'
+                  })
+          sector_summary.sort(key=lambda x:(x['optical_persistence_priority_0_10'],x['max_structural_ground_like_percent'],x['max_strong_surface_change_percent']),reverse=True)
+
+          out={
+            'generated_utc':datetime.now(timezone.utc).isoformat(),
+            'scope':'AI-39 broad 4x4 sectors, 30-day optical persistence; no route or target-level output',
+            'window':['2026-07-24','2026-08-22'],
+            'usable_daily_scenes':len(scenes),
+            'scene_dates':[s['date'] for s in scenes],
+            'scenes':per_scene,
+            'pair_events':pair_events,
+            'sector_summary':sector_summary,
+            'rules':[
+              'A repeated broad optical change can support repair/clearance/ground-change hypotheses but does not prove human presence.',
+              'Structural_ground_like is a spectral heuristic, not a building detector.',
+              'Persistence and independent SAR/night-light/document evidence are required before human-activity inference.',
+              'Absence of an optical signal is not evidence that people are absent.'
+            ]
+          }
+          json.dump(out,open('out/optical_persistence.json','w'),indent=2)
+          print(json.dumps({'usable_daily_scenes':out['usable_daily_scenes'],'scene_dates':out['scene_dates'],'top_sectors':sector_summary[:8]},indent=2))
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ai39-30d-optical-persistence
+          path: out/optical_persistence.json
+          if-no-files-found: error
+          retention-days: 2
