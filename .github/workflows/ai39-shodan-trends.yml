@@ -1,0 +1,99 @@
+name: AI39 Shodan aggregate trends
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  trends:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    env:
+      SHODAN_API_KEY: ${{ secrets.SHODAN_API_KEY }}
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install --disable-pip-version-check requests
+      - name: Aggregate-only ASN trend
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          python - <<'PY'
+          import json, os
+          from datetime import datetime, timezone
+          import requests
+
+          key=os.environ.get('SHODAN_API_KEY','').strip()
+          query='asn:AS202279'
+          out={
+            'generated_utc':datetime.now(timezone.utc).isoformat(),
+            'query_scope':'public ASN aggregate only',
+            'asn':'AS202279',
+            'status':'UNKNOWN',
+            'current_total':None,
+            'trends_total':None,
+            'monthly':[],
+            'credits_before':None,
+            'credits_after':None,
+            'credits_delta':None,
+            'interpretation_limit':'Shodan indexed-service counts are not people, physical presence, unique hosts, or proof of operational control. Crawl/indexing, exposure policy, NAT, routing and service changes can move counts.',
+            'safety':'No IPs, hostnames, ports, banners, versions, vulnerabilities, screenshots, or exact locations are retained.'
+          }
+          def api_info():
+              r=requests.get('https://api.shodan.io/api-info',params={'key':key},timeout=30)
+              r.raise_for_status(); j=r.json()
+              return j.get('query_credits')
+          if not key:
+              out['status']='NO_SECRET'
+          else:
+              try:
+                  out['credits_before']=api_info()
+                  r=requests.get('https://api.shodan.io/shodan/host/count',params={'key':key,'query':query},timeout=60)
+                  r.raise_for_status(); cj=r.json(); out['current_total']=cj.get('total')
+                  tr=requests.get('https://trends.shodan.io/api/v1/search',params={'key':key,'query':query},timeout=90)
+                  if tr.status_code==200:
+                      tj=tr.json(); out['trends_total']=tj.get('total')
+                      monthly=[]
+                      for m in tj.get('matches',[]):
+                          month=m.get('month'); count=m.get('count')
+                          if isinstance(month,str) and isinstance(count,(int,float)):
+                              monthly.append({'month':month,'count':int(count)})
+                      monthly.sort(key=lambda x:x['month'])
+                      out['monthly']=monthly[-24:]
+                      out['status']='VERIFIED_AGGREGATE'
+                  else:
+                      out['status']='TRENDS_UNAVAILABLE'
+                      out['trends_http_status']=tr.status_code
+                  out['credits_after']=api_info()
+                  if isinstance(out['credits_before'],int) and isinstance(out['credits_after'],int):
+                      out['credits_delta']=out['credits_before']-out['credits_after']
+              except requests.HTTPError as e:
+                  out['status']='HTTP_ERROR'
+                  out['http_status']=getattr(e.response,'status_code',None)
+              except Exception as e:
+                  out['status']='ERROR'
+                  out['error_class']=type(e).__name__
+
+          # Derived aggregate deltas only; no host-level material.
+          recent=[x for x in out['monthly'] if x['month']>='2026-01']
+          out['recent_2026']=recent
+          if len(recent)>=2:
+              out['first_to_latest_pct']=round((recent[-1]['count']-recent[0]['count'])/max(recent[0]['count'],1)*100,2)
+          if len(recent)>=4:
+              prev=sum(x['count'] for x in recent[-4:-2])/2
+              latest=sum(x['count'] for x in recent[-2:])/2
+              out['latest_2m_vs_prev_2m_pct']=round((latest-prev)/max(prev,1)*100,2)
+          with open('out/aggregate.json','w') as f: json.dump(out,f,indent=2)
+          print(json.dumps(out,indent=2))
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ai39-shodan-trends
+          path: out/aggregate.json
+          if-no-files-found: error
+          retention-days: 2
