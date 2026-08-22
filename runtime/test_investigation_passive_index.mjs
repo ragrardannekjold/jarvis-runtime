@@ -34,6 +34,7 @@ function task(overrides = {}) {
     max_query_credits: 1,
     created_at: "2026-08-20T13:25:00.000Z",
     expires_at: "2026-08-21T13:25:00.000Z",
+    runtime_context_binding_sha256: "7".repeat(64),
     authorization: {
       basis: "PUBLIC_AUTHORITATIVE_ENTITY_ANCHORS",
       approved_by: "owner",
@@ -107,11 +108,57 @@ test("validation binds the pilot, request budget, passive mode, and exact author
     task({ mode: "active" }),
     task({ project_id: "OTHER" }),
     task({ max_query_credits: 10 }),
+    task({ runtime_context_binding_sha256: "0".repeat(63) }),
+    task({ expires_at: "2026-08-20T13:29:00.000Z" }),
     task({ collection: { page_size: 1000, max_pages: 10, max_history_hosts: 100, raw_banner_persisted: true } }),
     task({ raw_query: "vuln:CVE-2025-0001" }),
   ]) {
     assert.throws(() => validatePassiveIndexTask(invalid, `${invalid.task_id}.json`, { now }));
   }
+  const missingBinding = task();
+  delete missingBinding.runtime_context_binding_sha256;
+  assert.throws(
+    () => validatePassiveIndexTask(missingBinding, `${missingBinding.task_id}.json`, { now }),
+    { code: "PASSIVE_INDEX_RUNTIME_CONTEXT_BINDING_INVALID" },
+  );
+});
+
+test("near-expiry attested context stops before every provider request", async () => {
+  let providerRequests = 0;
+  await assert.rejects(
+    executePassiveIndexTask(task({ expires_at: "2026-08-20T13:34:00.000Z" }), {
+      env: { SHODAN_API_KEY: "secret-must-not-be-used" },
+      now,
+      fetchImpl: async () => {
+        providerRequests += 1;
+        throw new Error("provider must not run");
+      },
+    }),
+    { code: "PASSIVE_INDEX_EXECUTION_WINDOW_INSUFFICIENT" },
+  );
+  assert.equal(providerRequests, 0);
+});
+
+test("a context deadline reached after admission still blocks the next provider request", async () => {
+  const times = [
+    Date.parse("2026-08-20T13:30:00.000Z"),
+    Date.parse("2026-08-20T13:30:01.000Z"),
+    Date.parse("2026-08-20T13:41:00.000Z"),
+  ];
+  const advancingNow = () => times.shift() ?? Date.parse("2026-08-20T13:41:00.000Z");
+  let providerRequests = 0;
+  await assert.rejects(
+    executePassiveIndexTask(task({ expires_at: "2026-08-20T13:40:00.000Z" }), {
+      env: { SHODAN_API_KEY: "secret-must-not-be-used" },
+      now: advancingNow,
+      fetchImpl: async () => {
+        providerRequests += 1;
+        throw new Error("provider must not run");
+      },
+    }),
+    { code: "PASSIVE_INDEX_EXECUTION_WINDOW_EXPIRED" },
+  );
+  assert.equal(providerRequests, 0);
 });
 
 test("history recovery validation physically excludes search and paid query credits", () => {

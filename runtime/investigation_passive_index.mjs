@@ -10,6 +10,7 @@ const MAX_ANCHORS = 4;
 const PAGE_SIZE = 50;
 const MAX_HISTORY_HOSTS = 2;
 const MAX_HISTORY_RECORDS_PER_HOST = 25;
+const MIN_EXECUTION_HEADROOM_MS = 5 * 60_000;
 const MAX_COUNT_BYTES = 64 * 1024;
 const MAX_SEARCH_BYTES = 16 * 1024 * 1024;
 const MAX_HISTORY_BYTES = 16 * 1024 * 1024;
@@ -123,7 +124,7 @@ export function validatePassiveIndexTask(document, filename, { now = Date.now, a
   assertExactKeys(document, new Set([
     "schema_version", "task_id", "project_id", "capability", "mode", "provider", "purpose",
     "anchors", "collection", "max_provider_requests", "max_query_credits", "created_at",
-    "expires_at", "authorization",
+    "expires_at", "runtime_context_binding_sha256", "authorization",
   ]), "PASSIVE_INDEX_SCHEMA_INVALID");
   if (document.schema_version !== 2) throw new PassiveIndexError("PASSIVE_INDEX_SCHEMA_INVALID", "Unsupported task schema.");
   if (typeof document.task_id !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._-]{7,80}$/.test(document.task_id)) {
@@ -153,6 +154,13 @@ export function validatePassiveIndexTask(document, filename, { now = Date.now, a
     || document.max_query_credits !== anchors.length || document.max_query_credits > MAX_ANCHORS) {
     throw new PassiveIndexError("PASSIVE_INDEX_BUDGET_INVALID", "Request or query-credit budget was invalid.");
   }
+  if (typeof document.runtime_context_binding_sha256 !== "string"
+    || !/^[0-9a-f]{64}$/.test(document.runtime_context_binding_sha256)) {
+    throw new PassiveIndexError(
+      "PASSIVE_INDEX_RUNTIME_CONTEXT_BINDING_INVALID",
+      "Task runtime-context binding was missing or invalid.",
+    );
+  }
   const createdAt = parseTimestamp(document.created_at, "created_at");
   const expiresAt = parseTimestamp(document.expires_at, "expires_at");
   const current = now();
@@ -160,6 +168,12 @@ export function validatePassiveIndexTask(document, filename, { now = Date.now, a
     || (!allowExpired && expiresAt <= current)
     || expiresAt - createdAt > 7 * 24 * 60 * 60_000) {
     throw new PassiveIndexError("PASSIVE_INDEX_EXPIRED", "Task authorization window was invalid or expired.");
+  }
+  if (!allowExpired && expiresAt - current < MIN_EXECUTION_HEADROOM_MS) {
+    throw new PassiveIndexError(
+      "PASSIVE_INDEX_EXECUTION_WINDOW_INSUFFICIENT",
+      "Task did not retain enough attested-context lifetime for bounded execution.",
+    );
   }
   assertExactKeys(document.authorization, new Set([
     "basis", "approved_by", "approved_at", "scope", "active_scanning",
@@ -234,6 +248,15 @@ export function validatePassiveHistoryTask(document, filename, { now = Date.now 
     throw new PassiveIndexError("PASSIVE_HISTORY_AUTHORIZATION_INVALID", "History recovery approval timestamp was invalid.");
   }
   return document;
+}
+
+function assertProviderRequestWithinTaskWindow(task, now) {
+  if (now() >= parseTimestamp(task.expires_at, "expires_at")) {
+    throw new PassiveIndexError(
+      "PASSIVE_INDEX_EXECUTION_WINDOW_EXPIRED",
+      "Attested task lifetime ended before the next provider request.",
+    );
+  }
 }
 
 function queryForAnchor(anchor) { return `hostname:"${anchor.value}"`; }
@@ -662,6 +685,7 @@ export async function executePassiveIndexTask(rawTask, { env = process.env, fetc
   let providerRequests = 0;
   const counts = [];
   for (const anchor of task.anchors) {
+    assertProviderRequestWithinTaskWindow(task, now);
     counts.push(await collectCount(anchor, { apiKey, fetchImpl }));
     providerRequests += 1;
   }
@@ -683,6 +707,7 @@ export async function executePassiveIndexTask(rawTask, { env = process.env, fetc
     };
   }
 
+  assertProviderRequestWithinTaskWindow(task, now);
   const apiInfo = await readApiInfo({ apiKey, fetchImpl });
   providerRequests += 1;
   if (apiInfo.status !== "COMPLETE" || apiInfo.query_credits < positiveAnchors.length) {
@@ -702,12 +727,14 @@ export async function executePassiveIndexTask(rawTask, { env = process.env, fetc
 
   const searches = [];
   for (const anchor of positiveAnchors) {
+    assertProviderRequestWithinTaskWindow(task, now);
     searches.push(await searchAnchor(anchor, { apiKey, fetchImpl, now }));
     providerRequests += 1;
   }
   const candidates = searches.flatMap((search) => search.candidates).slice(0, MAX_HISTORY_HOSTS);
   const histories = [];
   for (const candidate of candidates) {
+    assertProviderRequestWithinTaskWindow(task, now);
     histories.push(await collectHistory(candidate, { apiKey, fetchImpl, now }));
     providerRequests += 1;
   }

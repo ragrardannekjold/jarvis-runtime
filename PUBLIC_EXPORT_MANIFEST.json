@@ -18,6 +18,7 @@
     "runtime/investigation_passive_index_worker.mjs",
     "runtime/test_investigation_passive_index.mjs",
     "runtime/test_investigation_passive_index_worker.mjs",
+    "runtime/test_capability_rnd_receipt_compat.py",
     "docs/SHODAN_INVESTIGATION_RISK_REGISTER.md",
     "runtime/exposure-verify-trigger.txt",
     "runtime/exposure-intelligence/.env.example",
@@ -185,6 +186,17 @@
     "provider_text_trusted_as_instructions": false,
     "provider_failure_stops_parent_investigation": false,
     "material_claim_requires_independent_corroboration": true,
+    "capability_rnd_runtime_attestation": {
+      "status": "DRAFT_OFFLINE_VERIFIED_NOT_DEPLOYED",
+      "task_schema_version": 2,
+      "runtime_context_binding_required": true,
+      "receipt_algorithm": "HMAC-SHA256",
+      "receipt_key_env": "JARVIS_CAPRND_RUNTIME_RECEIPT_HMAC_KEY_HEX",
+      "purpose_separated": true,
+      "missing_key_effect": "FAIL_CLOSED_BEFORE_PROVIDER_CALL",
+      "provider_call_executed_for_this_change": false,
+      "deployment_state": "NOT_DEPLOYED"
+    },
     "current_kyiv_early_warning_effect": "NONE_NOT_VALIDATED"
   },
   "command_center_runtime_schedule_enabled": true,

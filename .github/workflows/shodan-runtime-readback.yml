@@ -2,6 +2,14 @@ name: Shodan Runtime Readback
 
 on:
   workflow_dispatch:
+  pull_request:
+    paths:
+      - '.github/workflows/shodan-runtime-readback.yml'
+      - 'runtime/investigation_passive_index.mjs'
+      - 'runtime/investigation_passive_index_worker.mjs'
+      - 'runtime/test_investigation_passive_index.mjs'
+      - 'runtime/test_investigation_passive_index_worker.mjs'
+      - 'runtime/test_capability_rnd_receipt_compat.py'
   push:
     branches:
       - main
@@ -9,6 +17,11 @@ on:
       - '.github/workflows/shodan-runtime-readback.yml'
       - 'runtime/shodan_readback.py'
       - 'runtime/test_shodan_readback.py'
+      - 'runtime/investigation_passive_index.mjs'
+      - 'runtime/investigation_passive_index_worker.mjs'
+      - 'runtime/test_investigation_passive_index.mjs'
+      - 'runtime/test_investigation_passive_index_worker.mjs'
+      - 'runtime/test_capability_rnd_receipt_compat.py'
 
 permissions:
   contents: read
@@ -18,7 +31,28 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  verify:
+  offline-contract:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Verify Capability R&D private runtime contract
+        run: |
+          node --test \
+            runtime/test_investigation_passive_index.mjs \
+            runtime/test_investigation_passive_index_worker.mjs
+          python -m unittest runtime/test_capability_rnd_receipt_compat.py -v
+
+  live-readback:
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 4
     steps:
