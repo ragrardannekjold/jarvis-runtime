@@ -1,0 +1,119 @@
+name: AI39 30d persistence screening
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  persistence:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install --disable-pip-version-check requests numpy rasterio
+      - name: Build 30-day optical persistence for broad sectors
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          python - <<'PY'
+          import json, collections
+          from datetime import datetime, timezone
+          import numpy as np, requests, rasterio
+          from rasterio.warp import reproject
+          from rasterio.enums import Resampling
+          from rasterio.transform import from_bounds
+
+          BBOX=[37.65,48.45,38.25,48.90]
+          W,H=800,600
+          tr=from_bounds(*BBOX,W,H)
+          STAC='https://earth-search.aws.element84.com/v1/search'
+          r=requests.post(STAC,json={'collections':['sentinel-2-c1-l2a'],'bbox':BBOX,
+              'datetime':'2026-07-24T00:00:00Z/2026-08-22T23:59:59Z','limit':500},timeout=120)
+          r.raise_for_status(); items=r.json().get('features',[])
+          groups=collections.defaultdict(list)
+          for it in items:
+              dt=(it.get('properties',{}).get('datetime') or '')
+              if dt: groups[dt[:10]].append(it)
+
+          def rp(href,dtype='float32',res=Resampling.bilinear):
+              out=np.zeros((H,W),dtype=dtype)
+              with rasterio.Env(AWS_NO_SIGN_REQUEST='YES',GDAL_DISABLE_READDIR_ON_OPEN='EMPTY_DIR'):
+                  with rasterio.open(href) as ds:
+                      reproject(source=rasterio.band(ds,1),destination=out,src_transform=ds.transform,src_crs=ds.crs,
+                                src_nodata=ds.nodata,dst_transform=tr,dst_crs='EPSG:4326',dst_nodata=0,resampling=res)
+              return out
+
+          dates=[]
+          for day in sorted(groups):
+              red=np.zeros((H,W),np.float32); green=np.zeros_like(red); nir=np.zeros_like(red); swir=np.zeros_like(red); scl=np.zeros((H,W),np.uint8)
+              ids=[]
+              for it in groups[day]:
+                  a=it.get('assets',{}); req=['red','green','nir08','swir22','scl']
+                  if not all((a.get(k) or {}).get('href') for k in req): continue
+                  try:
+                      rr=rp(a['red']['href']); gg=rp(a['green']['href']); nn=rp(a['nir08']['href']); ss=rp(a['swir22']['href']); cc=rp(a['scl']['href'],'uint8',Resampling.nearest)
+                  except Exception:
+                      continue
+                  m=(rr>0)&(gg>0)&(nn>0)&(ss>0)
+                  red[m]=rr[m]; green[m]=gg[m]; nir[m]=nn[m]; swir[m]=ss[m]; scl[m]=cc[m]; ids.append(it.get('id'))
+              valid=(red>0)&(green>0)&(nir>0)&(swir>0)
+              clear=valid & np.isin(scl,[2,4,5,6,7])
+              if clear.mean()<0.20: continue
+              ndvi=np.full((H,W),np.nan,np.float32); nbr=np.full_like(ndvi,np.nan); ndwi=np.full_like(ndvi,np.nan); ndbi=np.full_like(ndvi,np.nan)
+              ndvi[clear]=(nir[clear]-red[clear])/(nir[clear]+red[clear]+1e-6)
+              nbr[clear]=(nir[clear]-swir[clear])/(nir[clear]+swir[clear]+1e-6)
+              ndwi[clear]=(green[clear]-nir[clear])/(green[clear]+nir[clear]+1e-6)
+              ndbi[clear]=(swir[clear]-nir[clear])/(swir[clear]+nir[clear]+1e-6)
+              cells=[]
+              for rr0 in range(4):
+                  for cc0 in range(4):
+                      ys=slice(rr0*H//4,(rr0+1)*H//4); xs=slice(cc0*W//4,(cc0+1)*W//4)
+                      m=clear[ys,xs]
+                      rec={'sector':f"{'ABCD'[cc0]}{rr0+1}",'clear_percent':round(float(m.mean()*100),1)}
+                      if m.sum()>100:
+                          for name,arr in [('ndvi',ndvi),('nbr',nbr),('ndwi',ndwi),('ndbi',ndbi)]:
+                              vals=arr[ys,xs][m]
+                              rec[name+'_median']=round(float(np.nanmedian(vals)),4)
+                              rec[name+'_iqr']=round(float(np.nanpercentile(vals,75)-np.nanpercentile(vals,25)),4)
+                      cells.append(rec)
+              dates.append({'date':day,'product_ids':ids,'overall_clear_percent':round(float(clear.mean()*100),1),'cells':cells})
+
+          # Persistence/change summary for selected broad sectors only.
+          selected=['A4','C3','D1','A1']
+          series={s:[] for s in selected}
+          for day in dates:
+              by={c['sector']:c for c in day['cells']}
+              for s in selected:
+                  c=by.get(s,{})
+                  if c.get('clear_percent',0)>=30 and 'nbr_median' in c:
+                      series[s].append({'date':day['date'],'clear_percent':c['clear_percent'],'nbr':c['nbr_median'],'ndvi':c['ndvi_median'],'ndwi':c['ndwi_median'],'ndbi':c['ndbi_median']})
+
+          summary={}
+          for s,arr in series.items():
+              jumps=[]
+              for a,b in zip(arr,arr[1:]):
+                  jumps.append({'from':a['date'],'to':b['date'],
+                                'delta_nbr':round(b['nbr']-a['nbr'],4),'delta_ndvi':round(b['ndvi']-a['ndvi'],4),
+                                'delta_ndbi':round(b['ndbi']-a['ndbi'],4),'delta_ndwi':round(b['ndwi']-a['ndwi'],4)})
+              sig=[j for j in jumps if abs(j['delta_nbr'])>=0.05 or abs(j['delta_ndvi'])>=0.05 or abs(j['delta_ndbi'])>=0.05]
+              summary[s]={'usable_dates':len(arr),'first_date':arr[0]['date'] if arr else None,'last_date':arr[-1]['date'] if arr else None,
+                          'series':arr,'significant_jumps':sig,
+                          'persistent_change_flag': bool(len(arr)>=3 and sig and abs(arr[-1]['nbr']-arr[0]['nbr'])>=0.05)}
+          out={'generated_utc':datetime.now(timezone.utc).isoformat(),'window':['2026-07-24','2026-08-22'],
+               'usable_optical_dates':[d['date'] for d in dates], 'selected_sector_summary':summary,
+               'limit':'Broad-sector spectral persistence only. Does not identify people, occupancy, routes, or cause; VHR/independent evidence required for structural or human-use claims.'}
+          json.dump(out,open('out/persistence_30d.json','w'),indent=2)
+          print(json.dumps({'dates':out['usable_optical_dates'],'summary':{k:{'usable_dates':v['usable_dates'],'persistent_change_flag':v['persistent_change_flag'],'significant_jumps':v['significant_jumps']} for k,v in summary.items()}},indent=2))
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ai39-30d-persistence
+          path: out/persistence_30d.json
+          if-no-files-found: error
+          retention-days: 2
