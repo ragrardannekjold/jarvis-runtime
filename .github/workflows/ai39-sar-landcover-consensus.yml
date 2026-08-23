@@ -1,4 +1,4 @@
-name: AI39 SAR landcover repeat consensus
+name: AI39 SAR localized landcover consensus
 
 on:
   pull_request:
@@ -16,7 +16,7 @@ jobs:
         with:
           python-version: '3.12'
       - run: python -m pip install --disable-pip-version-check numpy scipy rasterio pystac-client planetary-computer
-      - name: Broad SAR repeat consensus by landcover class
+      - name: Localized SAR repeat consensus by landcover class
         shell: bash
         run: |
           set -euo pipefail
@@ -47,7 +47,6 @@ jobs:
                     src_nodata=ds.nodata,dst_transform=TR,dst_crs='EPSG:4326',dst_nodata=nodata,resampling=resampling)
               return out
 
-          # 2023 landcover is used strictly as a historical prior.
           lc=np.zeros((H,W),np.uint8); lc_ids=[]
           for it in cat.search(collections=['io-lulc-9-class'],bbox=BBOX,datetime='2023-01-01/2023-12-31').items():
               a=it.assets.get('data') or it.assets.get('map') or next((x for x in it.assets.values() if x.href.lower().endswith(('.tif','.tiff'))),None)
@@ -93,58 +92,63 @@ jobs:
           def db(x,v):
               med=float(np.nanmedian(x[v])); return x.copy() if med<0 else 10*np.log10(np.maximum(x,1e-12))
 
-          active=np.zeros((H,W),np.uint8); support=np.zeros((H,W),np.uint8); pairs=[]
+          pair_masks=[]; pairs=[]
           for b,a,geom,ia,ib in chosen:
               va=mosaic(ia,'vv'); ha=mosaic(ia,'vh'); vb=mosaic(ib,'vv'); hb=mosaic(ib,'vh')
               v=np.isfinite(va)&np.isfinite(ha)&np.isfinite(vb)&np.isfinite(hb)&(va!=0)&(ha!=0)&(vb!=0)&(hb!=0)
               if v.mean()<0.35:
                   pairs.append({'pair':[a,b],'geometry':[geom[0],geom[1],geom[2]],'status':'INSUFFICIENT_OVERLAP'}); continue
-              av=db(va,v); ah=db(ha,v); bv=db(vb,v); bh=db(hb,v)
-              mag=np.sqrt(((bv-av)**2+(bh-ah)**2)/2)
-              hit=v&(mag>=3.0)
-              support+=v.astype(np.uint8); active+=hit.astype(np.uint8)
-              pairs.append({'pair':[a,b],'geometry':[geom[0],geom[1],geom[2]],'status':'MEASURED','valid_percent':round(float(v.mean()*100),2),'hit_percent':round(float(hit.sum()/v.sum()*100),3)})
+              av=db(va,v); ah=db(ha,v); bv=db(vb,v); bh=db(hb,v); mag=np.sqrt(((bv-av)**2+(bh-ah)**2)/2)
+              raw_hit=v&(mag>=3.0); raw_pct=float(raw_hit.sum()/v.sum()*100)
+              if raw_pct>=25.0:
+                  pairs.append({'pair':[a,b],'geometry':[geom[0],geom[1],geom[2]],'status':'GLOBAL_NOISE_EXCLUDED','valid_percent':round(float(v.mean()*100),2),'raw_ge3db_percent':round(raw_pct,3)})
+                  continue
+              q90=float(np.nanpercentile(mag[v],90)); thr=max(3.0,q90); hit=v&(mag>=thr)
+              pair_masks.append((v,hit))
+              pairs.append({'pair':[a,b],'geometry':[geom[0],geom[1],geom[2]],'status':'LOCALIZED_MEASURED','valid_percent':round(float(v.mean()*100),2),'raw_ge3db_percent':round(raw_pct,3),'localized_threshold_db':round(thr,3),'localized_hit_percent':round(float(hit.sum()/v.sum()*100),3)})
 
-          enough=support>=3
+          active=np.zeros((H,W),np.uint8); support=np.zeros((H,W),np.uint8)
+          for v,h in pair_masks: support+=v.astype(np.uint8); active+=h.astype(np.uint8)
+          enough=support>=min(3,max(1,len(pair_masks)))
           rep2=enough&(active>=2); rep3=enough&(active>=3)
 
           def pct(mask,den):
-              n=int(den.sum()); return round(float((mask&den).sum()/n*100),3) if n>100 else 0.0
+              n=int(den.sum()); return float((mask&den).sum()/n*100) if n>100 else 0.0
           def morph(mask):
-              lab,n=ndi.label(mask,structure=np.ones((3,3),int)); objs=ndi.find_objects(lab); rows=[]
-              for i,sl in enumerate(objs,1):
+              lab,n=ndi.label(mask,structure=np.ones((3,3),int)); rows=[]
+              for i,sl in enumerate(ndi.find_objects(lab),1):
                   if sl is None: continue
                   c=(lab[sl]==i); area=int(c.sum())
                   if area<4: continue
-                  yy,xx=np.where(c); h=sl[0].stop-sl[0].start; w=sl[1].stop-sl[1].start
-                  elong=1.0
+                  yy,xx=np.where(c); h=sl[0].stop-sl[0].start; w=sl[1].stop-sl[1].start; elong=1.0
                   if area>=3:
-                      cv=np.cov(np.vstack([xx,yy])); vals=np.linalg.eigvalsh(cv); elong=float(math.sqrt((vals.max()+1e-9)/(vals.min()+1e-9)))
-                  rows.append((area,max(w/h,h/w),elong,area/(w*h)))
-              rows.sort(reverse=True)
+                      vals=np.linalg.eigvalsh(np.cov(np.vstack([xx,yy]))); elong=float(math.sqrt((vals.max()+1e-9)/(vals.min()+1e-9)))
+                  rows.append((area,elong,area/(w*h)))
               big=[x for x in rows if x[0]>=8]
-              return {'components_ge4':len(rows),'components_ge8':len(big),'largest_component_px':rows[0][0] if rows else 0,'max_elongation_ge8':round(max((x[2] for x in big),default=0),2),'median_fill_ge8':round(float(np.median([x[3] for x in big])),3) if big else None}
+              return {'components_ge8':len(big),'largest_component_px':max((x[0] for x in big),default=0),'max_elongation_ge8':round(max((x[1] for x in big),default=0),2),'median_fill_ge8':round(float(np.median([x[2] for x in big])),3) if big else None}
 
           sectors=[]
           for rr in range(4):
               for cc in range(4):
                   sec=f"{'ABCD'[cc]}{rr+1}"; ys=slice(rr*H//4,(rr+1)*H//4); xs=slice(cc*W//4,(cc+1)*W//4)
-                  sup=enough[ys,xs]; c=crop[ys,xs]&sup; n=noncrop[ys,xs]&sup; b=built[ys,xs]&sup
-                  r2=rep2[ys,xs]; r3=rep3[ys,xs]
-                  total_hits=int(r2.sum()); crop_hits=int((r2&c).sum()); noncrop_hits=int((r2&n).sum())
-                  crop_share=round(crop_hits/max(total_hits,1)*100,1)
+                  sup=enough[ys,xs]; r2=rep2[ys,xs]; r3=rep3[ys,xs]; c=crop[ys,xs]&sup; n=noncrop[ys,xs]&sup; b=built[ys,xs]&sup
                   p2=pct(r2,sup); p3=pct(r3,sup); pc=pct(r2,c); pn=pct(r2,n); pb=pct(r2,b)
+                  total_sup=max(int(sup.sum()),1); total_hit=max(int(r2.sum()),1)
+                  crop_sup_share=float(c.sum()/total_sup*100); noncrop_sup_share=float(n.sum()/total_sup*100)
+                  crop_hit_share=float((r2&c).sum()/total_hit*100); noncrop_hit_share=float((r2&n).sum()/total_hit*100)
+                  crop_enrich=crop_hit_share/max(crop_sup_share,0.01); noncrop_enrich=noncrop_hit_share/max(noncrop_sup_share,0.01)
                   mm=morph(r2&n)
-                  score=min(10,1.8*pn+0.8*p3+0.25*min(mm['max_elongation_ge8'],8))
                   status='LOW'
-                  if crop_share>=75 and pn<0.5: status='CROP_DOMINATED'
-                  elif pn>=1.0 and mm['components_ge8']>=1: status='NONCROP_REPEAT_CANDIDATE'
-                  elif pn>=0.5: status='WEAK_NONCROP_REPEAT'
-                  sectors.append({'sector':sec,'repeat2_percent':p2,'repeat3_percent':p3,'repeat2_crop_percent':pc,'repeat2_noncrop_percent':pn,'repeat2_built_percent':pb,'repeat2_crop_share_percent':crop_share,'noncrop_morphology':mm,'priority_score_0_10':round(score,2),'status':status})
-          sectors.sort(key=lambda x:x['priority_score_0_10'],reverse=True)
-          out={'status':'MEASURED','generated_utc':datetime.now(timezone.utc).isoformat(),'scope':'Broad 4x4 SAR repeat-consensus by historical landcover class; no coordinates, maps, routes or target-level output','window':[START,END],'measured_pairs':sum(1 for p in pairs if p['status']=='MEASURED'),'pair_summary':pairs,'landcover_items':lc_ids,'sector_summary':sectors,'method_limit':['2023 landcover is a historical prior, not 2026 ground truth.','SAR repeat can reflect moisture, vegetation, roughness or structure; this test only asks whether repeat signal is crop-dominated or survives on non-crop surfaces.','Linearity at this broad resolution is a lead, not proof of trenching or fortification.']}
+                  if p2>=0.25:
+                      status='MIXED_UNRESOLVED'
+                      if crop_enrich>=1.15 and noncrop_enrich<0.95: status='CROP_FAVORED_REPEAT'
+                      if noncrop_enrich>=1.20 and pn>=0.50 and mm['components_ge8']>=1: status='NONCROP_LOCALIZED_CANDIDATE'
+                  score=min(10,max(0,(noncrop_enrich-0.8)*2.5)+min(pn,3)*0.8+min(p3,2)*0.7+min(mm['max_elongation_ge8'],6)*0.15)
+                  sectors.append({'sector':sec,'repeat2_percent':round(p2,3),'repeat3_percent':round(p3,3),'repeat2_crop_rate_percent':round(pc,3),'repeat2_noncrop_rate_percent':round(pn,3),'repeat2_built_rate_percent':round(pb,3),'crop_support_share_percent':round(crop_sup_share,1),'crop_hit_share_percent':round(crop_hit_share,1),'crop_enrichment':round(crop_enrich,2),'noncrop_enrichment':round(noncrop_enrich,2),'noncrop_morphology':mm,'lead_score_0_10':round(score,2),'status':status})
+          sectors.sort(key=lambda x:x['lead_score_0_10'],reverse=True)
+          out={'status':'MEASURED','generated_utc':datetime.now(timezone.utc).isoformat(),'scope':'Broad 4x4 localized SAR repeat-consensus by historical landcover; no coordinates, maps, routes or target-level output','window':[START,END],'localized_pairs':len(pair_masks),'pair_summary':pairs,'landcover_items':lc_ids,'sector_summary':sectors,'method_limit':['Pairs with >=25% AOI-wide >=3 dB change are excluded as global-noise/confound candidates.','Remaining pairs contribute only their top localized change tail: max(3 dB, pair 90th percentile).','2023 landcover is a historical prior, not 2026 ground truth.','Linearity at this broad resolution is a lead, not proof of trenching or fortification.']}
           with open('out/analysis.json','w') as f: json.dump(out,f,indent=2)
-          print(json.dumps({'measured_pairs':out['measured_pairs'],'top':sectors[:10]},indent=2))
+          print(json.dumps({'localized_pairs':len(pair_masks),'excluded_pairs':[p for p in pairs if p['status']=='GLOBAL_NOISE_EXCLUDED'],'top':sectors[:10]},indent=2))
           PY
       - uses: actions/upload-artifact@v4
         with:
