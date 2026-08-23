@@ -5,6 +5,7 @@ on:
     branches: [main]
     paths:
       - 'runtime/ai39_sar_noncrop_morphology.py'
+      - 'runtime/ai39_sar_noncrop_compare_v2.py'
       - 'runtime/test_ai39_sar_noncrop_morphology.py'
       - '.github/workflows/ai39-sar-noncrop-morphology.yml'
 
@@ -24,7 +25,10 @@ jobs:
       - name: Compile and run morphology tests
         run: |
           set -euo pipefail
-          python -m py_compile runtime/ai39_sar_noncrop_morphology.py runtime/test_ai39_sar_noncrop_morphology.py
+          python -m py_compile \
+            runtime/ai39_sar_noncrop_morphology.py \
+            runtime/ai39_sar_noncrop_compare_v2.py \
+            runtime/test_ai39_sar_noncrop_morphology.py
           PYTHONPATH=runtime python -m unittest runtime/test_ai39_sar_noncrop_morphology.py -v
 
   year:
@@ -33,7 +37,7 @@ jobs:
       matrix:
         year: [2025, 2026]
     runs-on: ubuntu-latest
-    timeout-minutes: 24
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -42,12 +46,12 @@ jobs:
       - run: >-
           python -m pip install --disable-pip-version-check
           numpy scipy rasterio pystac-client planetary-computer
-      - name: Run bounded year morphology
+      - name: Run bounded year morphology with wider pair pool
         run: |
           set -euo pipefail
           mkdir -p out
           python runtime/ai39_sar_noncrop_morphology.py year \
-            --year ${{ matrix.year }} --max-pairs 4 \
+            --year ${{ matrix.year }} --max-pairs 8 \
             --out out/year-${{ matrix.year }}.json
       - uses: actions/upload-artifact@v4
         if: always()
@@ -75,11 +79,11 @@ jobs:
         with:
           name: ai39-sar-noncrop-2026
           path: in/2026
-      - name: Compare 2026 to seasonal control
+      - name: Compare 2026 to seasonal control with hardened gate
         run: |
           set -euo pipefail
           mkdir -p out
-          python runtime/ai39_sar_noncrop_morphology.py compare \
+          PYTHONPATH=runtime python runtime/ai39_sar_noncrop_compare_v2.py \
             --current in/2026/year-2026.json \
             --historical in/2025/year-2025.json \
             --out out/comparison.json
@@ -95,12 +99,14 @@ jobs:
           import json
           data=json.load(open('out/comparison.json'))
           assert data['status']=='MEASURED', data
+          assert data['comparison_version']=='V2_HARDENED', data
           assert len(data['comparisons'])==16, data
+          assert data['preliminary_v1_audit']['status']=='REJECTED_AS_PREMATURE', data
           assert data['d4']['state'] in {
               'UNRESOLVED_NONCROP_REPEAT_LEAD',
               'WEAK_NONCROP_DIFFERENCE',
               'NO_NONCROP_ESCALATION',
               'INSUFFICIENT_DATA',
           }, data
-          print('AI39_SAR_NONCROP_MORPHOLOGY_PASS')
+          print('AI39_SAR_NONCROP_MORPHOLOGY_V2_PASS')
           PY
