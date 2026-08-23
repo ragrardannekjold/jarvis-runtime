@@ -2,6 +2,7 @@ const PUBLIC_TRIGGER_KEYS = new Set(["schema_version", "job_ref"]);
 const PRIVATE_JOB_TYPES = new Set([
   "private_integrity_probe",
   "command_center_validation",
+  "ai39_cybint_refresh",
 ]);
 
 const JOB_REF_RE = /^paj-[a-f0-9]{24}$/;
