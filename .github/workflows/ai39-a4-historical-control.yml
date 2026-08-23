@@ -1,0 +1,132 @@
+name: AI39 A4 exact historical control
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  control:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install --disable-pip-version-check pystac-client planetary-computer rasterio numpy requests pillow
+      - name: Compare A4 Aug optical and thermal base rates
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          python - <<'PY'
+          import io,json
+          from datetime import datetime,timezone
+          import requests,numpy as np,rasterio
+          from PIL import Image
+          from rasterio.vrt import WarpedVRT
+          from rasterio.enums import Resampling
+          from rasterio.transform import from_bounds
+          import planetary_computer
+          from pystac_client import Client
+
+          FULL=[37.65,48.45,38.25,48.90]
+          dx=(FULL[2]-FULL[0])/4; dy=(FULL[3]-FULL[1])/4
+          BBOX=[FULL[0]+3*dx,FULL[3]-dy,FULL[2],FULL[3]]
+          W=H=320
+          transform=from_bounds(*BBOX,W,H)
+          cat=Client.open('https://planetarycomputer.microsoft.com/api/stac/v1',modifier=planetary_computer.sign_inplace)
+
+          def read_asset(it,key,resampling=Resampling.bilinear):
+              with rasterio.open(it.assets[key].href) as ds:
+                  with WarpedVRT(ds,crs='EPSG:4326',transform=transform,width=W,height=H,resampling=resampling,nodata=np.nan) as vrt:
+                      return vrt.read(1).astype(np.float32)
+
+          def choose(year,target_day):
+              start=f'{year}-08-{max(1,target_day-3):02d}'
+              end=f'{year}-08-{min(31,target_day+3):02d}'
+              its=list(cat.search(collections=['sentinel-2-l2a'],bbox=BBOX,datetime=f'{start}/{end}',max_items=80).items())
+              target=datetime(year,8,target_day,tzinfo=timezone.utc)
+              rows=[]
+              for it in its:
+                  dt=it.datetime; cloud=it.properties.get('eo:cloud_cover')
+                  if dt and isinstance(cloud,(int,float)):
+                      score=abs((dt-target).total_seconds())/86400 + max(float(cloud),0)/50
+                      rows.append((score,dt,float(cloud),it))
+              return min(rows,key=lambda x:x[0]) if rows else None
+
+          def optical_pair(year):
+              a=choose(year,15); b=choose(year,20)
+              if not a or not b or a[3].id==b[3].id:
+                  return {'year':year,'status':'INSUFFICIENT_DATA'}
+              def calc(x):
+                  _,dt,cloud,it=x
+                  b4=read_asset(it,'B04'); b8=read_asset(it,'B08'); b11=read_asset(it,'B11'); b12=read_asset(it,'B12')
+                  scl=read_asset(it,'SCL',Resampling.nearest)
+                  good=np.isfinite(b4)&np.isfinite(b8)&np.isfinite(b11)&np.isfinite(b12)&~np.isin(scl,[0,1,3,8,9,10,11])
+                  eps=1e-6
+                  return {'dt':dt,'cloud':cloud,'id':it.id,'good':good,
+                          'ndvi':(b8-b4)/(b8+b4+eps),'nbr':(b8-b12)/(b8+b12+eps),'ndbi':(b11-b8)/(b11+b8+eps)}
+              x=calc(a); y=calc(b); both=x['good']&y['good']
+              if both.mean()<0.20:
+                  return {'year':year,'status':'INSUFFICIENT_CLEAR_OVERLAP','joint_valid_pct':round(float(both.mean()*100),2)}
+              dndvi=y['ndvi']-x['ndvi']; dnbr=y['nbr']-x['nbr']; dndbi=y['ndbi']-x['ndbi']
+              return {
+                 'year':year,'status':'SCREENED',
+                 'before_utc':x['dt'].isoformat(),'after_utc':y['dt'].isoformat(),
+                 'before_cloud_pct':round(x['cloud'],2),'after_cloud_pct':round(y['cloud'],2),
+                 'joint_valid_pct':round(float(both.mean()*100),2),
+                 'median_dndvi':round(float(np.median(dndvi[both])),4),
+                 'median_dnbr':round(float(np.median(dnbr[both])),4),
+                 'median_dndbi':round(float(np.median(dndbi[both])),4),
+                 'pct_abs_dnbr_ge_0_10':round(float((np.abs(dnbr[both])>=0.10).mean()*100),3),
+                 'pct_abs_dndbi_ge_0_10':round(float((np.abs(dndbi[both])>=0.10).mean()*100),3)
+              }
+
+          optical=[optical_pair(y) for y in (2023,2024,2025,2026)]
+
+          # NASA GIBS thermal rendered-symbol base-rate for the identical Aug17-20 window.
+          WMS='https://gibs.earthdata.nasa.gov/wms/epsg4326/best/wms.cgi'
+          FULL_BBOX='37.65,48.45,38.25,48.90'; IW,IH=800,600
+          LAYERS=['VIIRS_SNPP_Thermal_Anomalies_375m_All','VIIRS_NOAA20_Thermal_Anomalies_375m_All','VIIRS_NOAA21_Thermal_Anomalies_375m_All']
+          thermal=[]
+          for year in (2023,2024,2025,2026):
+              rec={'year':year,'dates':[],'peak_a4_symbol_pixels':0,'sum_a4_symbol_pixels':0,'status':'SCREENED'}
+              for day in (17,18,19,20):
+                  date=f'{year}-08-{day:02d}'; union=np.zeros((IH,IW),bool); used=0
+                  for layer in LAYERS:
+                      try:
+                          params={'SERVICE':'WMS','VERSION':'1.1.1','REQUEST':'GetMap','TIME':date+'T00:00:00Z','LAYERS':layer,'FORMAT':'image/png','STYLES':'','HEIGHT':IH,'SRS':'epsg:4326','WIDTH':IW,'BBOX':FULL_BBOX,'TRANSPARENT':'TRUE'}
+                          r=requests.get(WMS,params=params,timeout=75); r.raise_for_status()
+                          if 'image' not in r.headers.get('content-type','').lower(): continue
+                          a=np.array(Image.open(io.BytesIO(r.content)).convert('RGBA'))
+                          union|=(a[:,:,3]>0); used+=1
+                      except Exception:
+                          pass
+                  # A4 is top row/eastmost col in the fixed rendering.
+                  a4=union[0:IH//4,3*IW//4:IW]
+                  count=int(a4.sum())
+                  rec['dates'].append({'date':date,'a4_symbol_pixels':count,'layers_used':used})
+                  rec['peak_a4_symbol_pixels']=max(rec['peak_a4_symbol_pixels'],count)
+                  rec['sum_a4_symbol_pixels']+=count
+              thermal.append(rec)
+
+          out={
+            'generated_utc':datetime.now(timezone.utc).isoformat(),
+            'sector':'A4',
+            'optical_same_season_control':optical,
+            'thermal_same_window_control':thermal,
+            'interpretation_limit':'Historical control tests whether the 2026 broad optical/thermal pattern is unusual for the same seasonal window. Thermal symbol pixels are rendered footprint area, not fire counts; optical changes can be agricultural/phenological.',
+            'safety':'Broad A4 sector only; no coordinates or target-level output.'
+          }
+          json.dump(out,open('out/control.json','w'),indent=2)
+          print(json.dumps(out,indent=2))
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ai39-a4-historical-control
+          path: out/control.json
+          if-no-files-found: error
+          retention-days: 2
