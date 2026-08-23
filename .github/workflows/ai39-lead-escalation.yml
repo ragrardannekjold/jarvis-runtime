@@ -31,6 +31,7 @@ jobs:
           from rasterio.warp import transform_bounds
           from rasterio.enums import Resampling
           from rasterio.env import Env
+          from rasterio.crs import CRS
 
           API='https://earth-search.aws.element84.com/v1/search'
           BBOX=[37.65,48.45,38.25,48.90]
@@ -55,13 +56,24 @@ jobs:
                   if 'vv' in k.lower() and isinstance(v,dict) and v.get('href'): return v['href']
               raise RuntimeError('vv_asset_missing')
 
+          def item_crs(f, ds):
+              if ds.crs: return ds.crs
+              p=f.get('properties') or {}
+              code=p.get('proj:code')
+              epsg=p.get('proj:epsg')
+              if code: return CRS.from_user_input(code)
+              if epsg: return CRS.from_epsg(int(epsg))
+              # Broad AOI is in UTM zone 37N; this is a metadata fallback only.
+              return CRS.from_epsg(32637)
+
           hrefs=[vv_href(x) for x in items]
           arrays=[]
           shape=(800,1000)
           with Env(AWS_NO_SIGN_REQUEST='YES'):
-              for href in hrefs:
+              for f,href in zip(items,hrefs):
                   with rasterio.open(href) as ds:
-                      b=transform_bounds('EPSG:4326',ds.crs,*BBOX,densify_pts=21)
+                      src_crs=item_crs(f,ds)
+                      b=transform_bounds('EPSG:4326',src_crs,*BBOX,densify_pts=21)
                       win=from_bounds(*b,transform=ds.transform)
                       arr=ds.read(1,window=win,out_shape=shape,resampling=Resampling.bilinear,boundless=True,fill_value=np.nan).astype('float32')
                       if ds.nodata is not None: arr[arr==ds.nodata]=np.nan
