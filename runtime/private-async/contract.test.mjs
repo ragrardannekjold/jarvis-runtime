@@ -42,6 +42,18 @@ test("private job accepts allowlisted private contract", () => {
   assert.equal(job.sensitivity, "private");
 });
 
+test("private job accepts bounded AI-39 CYBINT type without public metadata", () => {
+  const job = parsePrivateJob({
+    schema_version: 1,
+    job_ref: ref,
+    job_type: "ai39_cybint_refresh",
+    sensitivity: "private",
+    payload: { asn: "AS202279", historical_reference_total: 488 },
+  }, ref);
+  assert.equal(job.job_type, "ai39_cybint_refresh");
+  assert.equal(job.payload.asn, "AS202279");
+});
+
 test("private job rejects non-allowlisted execution", () => {
   assert.throws(
     () => parsePrivateJob({

@@ -1,0 +1,24 @@
+name: AI39 private async CYBINT tests
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'runtime/private-async/**'
+      - '.github/workflows/private-async-bridge.yml'
+      - '.github/workflows/ai39-private-async-cybint-ci.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+      - name: Run private async contract and AI-39 CYBINT tests
+        run: node --test runtime/private-async/contract.test.mjs runtime/private-async/ai39_cybint.test.mjs

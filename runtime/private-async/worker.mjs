@@ -3,6 +3,7 @@ import crypto from "node:crypto";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { parsePublicTrigger, parsePrivateJob, buildPublicStatus } from "./contract.mjs";
+import { runAi39CybintRefresh } from "./ai39_cybint.mjs";
 
 const execFileAsync = promisify(execFile);
 const PRIVATE_REPO = "ragrardannekjold/jarvis-command-center";
@@ -138,6 +139,9 @@ async function executePrivateJob(job) {
   }
   if (job.job_type === "command_center_validation") {
     return runCommandCenterValidation();
+  }
+  if (job.job_type === "ai39_cybint_refresh") {
+    return runAi39CybintRefresh(job.payload);
   }
   throw new Error("unreachable_private_job_type");
 }
