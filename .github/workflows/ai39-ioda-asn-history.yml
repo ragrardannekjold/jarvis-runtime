@@ -1,0 +1,86 @@
+name: AI39 IODA ASN history corroborator
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  analyze:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install --disable-pip-version-check requests
+      - name: Aggregate ASN active-probing and BGP visibility history
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          python - <<'PY'
+          import json, math, statistics, requests, datetime
+          ASN='202279'
+          BASE='https://api.ioda.inetintel.cc.gatech.edu/v2'
+          START=datetime.datetime(2026,1,1,tzinfo=datetime.timezone.utc)
+          END=datetime.datetime(2026,8,23,tzinfo=datetime.timezone.utc)
+          OUT={'generated_utc':datetime.datetime.now(datetime.timezone.utc).isoformat(),'scope':'Aggregate IODA ASN history only; no IPs, hosts, routes, prefix identities or exact locations retained.','asn':'AS'+ASN,'series':{}}
+
+          def walk(o):
+              if isinstance(o,dict):
+                  if 'datasource' in o and 'values' in o: yield o
+                  for v in o.values(): yield from walk(v)
+              elif isinstance(o,list):
+                  for v in o: yield from walk(v)
+          def pdt(x):
+              if isinstance(x,(int,float)):
+                  try:return datetime.datetime.fromtimestamp(float(x),datetime.timezone.utc)
+                  except:return None
+              if isinstance(x,str):
+                  try:
+                      d=datetime.datetime.fromisoformat(x.replace('Z','+00:00')); return d if d.tzinfo else d.replace(tzinfo=datetime.timezone.utc)
+                  except:return None
+              return None
+          def extract(datasource):
+              params={'from':int(START.timestamp()),'until':int(END.timestamp()),'datasource':datasource,'maxPoints':1400}
+              r=requests.get(f'{BASE}/signals/raw/asn/{ASN}',params=params,timeout=90,headers={'User-Agent':'AI39-aggregate-passive-research/1.0'})
+              rec={'http_status':r.status_code,'status':'UNAVAILABLE','points':0,'monthly':[]}
+              if r.status_code!=200: return rec
+              o=r.json(); pts=[]
+              for s in walk(o):
+                  if str(s.get('datasource'))!=datasource: continue
+                  vals=s.get('values')
+                  if not isinstance(vals,list): continue
+                  for v in vals:
+                      if isinstance(v,list) and len(v)>=2:
+                          dt=pdt(v[0]); y=v[-1]
+                          if dt and isinstance(y,(int,float)) and math.isfinite(float(y)): pts.append((dt,float(y)))
+                      elif isinstance(v,(int,float)):
+                          pass
+              by={}
+              for dt,y in pts: by.setdefault(dt.strftime('%Y-%m'),[]).append(y)
+              monthly=[]
+              for m in sorted(by):
+                  a=by[m]
+                  monthly.append({'month':m,'median':round(float(statistics.median(a)),4),'p10':round(float(sorted(a)[max(0,int(len(a)*.10)-1)]),4),'p90':round(float(sorted(a)[min(len(a)-1,int(len(a)*.90))]),4),'points':len(a)})
+              rec.update({'status':'MEASURED' if pts else 'NO_SERIES','points':len(pts),'monthly':monthly})
+              if len(monthly)>=2 and monthly[0]['median']!=0:
+                  rec['first_to_latest_pct']=round((monthly[-1]['median']-monthly[0]['median'])/abs(monthly[0]['median'])*100,2)
+              return rec
+
+          for ds in ['ping-slash24','bgp']:
+              try: OUT['series'][ds]=extract(ds)
+              except Exception as e: OUT['series'][ds]={'status':'ERROR','error_class':type(e).__name__}
+          OUT['interpretation_limit']='IODA reachability/BGP series indicate network visibility or probing response, not people, military use, ownership, operational control or physical location.'
+          with open('out/ioda_asn_history.json','w') as f: json.dump(OUT,f,indent=2)
+          print(json.dumps(OUT,indent=2))
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ai39-ioda-asn-history
+          path: out/ioda_asn_history.json
+          if-no-files-found: error
+          retention-days: 2
