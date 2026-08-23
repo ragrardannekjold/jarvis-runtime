@@ -1,0 +1,95 @@
+name: AI39 Miranda Media Donetsk aggregate corroboration
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  corroborate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    env:
+      SHODAN_API_KEY: ${{ secrets.SHODAN_API_KEY }}
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install --disable-pip-version-check requests
+      - name: Passive Miranda Donetsk aggregate check
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          python - <<'PY'
+          import json, os, time
+          from datetime import datetime, timezone
+          import requests
+
+          key=os.environ.get('SHODAN_API_KEY','').strip()
+          out={
+            'generated_utc':datetime.now(timezone.utc).isoformat(),
+            'scope':'Passive aggregate Miranda Media presence check for broad Donetsk city metadata. No IPs, hosts, banners, vulnerabilities, screenshots, exact locations or prefixes retained.',
+            'status':'UNKNOWN','queries':[], 'ripe':{}, 'credits_before':None,'credits_after':None,'credits_delta':None,
+            'interpretation_limit':'Shodan geolocation/org metadata can be stale or inaccurate. A positive result supports current indexed technical presence at broad metadata level; it does not identify physical sites or end-use.'
+          }
+          def persist(): json.dump(out,open('out/miranda.json','w'),indent=2)
+          def api_info():
+              try:
+                  r=requests.get('https://api.shodan.io/api-info',params={'key':key},timeout=20)
+                  if r.status_code==429:return None,'RATE_LIMITED'
+                  r.raise_for_status();return r.json().get('query_credits'),'OK'
+              except Exception as e:return None,type(e).__name__
+          def count(q):
+              r=requests.get('https://api.shodan.io/shodan/host/count',params={'key':key,'query':q,'facets':'port:100,product:100,device:50,org:30,asn:30'},timeout=45)
+              if r.status_code==429: raise RuntimeError('RATE_LIMITED')
+              r.raise_for_status(); return r.json()
+          def safe_row(q):
+              rec={'query':q,'status':'UNKNOWN','total':None,'interesting_ports':{},'top_products':[],'top_devices':[],'top_orgs':[],'top_asns':[]}
+              try:
+                  j=count(q); rec['total']=j.get('total',0); f=j.get('facets',{}) or {}
+                  interest={161:'SNMP',554:'RTSP',3478:'STUN',5060:'SIP',102:'S7',502:'Modbus',4840:'OPC-UA'}
+                  for r in f.get('port',[]) or []:
+                      p=r.get('value'); c=r.get('count')
+                      if isinstance(p,int) and p in interest and isinstance(c,int) and c>0: rec['interesting_ports'][str(p)]={'class':interest[p],'count':c}
+                  rec['top_products']=(f.get('product',[]) or [])[:20]
+                  rec['top_devices']=(f.get('device',[]) or [])[:15]
+                  rec['top_orgs']=(f.get('org',[]) or [])[:20]
+                  rec['top_asns']=(f.get('asn',[]) or [])[:20]
+                  rec['status']='MEASURED'
+              except Exception as e:
+                  rec['status']='PROVIDER_BACKPRESSURE' if 'RATE_LIMITED' in str(e) else 'ERROR'; rec['error_class']=type(e).__name__
+              return rec
+          def ripe(asn):
+              rec={'asn':asn,'status':'UNKNOWN','holder':None,'announced':None,'announced_prefix_count':None}
+              try:
+                  r=requests.get('https://stat.ripe.net/data/as-overview/data.json',params={'resource':asn},timeout=30);r.raise_for_status();d=r.json().get('data') or {}
+                  rec['holder']=d.get('holder'); rec['announced']=d.get('announced')
+                  p=requests.get('https://stat.ripe.net/data/announced-prefixes/data.json',params={'resource':asn},timeout=30);p.raise_for_status();rec['announced_prefix_count']=len(((p.json().get('data') or {}).get('prefixes') or []));rec['status']='MEASURED'
+              except Exception as e: rec['status']='ERROR';rec['error_class']=type(e).__name__
+              return rec
+
+          if not key:
+              out['status']='NO_SECRET';persist();raise SystemExit
+          out['credits_before'],out['credit_pre']=api_info();persist()
+          # Main Miranda ASN, then an organization-label fallback only if needed.
+          for q in ['asn:AS201776 city:"Donetsk"','org:"Miranda-Media" city:"Donetsk"']:
+              row=safe_row(q);out['queries'].append(row);persist();time.sleep(1.1)
+              if row.get('status')=='MEASURED' and (row.get('total') or 0)>0: break
+          out['ripe']['AS201776']=ripe('AS201776');persist()
+          out['credits_after'],out['credit_post']=api_info()
+          if isinstance(out['credits_before'],int) and isinstance(out['credits_after'],int):out['credits_delta']=out['credits_before']-out['credits_after']
+          positive=any(r.get('status')=='MEASURED' and (r.get('total') or 0)>0 for r in out['queries'])
+          out['status']='POSITIVE_AGGREGATE' if positive else ('MEASURED_ZERO_OR_ALIAS_GAP' if any(r.get('status')=='MEASURED' for r in out['queries']) else 'PROVIDER_BACKPRESSURE')
+          persist()
+          print(json.dumps(out,indent=2))
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ai39-miranda-donetsk-aggregate
+          path: out/miranda.json
+          if-no-files-found: error
+          retention-days: 2
