@@ -1,0 +1,31 @@
+name: Async Job Worker CI
+
+on:
+  pull_request:
+    paths:
+      - 'runtime/async-jobs/**'
+      - '.github/workflows/async-job-worker*.yml'
+      - 'PUBLIC_EXPORT_MANIFEST.json'
+  push:
+    branches: [main]
+    paths:
+      - 'runtime/async-jobs/**'
+      - '.github/workflows/async-job-worker*.yml'
+      - 'PUBLIC_EXPORT_MANIFEST.json'
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Syntax check worker
+        run: node --check runtime/async-jobs/worker.mjs
+      - name: Contract tests
+        run: node --test runtime/async-jobs/contract.test.mjs

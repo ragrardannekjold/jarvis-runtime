@@ -1,0 +1,35 @@
+name: Async Public Job Worker
+
+on:
+  issues:
+    types: [opened]
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: async-job-${{ github.event.issue.number }}
+  cancel-in-progress: false
+
+jobs:
+  run-public-job:
+    if: >-
+      github.actor == github.repository_owner &&
+      startsWith(github.event.issue.title, '[ASYNC-JOB]')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout public runtime
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Run allowlisted async job
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: node runtime/async-jobs/worker.mjs
