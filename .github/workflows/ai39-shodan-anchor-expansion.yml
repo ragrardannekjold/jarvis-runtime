@@ -1,0 +1,100 @@
+name: AI39 Shodan anchor expansion
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  expand:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    env:
+      SHODAN_API_KEY: ${{ secrets.SHODAN_API_KEY }}
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install --disable-pip-version-check requests
+      - name: Expand organization to aggregate ASN anchors
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          python - <<'PY'
+          import json, os
+          from datetime import datetime, timezone
+          import requests
+
+          key=os.environ.get('SHODAN_API_KEY','').strip()
+          orgs=[
+            'STATE UNITARY ENTERPRISE OF THE DONETSK PEOPLE\'S REPUBLIC REPUBLICAN TELECOMMUNICATIONS OPERATOR',
+            'Timer, LLC'
+          ]
+          out={
+            'generated_utc':datetime.now(timezone.utc).isoformat(),
+            'scope':'Aggregate-only related-ASN discovery from two previously observed organization labels; deliberately non-targetable',
+            'status':'UNKNOWN',
+            'organizations':[],
+            'related_asns':[],
+            'credits_before':None,
+            'credits_after':None,
+            'credits_delta':None,
+            'interpretation_limit':'ASN association is a digital-infrastructure relationship lead, not proof of physical location, people, equipment ownership, or operational control.',
+            'safety':'No IPs, hostnames, banners, versions, vulnerabilities, screenshots, credentials or exact locations requested or retained.'
+          }
+
+          def api_info():
+            r=requests.get('https://api.shodan.io/api-info',params={'key':key},timeout=30)
+            r.raise_for_status(); return r.json().get('query_credits')
+
+          def count(query, facets=None):
+            params={'key':key,'query':query}
+            if facets: params['facets']=facets
+            r=requests.get('https://api.shodan.io/shodan/host/count',params=params,timeout=45)
+            r.raise_for_status(); return r.json()
+
+          if not key:
+            out['status']='NO_SECRET'
+          else:
+            try:
+              out['credits_before']=api_info()
+              seen={}
+              for org in orgs:
+                j=count(f'org:"{org}"','asn:20,country:10,product:20')
+                facets=j.get('facets') or {}
+                asns=[]
+                for row in facets.get('asn') or []:
+                  v=row.get('value'); c=row.get('count')
+                  if isinstance(v,str) and isinstance(c,int):
+                    asns.append({'asn':v,'indexed_service_count':c})
+                    seen[v]=max(seen.get(v,0),c)
+                out['organizations'].append({
+                  'org_label':org,
+                  'current_total':j.get('total'),
+                  'asn_facet_count':len(asns),
+                  'asns':asns,
+                  'recognized_product_classes':len(facets.get('product') or []),
+                  'recognized_country_classes':len(facets.get('country') or [])
+                })
+              out['related_asns']=[{'asn':k,'max_observed_indexed_service_count':v} for k,v in sorted(seen.items(), key=lambda x:(-x[1],x[0]))[:20]]
+              out['credits_after']=api_info()
+              if isinstance(out['credits_before'],int) and isinstance(out['credits_after'],int):
+                out['credits_delta']=out['credits_before']-out['credits_after']
+              out['status']='VERIFIED_AGGREGATE'
+            except requests.HTTPError as e:
+              out['status']='HTTP_ERROR'; out['http_status']=getattr(e.response,'status_code',None)
+            except Exception as e:
+              out['status']='ERROR'; out['error_class']=type(e).__name__
+
+          with open('out/anchor_expansion.json','w') as f: json.dump(out,f,indent=2)
+          print(json.dumps(out,indent=2))
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ai39-shodan-anchor-expansion
+          path: out/anchor_expansion.json
+          if-no-files-found: error
+          retention-days: 2
