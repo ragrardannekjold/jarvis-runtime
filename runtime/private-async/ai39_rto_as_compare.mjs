@@ -1,4 +1,7 @@
-const RTO_ASNS = [202279, 204108, 214721];
+const TREND_PROFILES = Object.freeze({
+  rto_core: [202279, 204108, 214721],
+  neighbour_control: [201776, 206810, 39089],
+});
 const TREND_START = "2026-01";
 const PROVIDER_TIMEOUT_MS = 45000;
 const SHODAN_PACE_MS = 1200;
@@ -94,8 +97,11 @@ export function validateRtoComparePayload(payload = {}) {
   if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
     throw new Error("invalid_rto_compare_payload");
   }
-  if (Object.keys(payload).length !== 0) throw new Error("rto_compare_payload_must_be_empty");
-  return {};
+  const keys = Object.keys(payload);
+  if (keys.some((key) => key !== "profile")) throw new Error("rto_compare_payload_key_not_allowlisted");
+  const profile = payload.profile ?? "rto_core";
+  if (!Object.hasOwn(TREND_PROFILES, profile)) throw new Error("rto_compare_profile_not_allowlisted");
+  return { profile };
 }
 
 export async function runAi39RtoAsCompare(
@@ -106,14 +112,16 @@ export async function runAi39RtoAsCompare(
     paceMs = SHODAN_PACE_MS,
   } = {},
 ) {
-  validateRtoComparePayload(payload);
+  const config = validateRtoComparePayload(payload);
   if (typeof fetchImpl !== "function") throw new Error("fetch_unavailable");
+  const asns = TREND_PROFILES[config.profile];
 
   const result = {
     schema_version: 1,
     source_class: "PASSIVE_CYBINT_MULTI_AS_AGGREGATE",
     collected_at: new Date().toISOString(),
-    asns: RTO_ASNS.map((asn) => `AS${asn}`),
+    profile: config.profile,
+    asns: asns.map((asn) => `AS${asn}`),
     passive_only: true,
     active_scan_performed: false,
     exact_hosts_retained: false,
@@ -123,11 +131,11 @@ export async function runAi39RtoAsCompare(
     trend_start: TREND_START,
     rows: [],
     evidence_status: "INSUFFICIENT_DATA",
-    interpretation: "FACTS_ONLY_NO_AUTOMATIC_MIGRATION_ATTRIBUTION",
+    interpretation: "FACTS_ONLY_NO_AUTOMATIC_MIGRATION_OR_CONTROL_ATTRIBUTION",
   };
 
-  for (let index = 0; index < RTO_ASNS.length; index += 1) {
-    const asn = RTO_ASNS[index];
+  for (let index = 0; index < asns.length; index += 1) {
+    const asn = asns[index];
     const row = {
       asn: `AS${asn}`,
       routing: {
@@ -185,4 +193,4 @@ export async function runAi39RtoAsCompare(
   return result;
 }
 
-export { RTO_ASNS, TREND_START, PROVIDER_TIMEOUT_MS, SHODAN_PACE_MS };
+export { TREND_PROFILES, TREND_START, PROVIDER_TIMEOUT_MS, SHODAN_PACE_MS };
