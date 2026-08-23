@@ -1,0 +1,205 @@
+name: AI39 specialized tech + freshest EO frame
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  shodan_facets:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    env:
+      SHODAN_API_KEY: ${{ secrets.SHODAN_API_KEY }}
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install --disable-pip-version-check requests
+      - name: Aggregate Shodan facets only
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p out/shodan
+          python - <<'PY'
+          import json, os
+          from datetime import datetime, timezone
+          import requests
+
+          key=os.environ.get('SHODAN_API_KEY','').strip()
+          query='asn:AS202279'
+          out={
+            'generated_utc':datetime.now(timezone.utc).isoformat(),
+            'scope':'aggregate-only Shodan facets for one previously-established public ASN lead',
+            'status':'UNKNOWN',
+            'total':None,
+            'facets':{},
+            'rare_product_labels':[],
+            'credits_before':None,
+            'credits_after':None,
+            'credits_delta':None,
+            'interpretation_limit':'Product/port labels are passive Internet-exposure metadata, not proof of physical device location, price, military use, current possession, or human presence. Rare does not mean specialized or dangerous.',
+            'safety':'No IPs, hostnames, banners, versions, CVEs, screenshots, credentials or exact locations are requested or retained.'
+          }
+          def api_info():
+              r=requests.get('https://api.shodan.io/api-info',params={'key':key},timeout=30)
+              r.raise_for_status(); return r.json().get('query_credits')
+          if not key:
+              out['status']='NO_SECRET'
+          else:
+              try:
+                  out['credits_before']=api_info()
+                  params={'key':key,'query':query,'facets':'product:50,port:50,org:20,isp:20,os:20'}
+                  r=requests.get('https://api.shodan.io/shodan/host/count',params=params,timeout=60)
+                  r.raise_for_status(); j=r.json()
+                  out['total']=j.get('total')
+                  for facet, vals in (j.get('facets') or {}).items():
+                      clean=[]
+                      for v in vals or []:
+                          value=v.get('value'); count=v.get('count')
+                          if isinstance(value,(str,int,float)) and isinstance(count,int):
+                              clean.append({'value':value,'count':count})
+                      out['facets'][facet]=clean
+                  products=out['facets'].get('product',[])
+                  out['rare_product_labels']=[x for x in products if x['count']<=3][:20]
+                  out['credits_after']=api_info()
+                  if isinstance(out['credits_before'],int) and isinstance(out['credits_after'],int):
+                      out['credits_delta']=out['credits_before']-out['credits_after']
+                  out['status']='VERIFIED_AGGREGATE'
+              except requests.HTTPError as e:
+                  out['status']='HTTP_ERROR'; out['http_status']=getattr(e.response,'status_code',None)
+              except Exception as e:
+                  out['status']='ERROR'; out['error_class']=type(e).__name__
+          with open('out/shodan/facets.json','w') as f: json.dump(out,f,indent=2,ensure_ascii=False)
+          print(json.dumps({'status':out['status'],'total':out['total'],'facet_names':list(out['facets']),'rare_product_count':len(out['rare_product_labels']),'credits_delta':out['credits_delta']},indent=2))
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ai39-shodan-device-facets
+          path: out/shodan/facets.json
+          if-no-files-found: error
+          retention-days: 2
+
+  eo_freshness:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install --disable-pip-version-check requests
+      - name: Find freshest usable single frames and real pairs
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p out/eo
+          python - <<'PY'
+          import json
+          from datetime import datetime, timezone
+          import requests
+
+          BBOX=[37.65,48.45,38.25,48.90]
+          API='https://earth-search.aws.element84.com/v1/search'
+          WINDOW='2026-07-23T00:00:00Z/2026-08-24T00:00:00Z'
+
+          def search(collection, limit=100):
+              body={
+                  'collections':[collection],
+                  'bbox':BBOX,
+                  'datetime':WINDOW,
+                  'limit':limit,
+                  'sortby':[{'field':'properties.datetime','direction':'desc'}]
+              }
+              r=requests.post(API,json=body,timeout=90); r.raise_for_status()
+              return r.json().get('features',[])
+
+          def dt_of(f):
+              s=(f.get('properties') or {}).get('datetime')
+              if not s: return None
+              return datetime.fromisoformat(s.replace('Z','+00:00'))
+
+          def summarize_s2(f):
+              p=f.get('properties') or {}
+              a=f.get('assets') or {}
+              return {
+                  'acquisition_utc':p.get('datetime'),
+                  'cloud_cover':p.get('eo:cloud_cover'),
+                  'mgrs_tile':p.get('s2:mgrs_tile') or p.get('mgrs:tile'),
+                  'platform':p.get('platform'),
+                  'has_thumbnail':bool(a.get('thumbnail')),
+                  'has_visual':bool(a.get('visual')),
+                  'item_id':f.get('id')
+              }
+
+          def summarize_s1(f):
+              p=f.get('properties') or {}
+              a=f.get('assets') or {}
+              return {
+                  'acquisition_utc':p.get('datetime'),
+                  'relative_orbit':p.get('sat:relative_orbit'),
+                  'orbit_state':p.get('sat:orbit_state'),
+                  'platform':p.get('platform'),
+                  'instrument_mode':p.get('sar:instrument_mode'),
+                  'has_thumbnail':bool(a.get('thumbnail')),
+                  'item_id':f.get('id')
+              }
+
+          s2=search('sentinel-2-l2a')
+          s2_good=[]
+          for f in s2:
+              cc=(f.get('properties') or {}).get('eo:cloud_cover')
+              if isinstance(cc,(int,float)) and cc<=40:
+                  s2_good.append(f)
+          latest_s2=s2_good[0] if s2_good else (s2[0] if s2 else None)
+          s2_pair=None
+          for i,a in enumerate(s2_good[:30]):
+              pa=a.get('properties') or {}; ta=pa.get('s2:mgrs_tile') or pa.get('mgrs:tile'); da=dt_of(a)
+              if not ta or not da: continue
+              for b in s2_good[i+1:50]:
+                  pb=b.get('properties') or {}; tb=pb.get('s2:mgrs_tile') or pb.get('mgrs:tile'); db=dt_of(b)
+                  if ta!=tb or not db: continue
+                  days=abs((da-db).total_seconds())/86400
+                  if 3<=days<=20:
+                      s2_pair={'newer':summarize_s2(a),'older':summarize_s2(b),'days_apart':round(days,2)}
+                      break
+              if s2_pair: break
+
+          s1=search('sentinel-1-grd')
+          latest_s1=s1[0] if s1 else None
+          s1_pair=None
+          for i,a in enumerate(s1[:40]):
+              pa=a.get('properties') or {}; ra=pa.get('sat:relative_orbit'); oa=pa.get('sat:orbit_state'); da=dt_of(a)
+              if ra is None or not oa or not da: continue
+              for b in s1[i+1:70]:
+                  pb=b.get('properties') or {}; rb=pb.get('sat:relative_orbit'); ob=pb.get('sat:orbit_state'); db=dt_of(b)
+                  if ra!=rb or oa!=ob or not db: continue
+                  days=abs((da-db).total_seconds())/86400
+                  if 5<=days<=18:
+                      s1_pair={'newer':summarize_s1(a),'older':summarize_s1(b),'days_apart':round(days,2)}
+                      break
+              if s1_pair: break
+
+          out={
+             'generated_utc':datetime.now(timezone.utc).isoformat(),
+             'scope':'broad AI-39 corridor metadata only; latest usable single frame is valid lead even when no pair exists',
+             's2_items_seen':len(s2),
+             's2_good_cloud_le40':len(s2_good),
+             'latest_s2':summarize_s2(latest_s2) if latest_s2 else None,
+             's2_pair':s2_pair,
+             's1_items_seen':len(s1),
+             'latest_s1':summarize_s1(latest_s1) if latest_s1 else None,
+             's1_pair':s1_pair,
+             'decision_rule':'Use a matched pair only when metadata supports a real pair. Otherwise retain the freshest usable single acquisition for visual familiarization/lead generation, not change attribution.',
+             'safety':'No target-level coordinates, military positions or route guidance.'
+          }
+          with open('out/eo/freshness.json','w') as f: json.dump(out,f,indent=2)
+          print(json.dumps({'s2_items_seen':out['s2_items_seen'],'latest_s2':out['latest_s2'],'s2_pair_found':bool(out['s2_pair']),'s1_items_seen':out['s1_items_seen'],'latest_s1':out['latest_s1'],'s1_pair_found':bool(out['s1_pair'])},indent=2))
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ai39-eo-fresh-single-frame
+          path: out/eo/freshness.json
+          if-no-files-found: error
+          retention-days: 2
