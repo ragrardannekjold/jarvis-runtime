@@ -1,0 +1,151 @@
+name: AI39 RF provider adapter canary
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  canary:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Validate provider-neutral mission and safe result envelope
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          python - <<'PY'
+          import hashlib
+          import json
+          from datetime import datetime, timezone
+
+          mission = {
+              "schema": "ai39.rf.task.v1",
+              "mission_id": "AI39-RF-VS-001-CANARY",
+              "provider_id": "fixture.rf-provider",
+              "access_tier": "SYNTHETIC_FIXTURE_ONLY",
+              "safe_aoi_ref": "sha256:ai39-broad-grid-v1",
+              "time_window": ["2026-07-24T00:00:00Z", "2026-08-23T00:00:00Z"],
+              "baseline_window": ["2026-02-01T00:00:00Z", "2026-07-23T23:59:59Z"],
+              "allowed_frequency_families": ["VHF_UHF_AGGREGATE", "GNSS_INTERFERENCE_AGGREGATE"],
+              "requested_product_classes": ["BROAD_ACTIVITY_DENSITY", "PERSISTENCE_CHANGE"],
+              "max_cost": 0,
+              "max_requests": 0,
+              "deadline": "2026-08-23T23:59:59Z",
+              "output_granularity": "BROAD_GRID_ONLY",
+              "license_constraints": ["NO_REDISTRIBUTION", "SYNTHETIC_FIXTURE"],
+              "approval_ref": "AI-48-SYNTHETIC-CANARY",
+              "idempotency_key": "ai39-rf-canary-v1"
+          }
+
+          # Synthetic observations prove plumbing only. They carry zero real-world evidence weight.
+          provider_fixture = {
+              "schema": "fixture.rf.provider-result.v1",
+              "provider_id": "fixture.rf-provider",
+              "product": "synthetic-broad-rf-density",
+              "product_version": "1.0",
+              "collection_started": "2026-08-22T00:00:00Z",
+              "collection_completed": "2026-08-22T01:00:00Z",
+              "processing_level": "SYNTHETIC",
+              "aggregation": "broad-grid",
+              "quality": {"coverage_fraction": 0.91, "uncertainty_class": "FIXTURE"},
+              "observations": [
+                  {"broad_cell": "RF-A", "safe_category": "VHF_UHF_AGGREGATE", "relative_activity": 0.72, "persistence": 0.81},
+                  {"broad_cell": "RF-B", "safe_category": "VHF_UHF_AGGREGATE", "relative_activity": 0.19, "persistence": 0.22},
+                  {"broad_cell": "RF-C", "safe_category": "GNSS_INTERFERENCE_AGGREGATE", "relative_activity": 0.44, "persistence": 0.63}
+              ],
+              "license": ["SYNTHETIC_FIXTURE", "NO_OPERATIONAL_USE"]
+          }
+
+          forbidden_keys = {
+              "latitude", "longitude", "lat", "lon", "coordinates", "emitter_id",
+              "raw_iq", "voice", "transcript", "message_content", "target", "route"
+          }
+
+          def walk(value, path=""):
+              if isinstance(value, dict):
+                  for key, item in value.items():
+                      if key.lower() in forbidden_keys:
+                          raise AssertionError(f"forbidden key at {path}/{key}")
+                      walk(item, f"{path}/{key}")
+              elif isinstance(value, list):
+                  for index, item in enumerate(value):
+                      walk(item, f"{path}/{index}")
+
+          assert mission["max_cost"] == 0
+          assert mission["max_requests"] == 0
+          assert mission["output_granularity"] == "BROAD_GRID_ONLY"
+          assert provider_fixture["processing_level"] == "SYNTHETIC"
+          walk(mission)
+          walk(provider_fixture)
+
+          provider_bytes = json.dumps(provider_fixture, sort_keys=True, separators=(",", ":")).encode()
+          provider_hash = hashlib.sha256(provider_bytes).hexdigest()
+
+          normalized = []
+          for obs in provider_fixture["observations"]:
+              normalized.append({
+                  "mission_id": mission["mission_id"],
+                  "idempotency_key": mission["idempotency_key"],
+                  "provider_id": provider_fixture["provider_id"],
+                  "product": provider_fixture["product"],
+                  "observation_time_class": "HISTORICAL_FIXTURE",
+                  "broad_cell": obs["broad_cell"],
+                  "safe_category": obs["safe_category"],
+                  "relative_activity": obs["relative_activity"],
+                  "persistence": obs["persistence"],
+                  "source_sha256": provider_hash,
+                  "independence_group": "SYNTHETIC_RF_FIXTURE",
+                  "evidence_weight": 0.0,
+                  "candidate_state": "INSUFFICIENT_DATA",
+                  "hypothesis_impact": "NONE_SYNTHETIC_ONLY",
+                  "client_safe": True
+              })
+
+          receipt = {
+              "schema": "ai39.rf.result.v1",
+              "generated_utc": datetime.now(timezone.utc).isoformat(),
+              "mission": mission,
+              "provider_result_sha256": provider_hash,
+              "result_state": "VERIFIED_SYNTHETIC_CANARY_ONLY",
+              "partial_result_persisted": True,
+              "provider_call_performed": False,
+              "paid_effect_performed": False,
+              "real_world_evidence_claim": False,
+              "normalized_observations": normalized,
+              "safety_readback": {
+                  "broad_only": True,
+                  "forbidden_fields_absent": True,
+                  "exact_emitter_positions_absent": True,
+                  "raw_communications_absent": True,
+                  "targeting_or_evasion_output_absent": True
+              },
+              "next_gate": "REAL_PROVIDER_ACCESS_PLUS_EXPLICIT_APPROVAL"
+          }
+
+          walk(receipt)
+          with open("out/ai39_rf_adapter_canary.json", "w", encoding="utf-8") as f:
+              json.dump(receipt, f, indent=2)
+
+          print(json.dumps({
+              "result_state": receipt["result_state"],
+              "normalized_count": len(normalized),
+              "provider_call_performed": False,
+              "paid_effect_performed": False,
+              "real_world_evidence_claim": False,
+              "safety_readback": receipt["safety_readback"],
+              "next_gate": receipt["next_gate"]
+          }, indent=2))
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ai39-rf-provider-adapter-canary
+          path: out/ai39_rf_adapter_canary.json
+          if-no-files-found: error
+          retention-days: 2
