@@ -1,0 +1,110 @@
+name: AI39 Donetsk Horlivka aggregate Shodan screen
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  screen:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    env:
+      SHODAN_API_KEY: ${{ secrets.SHODAN_API_KEY }}
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install --disable-pip-version-check requests
+      - name: Passive aggregate city/class screen
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          python - <<'PY'
+          import json, os, time
+          from datetime import datetime, timezone
+          import requests
+
+          key=os.environ.get('SHODAN_API_KEY','').strip()
+          out={
+            'generated_utc':datetime.now(timezone.utc).isoformat(),
+            'scope':'Passive broad-city aggregate Shodan screen for Donetsk/Horlivka aliases; no IPs, hosts, banners, screenshots, vulnerabilities, credentials or exact locations retained.',
+            'status':'UNKNOWN','credits_before':None,'credits_after':None,'credits_delta':None,
+            'areas':{},
+            'interpretation_limit':'Shodan geolocation and product metadata can be stale or inaccurate. Aggregate exposure is a technical lead only and does not establish military use, dangerous intent, physical location, ownership or operational control.'
+          }
+          if not key:
+              out['status']='NO_SECRET'
+              json.dump(out,open('out/screen.json','w'),indent=2); print(json.dumps(out,indent=2)); raise SystemExit
+
+          def api_info():
+              r=requests.get('https://api.shodan.io/api-info',params={'key':key},timeout=30); r.raise_for_status(); return r.json().get('query_credits')
+          def count(q, facets='port:20,product:20,device:20,org:20'):
+              r=requests.get('https://api.shodan.io/shodan/host/count',params={'key':key,'query':q,'facets':facets},timeout=60)
+              r.raise_for_status(); j=r.json()
+              return {'total':j.get('total',0),'facets':j.get('facets',{})}
+
+          areas={'Donetsk':['Donetsk'],'Horlivka':['Horlivka','Gorlovka']}
+          classes={
+            'overall':'',
+            'network_management':'port:161',
+            'realtime_comms_stun':'port:3478',
+            'sip':'port:5060',
+            'rtsp_video':'port:554',
+            'industrial_modbus':'port:502',
+            'industrial_s7':'port:102',
+            'industrial_ethernetip':'port:44818',
+            'industrial_bacnet':'port:47808',
+            'industrial_opcua':'port:4840',
+            'industrial_dnp3':'port:20000',
+            'vendor_siemens':'product:Siemens',
+            'vendor_moxa':'product:Moxa',
+            'vendor_schneider':'product:Schneider',
+            'vendor_rockwell':'product:Rockwell',
+            'vendor_juniper':'product:Juniper',
+            'vendor_cisco':'product:Cisco',
+            'vendor_huawei':'product:Huawei',
+            'vendor_nokia':'product:Nokia',
+            'vendor_axis':'product:Axis',
+            'vendor_hikvision':'product:Hikvision'
+          }
+          out['credits_before']=api_info()
+          for area,aliases in areas.items():
+              best=None
+              alias_rows=[]
+              for alias in aliases:
+                  base=f'city:"{alias}"'
+                  rec={'alias':alias,'classes':{}}
+                  for cid,cq in classes.items():
+                      q=base if not cq else base+' '+cq
+                      try:
+                          rec['classes'][cid]=count(q)
+                      except requests.HTTPError as e:
+                          rec['classes'][cid]={'status':'HTTP_ERROR','http_status':getattr(e.response,'status_code',None),'total':None,'facets':{}}
+                      time.sleep(0.18)
+                  rec['overall_total']=rec['classes'].get('overall',{}).get('total')
+                  alias_rows.append(rec)
+                  if best is None or (rec['overall_total'] or 0)>(best['overall_total'] or 0): best=rec
+              summary={}
+              if best:
+                  for cid,row in best['classes'].items():
+                      t=row.get('total')
+                      if isinstance(t,int) and t>0:
+                          summary[cid]={'total':t,'products':row.get('facets',{}).get('product',[])[:8],'devices':row.get('facets',{}).get('device',[])[:8],'orgs':row.get('facets',{}).get('org',[])[:8]}
+              out['areas'][area]={'aliases':alias_rows,'best_alias':best['alias'] if best else None,'current_total':best['overall_total'] if best else None,'positive_classes':summary}
+          out['credits_after']=api_info()
+          if isinstance(out['credits_before'],int) and isinstance(out['credits_after'],int): out['credits_delta']=out['credits_before']-out['credits_after']
+          out['status']='MEASURED'
+          json.dump(out,open('out/screen.json','w'),indent=2)
+          # Public log stays aggregate-only.
+          print(json.dumps({'status':out['status'],'credits_delta':out['credits_delta'],'areas':{a:{'best_alias':v['best_alias'],'current_total':v['current_total'],'positive_class_counts':{k:x['total'] for k,x in v['positive_classes'].items()}} for a,v in out['areas'].items()}},indent=2))
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ai39-donetsk-horlivka-shodan-screen
+          path: out/screen.json
+          if-no-files-found: error
+          retention-days: 2
