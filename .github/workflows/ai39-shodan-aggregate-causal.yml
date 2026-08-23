@@ -1,0 +1,110 @@
+name: AI39 Shodan aggregate causal probe
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    env:
+      SHODAN_API_KEY: ${{ secrets.SHODAN_API_KEY }}
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install --disable-pip-version-check requests
+      - name: Aggregate-only causal probe
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          python - <<'PY'
+          import json, os
+          from datetime import datetime, timezone
+          import requests
+
+          ASN='AS202279'
+          key=os.environ.get('SHODAN_API_KEY','').strip()
+          out={
+            'generated_utc':datetime.now(timezone.utc).isoformat(),
+            'scope':'Aggregate-only passive characterization of one public ASN anchor; no hosts, IPs, banners, vulnerabilities, screenshots, credentials or exact locations retained.',
+            'asn':ASN,
+            'shodan':{'status':'UNKNOWN','current_total':None,'facets':{},'credits_before':None,'credits_after':None,'credits_delta':None},
+            'ripe':{'status':'UNKNOWN'},
+            'interpretation_limit':'Indexed-service and routing changes are infrastructure signals, not proof of people, physical presence, ownership, or operational control.'
+          }
+
+          def get_json(url, params=None, timeout=45):
+              r=requests.get(url,params=params,timeout=timeout,headers={'User-Agent':'AI39-aggregate-causal-probe/1.0'})
+              r.raise_for_status()
+              return r.json()
+
+          if not key:
+              out['shodan']['status']='NO_SECRET'
+          else:
+              try:
+                  info=get_json('https://api.shodan.io/api-info',{'key':key})
+                  out['shodan']['credits_before']=info.get('query_credits')
+                  base={'key':key,'query':f'asn:{ASN}'}
+                  total=get_json('https://api.shodan.io/shodan/host/count',base)
+                  out['shodan']['current_total']=total.get('total')
+                  for facet in ['port:20','org:20','product:20','transport:10']:
+                      name=facet.split(':',1)[0]
+                      j=get_json('https://api.shodan.io/shodan/host/count',{**base,'facets':facet})
+                      buckets=[]
+                      for row in (j.get('facets') or {}).get(name,[]):
+                          val=row.get('value')
+                          cnt=row.get('count')
+                          if isinstance(cnt,int) and isinstance(val,(str,int,float)):
+                              buckets.append({'value':str(val)[:120],'count':cnt})
+                      out['shodan']['facets'][name]=buckets
+                  info2=get_json('https://api.shodan.io/api-info',{'key':key})
+                  out['shodan']['credits_after']=info2.get('query_credits')
+                  if isinstance(out['shodan']['credits_before'],int) and isinstance(out['shodan']['credits_after'],int):
+                      out['shodan']['credits_delta']=out['shodan']['credits_before']-out['shodan']['credits_after']
+                  out['shodan']['status']='VERIFIED_AGGREGATE'
+              except requests.HTTPError as e:
+                  out['shodan']['status']='HTTP_ERROR'
+                  out['shodan']['http_status']=getattr(e.response,'status_code',None)
+              except Exception as e:
+                  out['shodan']['status']='ERROR'
+                  out['shodan']['error_class']=type(e).__name__
+
+          try:
+              overview=get_json('https://stat.ripe.net/data/as-overview/data.json',{'resource':ASN}).get('data') or {}
+              announced=get_json('https://stat.ripe.net/data/announced-prefixes/data.json',{'resource':ASN}).get('data') or {}
+              routing=get_json('https://stat.ripe.net/data/routing-status/data.json',{'resource':ASN}).get('data') or {}
+              safe_routing={}
+              for k,v in routing.items():
+                  lk=k.lower()
+                  if isinstance(v,(int,float,bool)) and any(t in lk for t in ['num','count','visibility','seen','announced']):
+                      safe_routing[k]=v
+                  elif isinstance(v,str) and any(t in lk for t in ['first_seen','last_seen']):
+                      safe_routing[k]=v[:80]
+              out['ripe']={
+                  'status':'VERIFIED_AGGREGATE',
+                  'holder':overview.get('holder'),
+                  'announced_flag':overview.get('announced'),
+                  'announced_prefix_count':len(announced.get('prefixes') or []),
+                  'routing_scalar_summary':safe_routing,
+              }
+          except requests.HTTPError as e:
+              out['ripe']={'status':'HTTP_ERROR','http_status':getattr(e.response,'status_code',None)}
+          except Exception as e:
+              out['ripe']={'status':'ERROR','error_class':type(e).__name__}
+
+          with open('out/aggregate_causal.json','w') as f:
+              json.dump(out,f,indent=2,ensure_ascii=False)
+          print(json.dumps(out,indent=2,ensure_ascii=False))
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ai39-shodan-aggregate-causal
+          path: out/aggregate_causal.json
+          if-no-files-found: error
+          retention-days: 2
