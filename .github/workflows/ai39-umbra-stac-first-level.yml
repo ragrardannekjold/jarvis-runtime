@@ -1,0 +1,65 @@
+name: AI39 Umbra STAC first level
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  umbra:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install --disable-pip-version-check requests
+      - name: Read Umbra first-level STAC and prefixes only
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          python - <<'PY'
+          import json,requests,xml.etree.ElementTree as ET
+          from datetime import datetime,timezone
+          from urllib.parse import urljoin
+          ns={'s':'http://s3.amazonaws.com/doc/2006-03-01/'}
+          BUCKET='https://umbra-open-data-catalog.s3.us-west-2.amazonaws.com/'
+          def list_prefix(prefix):
+              r=requests.get(BUCKET,params={'list-type':'2','prefix':prefix,'delimiter':'/','max-keys':'1000'},timeout=60); r.raise_for_status(); root=ET.fromstring(r.text)
+              keys=[x.find('s:Key',ns).text for x in root.findall('s:Contents',ns) if x.find('s:Key',ns) is not None]
+              prefs=[x.text for x in root.findall('s:CommonPrefixes/s:Prefix',ns) if x.text]
+              trunc=root.find('s:IsTruncated',ns)
+              return {'keys':keys[:200],'prefixes':prefs[:200],'is_truncated':trunc.text.lower()=='true' if trunc is not None and trunc.text else None}
+          out={'generated_utc':datetime.now(timezone.utc).isoformat(),'prefix_lists':{},'catalogs':{},'errors':[]}
+          for pref in ('stac/','open-data/','sar-data/'):
+              try: out['prefix_lists'][pref]=list_prefix(pref)
+              except Exception as e: out['errors'].append({'prefix':pref,'error_class':type(e).__name__})
+          # Fetch only obvious first-level catalog candidates if present.
+          candidates=[]
+          for k in out['prefix_lists'].get('stac/',{}).get('keys',[]):
+              if k.endswith(('/catalog.json','catalog.json','collection.json')): candidates.append(k)
+          for k in ('stac/catalog.json','stac/collection.json'):
+              if k not in candidates: candidates.append(k)
+          for k in candidates[:20]:
+              try:
+                  r=requests.get(urljoin(BUCKET,k),timeout=30)
+                  if r.status_code!=200: continue
+                  j=r.json();
+                  links=[]
+                  for l in j.get('links') or []:
+                      if l.get('rel') in {'child','item','collection'} and isinstance(l.get('href'),str):
+                          links.append({'rel':l.get('rel'),'title':l.get('title'),'href_tail':l.get('href')[-180:]})
+                  out['catalogs'][k]={'id':j.get('id'),'title':j.get('title'),'type':j.get('type'),'description':j.get('description'),'links':links[:100]}
+              except Exception as e: out['errors'].append({'catalog':k,'error_class':type(e).__name__})
+          out['interpretation_limit']='Archive-structure discovery only. No imagery content is interpreted and no exact military locations are retained.'
+          json.dump(out,open('out/umbra_structure.json','w'),indent=2); print(json.dumps(out,indent=2)[:50000])
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ai39-umbra-stac-first-level
+          path: out/umbra_structure.json
+          if-no-files-found: error
+          retention-days: 2
