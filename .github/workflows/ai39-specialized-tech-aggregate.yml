@@ -1,0 +1,105 @@
+name: AI39 specialized-tech aggregate probe
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    env:
+      SHODAN_API_KEY: ${{ secrets.SHODAN_API_KEY }}
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install --disable-pip-version-check requests
+      - name: Aggregate specialized-tech and historical reachability
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          python - <<'PY'
+          import json, os, statistics, datetime, requests
+          key=os.environ.get('SHODAN_API_KEY','').strip()
+          ASN='AS202279'
+          out={
+            'generated_utc':datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            'scope':'Aggregate-only passive lead generation. No hosts, IPs, banners, vulnerabilities, screenshots, credentials, exact locations or device models retained.',
+            'asn':ASN,
+            'shodan':{'status':'UNKNOWN','current_total':None,'category_counts':{},'credits_before':None,'credits_after':None,'credits_delta':None},
+            'ioda':{'status':'UNKNOWN','points':0,'monthly_medians':{}},
+            'interpretation_limit':'Category counts and reachability are technical-infrastructure leads only. They do not prove military ownership, physical presence, exact equipment type, or location.'
+          }
+          S=requests.Session(); S.headers.update({'User-Agent':'AI39-specialized-aggregate/1.0'})
+          def api_info():
+              r=S.get('https://api.shodan.io/api-info',params={'key':key},timeout=30); r.raise_for_status(); return r.json().get('query_credits')
+          def count(q):
+              r=S.get('https://api.shodan.io/shodan/host/count',params={'key':key,'query':q},timeout=45); r.raise_for_status(); return int(r.json().get('total') or 0)
+          if key:
+              try:
+                  out['shodan']['credits_before']=api_info()
+                  out['shodan']['current_total']=count(f'asn:{ASN}')
+                  # Deliberately retain only broad capability classes, never raw hosts or exact device models.
+                  queries={
+                    'network_management_surface':f'asn:{ASN} port:161',
+                    'realtime_relay_surface':f'asn:{ASN} port:3478',
+                    'ics_tagged_surface':f'asn:{ASN} tag:ics',
+                    'surveillance_device_surface':f'asn:{ASN} device:webcam',
+                    'routing_device_surface':f'asn:{ASN} device:router',
+                    'switching_device_surface':f'asn:{ASN} device:switch',
+                    'security_edge_surface':f'asn:{ASN} device:firewall',
+                    'voice_control_surface':f'asn:{ASN} device:pbx'
+                  }
+                  for name,q in queries.items():
+                      try: out['shodan']['category_counts'][name]=count(q)
+                      except Exception: out['shodan']['category_counts'][name]=None
+                  out['shodan']['credits_after']=api_info()
+                  if isinstance(out['shodan']['credits_before'],int) and isinstance(out['shodan']['credits_after'],int):
+                      out['shodan']['credits_delta']=out['shodan']['credits_before']-out['shodan']['credits_after']
+                  out['shodan']['status']='VERIFIED_AGGREGATE'
+              except Exception as e:
+                  out['shodan']['status']='ERROR'; out['shodan']['error_class']=type(e).__name__
+          else:
+              out['shodan']['status']='NO_SECRET'
+
+          # Historical IODA active-probing reachability for the same ASN; coarse monthly medians only.
+          try:
+              start=int(datetime.datetime(2025,12,1,tzinfo=datetime.timezone.utc).timestamp())
+              end=int(datetime.datetime(2026,8,23,23,59,59,tzinfo=datetime.timezone.utc).timestamp())
+              url=f'https://api.ioda.inetintel.cc.gatech.edu/v2/signals/raw/asn/{ASN.replace("AS","")}'
+              r=S.get(url,params={'from':start,'until':end,'datasource':'ping-slash24','maxPoints':800},timeout=60); r.raise_for_status(); j=r.json()
+              series=[]
+              def walk(x):
+                  if isinstance(x,dict):
+                      if x.get('datasource')=='ping-slash24' and isinstance(x.get('values'),list): series.extend(x['values'])
+                      for v in x.values(): walk(v)
+                  elif isinstance(x,list):
+                      for v in x: walk(v)
+              walk(j)
+              monthly={}
+              for row in series:
+                  if not isinstance(row,list) or len(row)<2: continue
+                  ts,val=row[0],row[-1]
+                  if not isinstance(ts,(int,float)) or not isinstance(val,(int,float)): continue
+                  m=datetime.datetime.fromtimestamp(ts,datetime.timezone.utc).strftime('%Y-%m')
+                  monthly.setdefault(m,[]).append(float(val))
+              out['ioda']['monthly_medians']={m:round(statistics.median(v),3) for m,v in sorted(monthly.items()) if v}
+              out['ioda']['points']=sum(len(v) for v in monthly.values())
+              out['ioda']['status']='VERIFIED_AGGREGATE' if monthly else 'NO_SERIES'
+          except Exception as e:
+              out['ioda']['status']='ERROR'; out['ioda']['error_class']=type(e).__name__
+
+          with open('out/specialized_aggregate.json','w') as f: json.dump(out,f,indent=2)
+          print(json.dumps({'shodan':out['shodan'],'ioda_status':out['ioda']['status'],'ioda_months':out['ioda']['monthly_medians']},indent=2))
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ai39-specialized-tech-aggregate
+          path: out/specialized_aggregate.json
+          if-no-files-found: error
+          retention-days: 2
