@@ -20,7 +20,7 @@ jobs:
 
     steps:
       - name: Checkout public runtime
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           persist-credentials: false
 
@@ -33,7 +33,7 @@ jobs:
           test -n "$COMMAND_CENTER_TOKEN" || { echo "private bridge token unavailable"; exit 2; }
 
       - name: Checkout private command center ephemerally
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: ragrardannekjold/jarvis-command-center
           token: ${{ secrets.COMMAND_CENTER_TOKEN }}
@@ -43,9 +43,9 @@ jobs:
           persist-credentials: false
 
       - name: Set up Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
-          node-version: '20'
+          node-version: '24'
 
       - name: Execute opaque-reference private job
         env:
