@@ -1,0 +1,75 @@
+name: AI39 specialized-tech trend escalation
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  trends:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    env:
+      SHODAN_API_KEY: ${{ secrets.SHODAN_API_KEY }}
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install --disable-pip-version-check requests
+      - name: Historical category trends and IODA endpoint validation
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          python - <<'PY'
+          import json, os, datetime, requests
+          key=os.environ.get('SHODAN_API_KEY','').strip(); ASN='AS202279'
+          S=requests.Session(); S.headers.update({'User-Agent':'AI39-specialized-trends/1.0'})
+          out={'generated_utc':datetime.datetime.now(datetime.timezone.utc).isoformat(),'scope':'Aggregate-only passive historical escalation; no hosts, IPs, banners, device models or exact locations retained.','asn':ASN,'trends':{},'ioda_probe':{},'credits_before':None,'credits_after':None,'credits_delta':None}
+          def info():
+              r=S.get('https://api.shodan.io/api-info',params={'key':key},timeout=30); r.raise_for_status(); return r.json().get('query_credits')
+          if key:
+              try: out['credits_before']=info()
+              except Exception: pass
+              queries={
+                'network_management_surface':f'asn:{ASN} port:161',
+                'realtime_relay_surface':f'asn:{ASN} port:3478',
+                'ics_tagged_surface':f'asn:{ASN} tag:ics',
+                'surveillance_device_surface':f'asn:{ASN} device:webcam'
+              }
+              for name,q in queries.items():
+                  rec={'status':'UNKNOWN','monthly':[]}
+                  try:
+                      r=S.get('https://trends.shodan.io/api/v1/search',params={'key':key,'query':q},timeout=90)
+                      rec['http_status']=r.status_code
+                      if r.status_code==200:
+                          j=r.json(); vals=[]
+                          for m in j.get('matches',[]):
+                              if isinstance(m.get('month'),str) and isinstance(m.get('count'),(int,float)): vals.append({'month':m['month'],'count':int(m['count'])})
+                          vals.sort(key=lambda x:x['month']); rec['monthly']=vals[-24:]; rec['status']='VERIFIED_AGGREGATE'
+                      else: rec['status']='UNAVAILABLE'
+                  except Exception as e: rec['status']='ERROR'; rec['error_class']=type(e).__name__
+                  out['trends'][name]=rec
+              try: out['credits_after']=info()
+              except Exception: pass
+              if isinstance(out['credits_before'],int) and isinstance(out['credits_after'],int): out['credits_delta']=out['credits_before']-out['credits_after']
+
+          # Validate both plausible IODA ASN path forms without retaining fine-grained data.
+          start=int(datetime.datetime(2026,1,1,tzinfo=datetime.timezone.utc).timestamp()); end=int(datetime.datetime(2026,8,23,23,59,59,tzinfo=datetime.timezone.utc).timestamp())
+          for code in ('202279','AS202279'):
+              url=f'https://api.ioda.inetintel.cc.gatech.edu/v2/signals/raw/asn/{code}'
+              try:
+                  r=S.get(url,params={'from':start,'until':end,'datasource':'ping-slash24','maxPoints':100},timeout=45)
+                  out['ioda_probe'][code]={'http_status':r.status_code,'bytes':len(r.content),'json_like':'json' in (r.headers.get('content-type') or '').lower()}
+              except Exception as e: out['ioda_probe'][code]={'error_class':type(e).__name__}
+          with open('out/specialized_trends.json','w') as f: json.dump(out,f,indent=2)
+          print(json.dumps(out,indent=2))
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ai39-specialized-tech-trends
+          path: out/specialized_trends.json
+          if-no-files-found: error
+          retention-days: 2
