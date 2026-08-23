@@ -1,0 +1,91 @@
+name: AI39 ASN observation attribution
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  attribute:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    env:
+      SHODAN_API_KEY: ${{ secrets.SHODAN_API_KEY }}
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install --disable-pip-version-check requests
+      - name: Aggregate ASN facets only
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          python - <<'PY'
+          import json, os, time
+          from datetime import datetime, timezone
+          import requests
+
+          key=os.environ.get('SHODAN_API_KEY','').strip()
+          targets={
+            'AS39089':'Ugletelecom',
+            'AS202279':'Republican Telecommunications Operator',
+            'AS196638':'Promtelecom',
+            'AS20590':'Donbass Electronic Communications',
+          }
+          out={'generated_utc':datetime.now(timezone.utc).isoformat(),'scope':'Passive aggregate ASN facet attribution only; no IPs, hosts, banners, vulnerabilities, screenshots or exact locations retained.','status':'UNKNOWN','targets':{},'credits_before':None,'credits_after':None,'credits_delta':None}
+
+          def persist():
+              json.dump(out,open('out/asn_attribution.json','w'),indent=2)
+
+          def api_info():
+              try:
+                  r=requests.get('https://api.shodan.io/api-info',params={'key':key},timeout=20)
+                  if r.status_code==429: return None,'RATE_LIMITED'
+                  r.raise_for_status(); return r.json().get('query_credits'),'OK'
+              except Exception as e: return None,type(e).__name__
+
+          def count(asn):
+              r=requests.get('https://api.shodan.io/shodan/host/count',params={'key':key,'query':f'asn:{asn}','facets':'port:100,product:100,device:50,org:20'},timeout=45)
+              if r.status_code==429: raise RuntimeError('RATE_LIMITED')
+              r.raise_for_status(); return r.json()
+
+          if not key:
+              out['status']='NO_SECRET'; persist(); raise SystemExit
+
+          out['credits_before'],out['credit_pre']=api_info(); persist()
+          ports_of_interest={161:'SNMP',554:'RTSP',3478:'STUN',5060:'SIP',102:'S7',502:'Modbus',4840:'OPC-UA',20000:'DNP3',44818:'EtherNet/IP',47808:'BACnet'}
+
+          for asn,label in targets.items():
+              rec={'label':label,'status':'UNKNOWN','total':None,'ports':{},'products':[],'devices':[],'orgs':[],'hikvision_count':0}
+              try:
+                  j=count(asn); facets=j.get('facets',{}) or {}; rec['total']=j.get('total',0)
+                  for row in facets.get('port',[]) or []:
+                      p=row.get('value'); c=row.get('count')
+                      if isinstance(p,int) and p in ports_of_interest and isinstance(c,int) and c>0:
+                          rec['ports'][str(p)]={'class':ports_of_interest[p],'count':c}
+                  rec['products']=(facets.get('product',[]) or [])[:40]
+                  rec['devices']=(facets.get('device',[]) or [])[:20]
+                  rec['orgs']=(facets.get('org',[]) or [])[:20]
+                  rec['hikvision_count']=sum(int(r.get('count') or 0) for r in rec['products'] if 'hikvision' in str(r.get('value','')).casefold())
+                  rec['status']='MEASURED'
+              except Exception as e:
+                  rec['status']='PROVIDER_BACKPRESSURE' if 'RATE_LIMITED' in str(e) else 'ERROR'; rec['error_class']=type(e).__name__
+              out['targets'][asn]=rec; persist(); time.sleep(1.1)
+
+          out['credits_after'],out['credit_post']=api_info()
+          if isinstance(out['credits_before'],int) and isinstance(out['credits_after'],int): out['credits_delta']=out['credits_before']-out['credits_after']
+          measured=sum(1 for r in out['targets'].values() if r['status']=='MEASURED')
+          out['status']='MEASURED' if measured==len(targets) else ('PARTIAL' if measured else 'PROVIDER_BACKPRESSURE')
+          persist()
+          print(json.dumps({'status':out['status'],'credits_delta':out['credits_delta'],'targets':{a:{'label':r['label'],'total':r['total'],'ports':r['ports'],'hikvision_count':r['hikvision_count'],'top_products':r['products'][:10]} for a,r in out['targets'].items()}},indent=2))
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ai39-asn-observation-attribution
+          path: out/asn_attribution.json
+          if-no-files-found: error
+          retention-days: 2
