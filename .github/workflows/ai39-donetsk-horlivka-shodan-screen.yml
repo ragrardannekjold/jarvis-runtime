@@ -31,14 +31,10 @@ jobs:
           key=os.environ.get('SHODAN_API_KEY','').strip()
           out={
             'generated_utc':datetime.now(timezone.utc).isoformat(),
-            'scope':'Passive broad-city aggregate Shodan facets for Donetsk and Horlivka/Gorlovka. No IPs, hosts, banners, screenshots, vulnerabilities, credentials or exact locations retained.',
-            'status':'UNKNOWN',
-            'credit_readback':'UNKNOWN',
-            'credits_before':None,
-            'credits_after':None,
-            'credits_delta':None,
+            'scope':'Passive broad-city aggregate Shodan facets for Donetsk and Horlivka/Gorlovka aliases. No IPs, hosts, banners, screenshots, vulnerabilities, credentials or exact locations retained.',
+            'status':'UNKNOWN','credit_readback':'UNKNOWN','credits_before':None,'credits_after':None,'credits_delta':None,
             'areas':{},
-            'interpretation_limit':'Shodan city, product and device metadata can be stale or inaccurate. Aggregate exposure is a lead only and does not establish military use, dangerous intent, physical location, ownership or operational control.'
+            'interpretation_limit':'Shodan city, ASN, product and device metadata can be stale or inaccurate. Aggregate exposure is a lead only and does not establish military use, dangerous intent, physical location, ownership or operational control.'
           }
 
           def persist():
@@ -50,70 +46,72 @@ jobs:
           def safe_api_info():
               try:
                   r=requests.get('https://api.shodan.io/api-info',params={'key':key},timeout=20)
-                  if r.status_code==429:
-                      return None, 'RATE_LIMITED'
-                  r.raise_for_status()
-                  return r.json().get('query_credits'), 'OK'
-              except Exception as e:
-                  return None, type(e).__name__
+                  if r.status_code==429: return None,'RATE_LIMITED'
+                  r.raise_for_status(); return r.json().get('query_credits'),'OK'
+              except Exception as e: return None,type(e).__name__
 
           def count(q):
-              r=requests.get(
-                  'https://api.shodan.io/shodan/host/count',
-                  params={'key':key,'query':q,'facets':'port:100,product:100,device:50,org:50'},
-                  timeout=45,
-              )
+              r=requests.get('https://api.shodan.io/shodan/host/count',params={
+                  'key':key,'query':q,'facets':'port:100,product:100,device:50,org:50,asn:50'},timeout=45)
               if r.status_code==429:
-                  retry=r.headers.get('Retry-After')
-                  raise RuntimeError(f'RATE_LIMITED retry_after={retry}')
-              r.raise_for_status()
-              return r.json()
+                  raise RuntimeError(f"RATE_LIMITED retry_after={r.headers.get('Retry-After')}")
+              r.raise_for_status(); return r.json()
 
           interesting_ports={102:'S7/ISO-on-TCP',161:'SNMP/network-management',502:'Modbus',554:'RTSP/video',3478:'STUN/realtime-comms',4840:'OPC-UA',5060:'SIP',20000:'DNP3',44818:'EtherNet/IP',47808:'BACnet'}
           vendor_terms=('siemens','moxa','schneider','rockwell','juniper','cisco','nokia','axis','hikvision')
-          areas={'Donetsk':'Donetsk','Horlivka/Gorlovka':'Gorlovka'}
+          areas={
+            'Donetsk':['Donetsk'],
+            'Horlivka/Gorlovka':['Horlivka','Gorlovka','Horlovka']
+          }
 
-          out['credits_before'], pre= safe_api_info()
-          out['credit_readback_pre']=pre
-          persist()
+          out['credits_before'],pre=safe_api_info(); out['credit_readback_pre']=pre; persist()
 
-          for label,city in areas.items():
-              rec={'query_basis':f'city:{city}','status':'UNKNOWN','total':None,'interesting_ports':{},'specialized_product_leads':[],'top_orgs':[],'top_devices':[],'top_products':[]}
-              try:
-                  j=count(f'city:"{city}"')
-                  rec['total']=j.get('total',0)
-                  facets=j.get('facets',{}) or {}
-                  for row in facets.get('port',[]) or []:
-                      p=row.get('value'); c=row.get('count')
-                      if isinstance(p,int) and p in interesting_ports and isinstance(c,int) and c>0:
-                          rec['interesting_ports'][str(p)]={'class':interesting_ports[p],'count':c}
-                  products=facets.get('product',[]) or []
-                  rec['top_products']=products[:20]
-                  rec['top_devices']=(facets.get('device',[]) or [])[:15]
-                  rec['top_orgs']=(facets.get('org',[]) or [])[:20]
-                  for row in products:
-                      val=str(row.get('value',''))
-                      low=val.casefold()
-                      if any(t in low for t in vendor_terms):
-                          rec['specialized_product_leads'].append({'product':val,'count':row.get('count')})
-                  rec['status']='MEASURED'
-              except Exception as e:
-                  rec['status']='PROVIDER_BACKPRESSURE' if 'RATE_LIMITED' in str(e) else 'ERROR'
-                  rec['error_class']=type(e).__name__
-              out['areas'][label]=rec
+          for label,aliases in areas.items():
+              alias_rows=[]
+              for city in aliases:
+                  rec={'alias':city,'status':'UNKNOWN','total':None,'interesting_ports':{},'specialized_product_leads':[],'top_orgs':[],'top_asns':[],'top_devices':[],'top_products':[]}
+                  try:
+                      j=count(f'city:"{city}"'); rec['total']=j.get('total',0); facets=j.get('facets',{}) or {}
+                      for row in facets.get('port',[]) or []:
+                          p=row.get('value'); c=row.get('count')
+                          if isinstance(p,int) and p in interesting_ports and isinstance(c,int) and c>0:
+                              rec['interesting_ports'][str(p)]={'class':interesting_ports[p],'count':c}
+                      products=facets.get('product',[]) or []
+                      rec['top_products']=products[:20]
+                      rec['top_devices']=(facets.get('device',[]) or [])[:15]
+                      rec['top_orgs']=(facets.get('org',[]) or [])[:20]
+                      rec['top_asns']=(facets.get('asn',[]) or [])[:20]
+                      for row in products:
+                          val=str(row.get('value','')); low=val.casefold()
+                          if any(t in low for t in vendor_terms):
+                              rec['specialized_product_leads'].append({'product':val,'count':row.get('count')})
+                      rec['status']='MEASURED'
+                  except Exception as e:
+                      rec['status']='PROVIDER_BACKPRESSURE' if 'RATE_LIMITED' in str(e) else 'ERROR'; rec['error_class']=type(e).__name__
+                  alias_rows.append(rec); persist(); time.sleep(0.8)
+              measured=[r for r in alias_rows if r.get('status')=='MEASURED']
+              best=max(measured,key=lambda r:r.get('total') or 0) if measured else None
+              out['areas'][label]={
+                  'aliases':alias_rows,
+                  'best_alias':best.get('alias') if best else None,
+                  'status':best.get('status') if best else 'INSUFFICIENT_DATA',
+                  'total':best.get('total') if best else None,
+                  'interesting_ports':best.get('interesting_ports',{}) if best else {},
+                  'specialized_product_leads':best.get('specialized_product_leads',[]) if best else [],
+                  'top_orgs':best.get('top_orgs',[]) if best else [],
+                  'top_asns':best.get('top_asns',[]) if best else [],
+                  'top_products':best.get('top_products',[]) if best else []
+              }
               persist()
-              time.sleep(1.0)
 
-          out['credits_after'], post=safe_api_info()
-          out['credit_readback_post']=post
+          out['credits_after'],post=safe_api_info(); out['credit_readback_post']=post
           if isinstance(out['credits_before'],int) and isinstance(out['credits_after'],int):
               out['credits_delta']=out['credits_before']-out['credits_after']; out['credit_readback']='MEASURED'
-          elif pre=='RATE_LIMITED' or post=='RATE_LIMITED':
-              out['credit_readback']='RATE_LIMITED_NON_FATAL'
+          elif pre=='RATE_LIMITED' or post=='RATE_LIMITED': out['credit_readback']='RATE_LIMITED_NON_FATAL'
           measured=sum(1 for r in out['areas'].values() if r.get('status')=='MEASURED')
           out['status']='MEASURED' if measured==len(areas) else ('PARTIAL' if measured else 'PROVIDER_BACKPRESSURE')
           persist()
-          print(json.dumps({'status':out['status'],'credit_readback':out['credit_readback'],'areas':{k:{'status':v['status'],'total':v['total'],'interesting_ports':v['interesting_ports'],'specialized_product_leads':v['specialized_product_leads']} for k,v in out['areas'].items()}},indent=2))
+          print(json.dumps({'status':out['status'],'credit_readback':out['credit_readback'],'areas':{k:{'best_alias':v['best_alias'],'status':v['status'],'total':v['total'],'interesting_ports':v['interesting_ports'],'specialized_product_leads':v['specialized_product_leads'],'top_asns':v['top_asns'][:8]} for k,v in out['areas'].items()}},indent=2))
           PY
       - uses: actions/upload-artifact@v4
         if: always()
