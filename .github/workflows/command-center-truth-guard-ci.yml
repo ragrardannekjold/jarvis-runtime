@@ -1,0 +1,62 @@
+name: Command Center Truth Guard CI
+
+on:
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: command-center-truth-guard-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    name: Verify command-center truth and non-degradation runtime
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout AI-49 command-center branch
+        uses: actions/checkout@v4
+        with:
+          repository: ragrardannekjold/jarvis-command-center
+          ref: ai-49-truth-nondegradation-runtime
+          path: command-center
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Validate repository contracts
+        working-directory: command-center
+        run: python scripts/validate_repo.py
+
+      - name: Run full unit suite
+        working-directory: command-center
+        env:
+          PYTHONPATH: src
+        run: python -m unittest discover -s tests -v
+
+      - name: Run ten guarded canaries
+        working-directory: command-center
+        env:
+          PYTHONPATH: src
+        run: |
+          rm -rf /tmp/ai49-truth-guard
+          python scripts/run_truth_guard_canary.py \
+            --root /tmp/ai49-truth-guard \
+            --repeat 10 \
+            --output /tmp/ai49-truth-guard-result.json
+
+      - name: Upload terminal readback
+        uses: actions/upload-artifact@v4
+        with:
+          name: ai49-truth-guard-terminal-readback
+          path: /tmp/ai49-truth-guard-result.json
+          if-no-files-found: error
+          retention-days: 7
