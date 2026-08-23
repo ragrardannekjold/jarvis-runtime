@@ -1,0 +1,51 @@
+name: AI39 VHR SAR prefix check
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install --disable-pip-version-check requests
+      - name: Check public S3 prefixes only
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          python - <<'PY'
+          import json,requests,xml.etree.ElementTree as ET
+          from datetime import datetime,timezone
+          ns={'s':'http://s3.amazonaws.com/doc/2006-03-01/'}
+          def list_s3(url,params):
+              r=requests.get(url,params=params,timeout=60); r.raise_for_status(); root=ET.fromstring(r.text)
+              keys=[x.find('s:Key',ns).text for x in root.findall('s:Contents',ns) if x.find('s:Key',ns) is not None]
+              prefs=[x.text for x in root.findall('s:CommonPrefixes/s:Prefix',ns) if x.text]
+              kc=root.find('s:KeyCount',ns); tr=root.find('s:IsTruncated',ns)
+              return {'key_count':int(kc.text) if kc is not None and kc.text else len(keys),'keys':keys[:20],'prefixes':prefs[:100],'is_truncated':tr.text.lower()=='true' if tr is not None and tr.text else None}
+          cap={}
+          for m in (7,8):
+              pref=f'data/2026/{m}/'
+              try: cap[f'2026-{m:02d}']=list_s3('https://capella-open-data.s3.us-west-2.amazonaws.com/',{'list-type':'2','prefix':pref,'max-keys':'20'})
+              except Exception as e: cap[f'2026-{m:02d}']={'error_class':type(e).__name__}
+          try: umb=list_s3('https://umbra-open-data-catalog.s3.us-west-2.amazonaws.com/',{'list-type':'2','delimiter':'/','max-keys':'1000'})
+          except Exception as e: umb={'error_class':type(e).__name__}
+          out={'generated_utc':datetime.now(timezone.utc).isoformat(),'capella_month_prefixes':cap,'umbra_root':umb,
+               'interpretation_limit':'Prefix absence means only that the public S3 open-data bucket has no objects under that month prefix. It does not imply no commercial/provider coverage.',
+               'safety':'Archive structure only; no tactical locations.'}
+          json.dump(out,open('out/prefixes.json','w'),indent=2); print(json.dumps(out,indent=2)[:50000])
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ai39-vhr-prefix-check
+          path: out/prefixes.json
+          if-no-files-found: error
+          retention-days: 2
