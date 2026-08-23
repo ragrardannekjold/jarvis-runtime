@@ -10,7 +10,7 @@ permissions:
 jobs:
   analyze:
     runs-on: ubuntu-latest
-    timeout-minutes: 8
+    timeout-minutes: 10
     steps:
       - uses: actions/setup-python@v5
         with:
@@ -22,12 +22,11 @@ jobs:
           set -euo pipefail
           mkdir -p out
           python - <<'PY'
-          import json, math, statistics, requests, datetime
-          ASN='202279'
+          import json, math, statistics, requests, datetime, urllib.parse
           BASE='https://api.ioda.inetintel.cc.gatech.edu/v2'
-          START=datetime.datetime(2026,1,1,tzinfo=datetime.timezone.utc)
-          END=datetime.datetime(2026,8,23,tzinfo=datetime.timezone.utc)
-          OUT={'generated_utc':datetime.datetime.now(datetime.timezone.utc).isoformat(),'scope':'Aggregate IODA ASN history only; no IPs, hosts, routes, prefix identities or exact locations retained.','asn':'AS'+ASN,'series':{}}
+          ASN_NUM='202279'
+          OUT={'generated_utc':datetime.datetime.now(datetime.timezone.utc).isoformat(),'scope':'Aggregate IODA ASN history only; no IPs, hosts, routes, prefix identities or exact locations retained.','asn':'AS'+ASN_NUM,'series':{}}
+          HEAD={'User-Agent':'AI39-aggregate-passive-research/1.0'}
 
           def walk(o):
               if isinstance(o,dict):
@@ -35,45 +34,65 @@ jobs:
                   for v in o.values(): yield from walk(v)
               elif isinstance(o,list):
                   for v in o: yield from walk(v)
-          def pdt(x):
-              if isinstance(x,(int,float)):
-                  try:return datetime.datetime.fromtimestamp(float(x),datetime.timezone.utc)
-                  except:return None
-              if isinstance(x,str):
-                  try:
-                      d=datetime.datetime.fromisoformat(x.replace('Z','+00:00')); return d if d.tzinfo else d.replace(tzinfo=datetime.timezone.utc)
-                  except:return None
-              return None
-          def extract(datasource):
-              params={'from':int(START.timestamp()),'until':int(END.timestamp()),'datasource':datasource,'maxPoints':1400}
-              r=requests.get(f'{BASE}/signals/raw/asn/{ASN}',params=params,timeout=90,headers={'User-Agent':'AI39-aggregate-passive-research/1.0'})
-              rec={'http_status':r.status_code,'status':'UNAVAILABLE','points':0,'monthly':[]}
-              if r.status_code!=200: return rec
-              o=r.json(); pts=[]
+          def points(o,ds):
+              out=[]
               for s in walk(o):
-                  if str(s.get('datasource'))!=datasource: continue
+                  if str(s.get('datasource'))!=ds: continue
                   vals=s.get('values')
                   if not isinstance(vals,list): continue
                   for v in vals:
-                      if isinstance(v,list) and len(v)>=2:
-                          dt=pdt(v[0]); y=v[-1]
-                          if dt and isinstance(y,(int,float)) and math.isfinite(float(y)): pts.append((dt,float(y)))
-                      elif isinstance(v,(int,float)):
-                          pass
-              by={}
-              for dt,y in pts: by.setdefault(dt.strftime('%Y-%m'),[]).append(y)
-              monthly=[]
-              for m in sorted(by):
-                  a=by[m]
-                  monthly.append({'month':m,'median':round(float(statistics.median(a)),4),'p10':round(float(sorted(a)[max(0,int(len(a)*.10)-1)]),4),'p90':round(float(sorted(a)[min(len(a)-1,int(len(a)*.90))]),4),'points':len(a)})
-              rec.update({'status':'MEASURED' if pts else 'NO_SERIES','points':len(pts),'monthly':monthly})
-              if len(monthly)>=2 and monthly[0]['median']!=0:
-                  rec['first_to_latest_pct']=round((monthly[-1]['median']-monthly[0]['median'])/abs(monthly[0]['median'])*100,2)
+                      if isinstance(v,list) and len(v)>=2 and isinstance(v[-1],(int,float)) and math.isfinite(float(v[-1])):
+                          out.append(float(v[-1]))
+              return out
+          def resolve_code():
+              r=requests.get(f'{BASE}/entities/query',params={'entityType':'asn','search':ASN_NUM,'limit':20},timeout=45,headers=HEAD)
+              rec={'http_status':r.status_code,'resolved':False,'code':None}
+              if r.status_code!=200: return rec
+              o=r.json(); rows=o.get('data') if isinstance(o,dict) else []
+              if not isinstance(rows,list): rows=[]
+              for x in rows:
+                  if not isinstance(x,dict): continue
+                  c=str(x.get('code','')).strip(); digits=c.upper().replace('AS','')
+                  if digits==ASN_NUM:
+                      rec.update({'resolved':True,'code':c}); return rec
               return rec
+          ent=resolve_code(); OUT['entity_resolution']=ent
+          candidates=[]
+          if ent.get('code'): candidates.append(str(ent['code']))
+          candidates += [ASN_NUM,'AS'+ASN_NUM]
+          candidates=list(dict.fromkeys(candidates))
+
+          months=[]
+          for m in range(1,9):
+              start=datetime.datetime(2026,m,1,tzinfo=datetime.timezone.utc)
+              if m<8: end=datetime.datetime(2026,m+1,1,tzinfo=datetime.timezone.utc)-datetime.timedelta(seconds=1)
+              else: end=datetime.datetime(2026,8,23,23,59,59,tzinfo=datetime.timezone.utc)
+              months.append((start,end))
 
           for ds in ['ping-slash24','bgp']:
-              try: OUT['series'][ds]=extract(ds)
-              except Exception as e: OUT['series'][ds]={'status':'ERROR','error_class':type(e).__name__}
+              rec={'status':'NO_SERIES','monthly':[],'resolved_path_code':None}
+              for start,end in months:
+                  mrec={'month':start.strftime('%Y-%m'),'status':'UNAVAILABLE','median':None,'points':0,'http_status':None}
+                  success=False
+                  for code in candidates:
+                      params={'from':int(start.timestamp()),'until':int(end.timestamp()),'datasource':ds,'maxPoints':240}
+                      r=requests.get(f'{BASE}/signals/raw/asn/{urllib.parse.quote(code)}',params=params,timeout=60,headers=HEAD)
+                      mrec['http_status']=r.status_code
+                      if r.status_code!=200: continue
+                      vals=points(r.json(),ds)
+                      if vals:
+                          mrec.update({'status':'MEASURED','median':round(float(statistics.median(vals)),4),'points':len(vals),'p10':round(float(sorted(vals)[max(0,int(len(vals)*.10)-1)]),4),'p90':round(float(sorted(vals)[min(len(vals)-1,int(len(vals)*.90))]),4)})
+                          rec['resolved_path_code']=code; success=True; break
+                      else:
+                          mrec['status']='NO_SERIES'; rec['resolved_path_code']=code; success=True; break
+                  rec['monthly'].append(mrec)
+              vals=[x for x in rec['monthly'] if x['status']=='MEASURED' and isinstance(x.get('median'),(int,float))]
+              if vals:
+                  rec['status']='MEASURED'; rec['measured_months']=len(vals)
+                  if len(vals)>=2 and vals[0]['median']!=0:
+                      rec['first_to_latest_pct']=round((vals[-1]['median']-vals[0]['median'])/abs(vals[0]['median'])*100,2)
+              OUT['series'][ds]=rec
+
           OUT['interpretation_limit']='IODA reachability/BGP series indicate network visibility or probing response, not people, military use, ownership, operational control or physical location.'
           with open('out/ioda_asn_history.json','w') as f: json.dump(OUT,f,indent=2)
           print(json.dumps(OUT,indent=2))
