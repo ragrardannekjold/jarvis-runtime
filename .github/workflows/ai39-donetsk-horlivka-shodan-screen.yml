@@ -10,7 +10,7 @@ permissions:
 jobs:
   screen:
     runs-on: ubuntu-latest
-    timeout-minutes: 8
+    timeout-minutes: 10
     env:
       SHODAN_API_KEY: ${{ secrets.SHODAN_API_KEY }}
     steps:
@@ -18,7 +18,7 @@ jobs:
         with:
           python-version: '3.12'
       - run: python -m pip install --disable-pip-version-check requests
-      - name: Passive facet-first broad-city screen
+      - name: Passive facet-first broad-city screen with RIPE corroboration
         shell: bash
         run: |
           set -euo pipefail
@@ -31,10 +31,10 @@ jobs:
           key=os.environ.get('SHODAN_API_KEY','').strip()
           out={
             'generated_utc':datetime.now(timezone.utc).isoformat(),
-            'scope':'Passive broad-city aggregate Shodan facets for Donetsk and Horlivka/Gorlovka aliases. No IPs, hosts, banners, screenshots, vulnerabilities, credentials or exact locations retained.',
+            'scope':'Passive broad-city aggregate Shodan facets for Donetsk and Horlivka/Gorlovka aliases plus aggregate RIPE ASN state. No IPs, hosts, banners, exact prefixes, vulnerabilities, credentials or exact locations retained.',
             'status':'UNKNOWN','credit_readback':'UNKNOWN','credits_before':None,'credits_after':None,'credits_delta':None,
-            'areas':{},
-            'interpretation_limit':'Shodan city, ASN, product and device metadata can be stale or inaccurate. Aggregate exposure is a lead only and does not establish military use, dangerous intent, physical location, ownership or operational control.'
+            'areas':{},'ripe_asn_enrichment':{},
+            'interpretation_limit':'Shodan city, ASN, product and device metadata can be stale or inaccurate. RIPE routing state corroborates network identity/existence only. Neither source establishes military use, dangerous intent, physical location, ownership or operational control.'
           }
 
           def persist():
@@ -57,12 +57,24 @@ jobs:
                   raise RuntimeError(f"RATE_LIMITED retry_after={r.headers.get('Retry-After')}")
               r.raise_for_status(); return r.json()
 
+          def ripe_asn(asn):
+              a=asn.upper()
+              rec={'asn':a,'status':'UNKNOWN','holder':None,'announced':None,'announced_prefix_count':None}
+              try:
+                  r=requests.get('https://stat.ripe.net/data/as-overview/data.json',params={'resource':a},timeout=30)
+                  r.raise_for_status(); d=(r.json().get('data') or {})
+                  rec['holder']=d.get('holder'); rec['announced']=d.get('announced')
+                  p=requests.get('https://stat.ripe.net/data/announced-prefixes/data.json',params={'resource':a},timeout=30)
+                  p.raise_for_status(); prefixes=((p.json().get('data') or {}).get('prefixes') or [])
+                  rec['announced_prefix_count']=len(prefixes)
+                  rec['status']='MEASURED'
+              except Exception as e:
+                  rec['status']='ERROR'; rec['error_class']=type(e).__name__
+              return rec
+
           interesting_ports={102:'S7/ISO-on-TCP',161:'SNMP/network-management',502:'Modbus',554:'RTSP/video',3478:'STUN/realtime-comms',4840:'OPC-UA',5060:'SIP',20000:'DNP3',44818:'EtherNet/IP',47808:'BACnet'}
           vendor_terms=('siemens','moxa','schneider','rockwell','juniper','cisco','nokia','axis','hikvision')
-          areas={
-            'Donetsk':['Donetsk'],
-            'Horlivka/Gorlovka':['Horlivka','Gorlovka','Horlovka']
-          }
+          areas={'Donetsk':['Donetsk'],'Horlivka/Gorlovka':['Horlivka','Gorlovka','Horlovka']}
 
           out['credits_before'],pre=safe_api_info(); out['credit_readback_pre']=pre; persist()
 
@@ -77,14 +89,11 @@ jobs:
                           if isinstance(p,int) and p in interesting_ports and isinstance(c,int) and c>0:
                               rec['interesting_ports'][str(p)]={'class':interesting_ports[p],'count':c}
                       products=facets.get('product',[]) or []
-                      rec['top_products']=products[:20]
-                      rec['top_devices']=(facets.get('device',[]) or [])[:15]
-                      rec['top_orgs']=(facets.get('org',[]) or [])[:20]
-                      rec['top_asns']=(facets.get('asn',[]) or [])[:20]
+                      rec['top_products']=products[:20]; rec['top_devices']=(facets.get('device',[]) or [])[:15]
+                      rec['top_orgs']=(facets.get('org',[]) or [])[:20]; rec['top_asns']=(facets.get('asn',[]) or [])[:20]
                       for row in products:
                           val=str(row.get('value','')); low=val.casefold()
-                          if any(t in low for t in vendor_terms):
-                              rec['specialized_product_leads'].append({'product':val,'count':row.get('count')})
+                          if any(t in low for t in vendor_terms): rec['specialized_product_leads'].append({'product':val,'count':row.get('count')})
                       rec['status']='MEASURED'
                   except Exception as e:
                       rec['status']='PROVIDER_BACKPRESSURE' if 'RATE_LIMITED' in str(e) else 'ERROR'; rec['error_class']=type(e).__name__
@@ -92,17 +101,18 @@ jobs:
               measured=[r for r in alias_rows if r.get('status')=='MEASURED']
               best=max(measured,key=lambda r:r.get('total') or 0) if measured else None
               out['areas'][label]={
-                  'aliases':alias_rows,
-                  'best_alias':best.get('alias') if best else None,
-                  'status':best.get('status') if best else 'INSUFFICIENT_DATA',
-                  'total':best.get('total') if best else None,
+                  'aliases':alias_rows,'best_alias':best.get('alias') if best else None,
+                  'status':best.get('status') if best else 'INSUFFICIENT_DATA','total':best.get('total') if best else None,
                   'interesting_ports':best.get('interesting_ports',{}) if best else {},
                   'specialized_product_leads':best.get('specialized_product_leads',[]) if best else [],
-                  'top_orgs':best.get('top_orgs',[]) if best else [],
-                  'top_asns':best.get('top_asns',[]) if best else [],
-                  'top_products':best.get('top_products',[]) if best else []
-              }
+                  'top_orgs':best.get('top_orgs',[]) if best else [],'top_asns':best.get('top_asns',[]) if best else [],
+                  'top_products':best.get('top_products',[]) if best else []}
               persist()
+
+          # Independent RIPE corroboration for the most decision-useful aggregate ASN leads only.
+          targets=['AS216314','AS57982','AS39089','AS196638','AS20590','AS202279','AS197015','AS52131']
+          for asn in targets:
+              out['ripe_asn_enrichment'][asn]=ripe_asn(asn); persist(); time.sleep(0.15)
 
           out['credits_after'],post=safe_api_info(); out['credit_readback_post']=post
           if isinstance(out['credits_before'],int) and isinstance(out['credits_after'],int):
@@ -111,7 +121,7 @@ jobs:
           measured=sum(1 for r in out['areas'].values() if r.get('status')=='MEASURED')
           out['status']='MEASURED' if measured==len(areas) else ('PARTIAL' if measured else 'PROVIDER_BACKPRESSURE')
           persist()
-          print(json.dumps({'status':out['status'],'credit_readback':out['credit_readback'],'areas':{k:{'best_alias':v['best_alias'],'status':v['status'],'total':v['total'],'interesting_ports':v['interesting_ports'],'specialized_product_leads':v['specialized_product_leads'],'top_asns':v['top_asns'][:8]} for k,v in out['areas'].items()}},indent=2))
+          print(json.dumps({'status':out['status'],'credit_readback':out['credit_readback'],'areas':{k:{'best_alias':v['best_alias'],'total':v['total'],'interesting_ports':v['interesting_ports'],'specialized_product_leads':v['specialized_product_leads'],'top_asns':v['top_asns'][:8]} for k,v in out['areas'].items()},'ripe_asn_enrichment':out['ripe_asn_enrichment']},indent=2))
           PY
       - uses: actions/upload-artifact@v4
         if: always()
