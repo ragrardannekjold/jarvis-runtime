@@ -1,0 +1,105 @@
+name: AI39 Phoenix ASN migration test
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  migration:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      SHODAN_API_KEY: ${{ secrets.SHODAN_API_KEY }}
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install --disable-pip-version-check requests
+      - name: Compare current exposure and one Phoenix historical trend
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          python - <<'PY'
+          import json, os, requests
+          from datetime import datetime, timezone
+
+          key=os.environ.get('SHODAN_API_KEY','').strip()
+          ASNS=['AS202279','AS214721','AS204108']
+          out={
+            'generated_utc':datetime.now(timezone.utc).isoformat(),
+            'status':'UNKNOWN',
+            'current':{},
+            'phoenix_trend':{'status':'NOT_RUN','monthly':[]},
+            'credits_before':None,'credits_after':None,'credits_delta':None,
+            'decision_question':'Did RTO/Phoenix Internet exposure move from legacy AS202279 into PHOENIX-AS AS214721 around the Jan-Mar 2026 collapse?',
+            'interpretation_limit':'Passive aggregate Internet-exposure metadata only. ASN/service changes do not prove physical device location, military use, surveillance function, human presence or ownership of every connected asset.',
+            'safety':'No IPs, hosts, banners, CVEs, credentials, screenshots or exact locations requested or retained.'
+          }
+          def api_info():
+              r=requests.get('https://api.shodan.io/api-info',params={'key':key},timeout=25); r.raise_for_status(); return r.json().get('query_credits')
+          if not key:
+              out['status']='NO_SECRET'
+          else:
+              try:
+                  out['credits_before']=api_info()
+                  for asn in ASNS:
+                      r=requests.get('https://api.shodan.io/shodan/host/count',params={'key':key,'query':f'asn:{asn}','facets':'product:50,port:50,org:20,isp:20,os:20'},timeout=45)
+                      if r.status_code!=200:
+                          out['current'][asn]={'status':'HTTP_ERROR','http_status':r.status_code}; continue
+                      j=r.json(); rec={'status':'VERIFIED_AGGREGATE','total':j.get('total'),'facets':{}}
+                      for f,vals in (j.get('facets') or {}).items():
+                          rec['facets'][f]=[{'value':x.get('value'),'count':x.get('count')} for x in vals or [] if x.get('value') is not None and isinstance(x.get('count'),int)]
+                      out['current'][asn]=rec
+
+                  phoenix_total=(out['current'].get('AS214721') or {}).get('total')
+                  if isinstance(phoenix_total,int) and phoenix_total>0:
+                      tr=requests.get('https://trends.shodan.io/api/v1/search',params={'key':key,'query':'asn:AS214721'},timeout=90)
+                      if tr.status_code==200:
+                          tj=tr.json(); rows=[]
+                          for m in tj.get('matches',[]):
+                              month=m.get('month'); count=m.get('count')
+                              if isinstance(month,str) and isinstance(count,(int,float)):
+                                  rows.append({'month':month,'count':int(count)})
+                          rows.sort(key=lambda x:x['month'])
+                          out['phoenix_trend']={'status':'VERIFIED_AGGREGATE','total':tj.get('total'),'monthly':rows[-24:]}
+                      else:
+                          out['phoenix_trend']={'status':'HTTP_ERROR','http_status':tr.status_code,'monthly':[]}
+                  else:
+                      out['phoenix_trend']={'status':'SKIPPED_ZERO_CURRENT','monthly':[]}
+
+                  out['credits_after']=api_info()
+                  if isinstance(out['credits_before'],int) and isinstance(out['credits_after'],int):
+                      out['credits_delta']=out['credits_before']-out['credits_after']
+
+                  legacy=[]
+                  # Historical AS202279 counts are durable prior evidence from the earlier successful trend artifact.
+                  legacy_known={'2026-01':488,'2026-02':107,'2026-03':14}
+                  ph={x['month']:x['count'] for x in out['phoenix_trend'].get('monthly',[]) if isinstance(x,dict)}
+                  comparison=[]
+                  for month in ('2026-01','2026-02','2026-03'):
+                      comparison.append({'month':month,'legacy_AS202279_known':legacy_known.get(month),'phoenix_AS214721':ph.get(month)})
+                  out['jan_mar_comparison']=comparison
+                  valid=[x for x in comparison if isinstance(x.get('phoenix_AS214721'),int)]
+                  if len(valid)>=2:
+                      pvals=[x['phoenix_AS214721'] for x in valid]
+                      out['migration_signal']={
+                          'phoenix_change_first_to_last':pvals[-1]-pvals[0],
+                          'phoenix_rises_while_legacy_falls':bool(pvals[-1]>pvals[0] and legacy_known['2026-03']<legacy_known['2026-01'])
+                      }
+                  out['status']='VERIFIED_AGGREGATE'
+              except Exception as e:
+                  out['status']='ERROR'; out['error_class']=type(e).__name__
+
+          with open('out/phoenix_migration.json','w') as f: json.dump(out,f,indent=2,ensure_ascii=False)
+          print(json.dumps(out,indent=2,ensure_ascii=False)[:50000])
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ai39-phoenix-migration
+          path: out/phoenix_migration.json
+          if-no-files-found: error
+          retention-days: 2
