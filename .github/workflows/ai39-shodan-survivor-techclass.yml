@@ -1,4 +1,4 @@
-name: AI39 Shodan specialized tech-class probe
+name: AI39 Shodan historical specialized tech exposure
 
 on:
   pull_request:
@@ -10,7 +10,7 @@ permissions:
 jobs:
   analyze:
     runs-on: ubuntu-latest
-    timeout-minutes: 9
+    timeout-minutes: 10
     env:
       SHODAN_API_KEY: ${{ secrets.SHODAN_API_KEY }}
     steps:
@@ -18,110 +18,83 @@ jobs:
         with:
           python-version: '3.12'
       - run: python -m pip install --disable-pip-version-check requests
-      - name: Aggregate specialized technology facets only
+      - name: Aggregate historical vendor and protocol trends only
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p out
           python - <<'PY'
-          import json, os, re, datetime, requests
+          import json, os, datetime, requests
+          from concurrent.futures import ThreadPoolExecutor, as_completed
 
-          KEY=os.environ.get('SHODAN_API_KEY','').strip()
-          ASN='AS202279'
-          OUT={
-            'generated_utc':datetime.datetime.now(datetime.timezone.utc).isoformat(),
-            'scope':'Passive aggregate Shodan technology-class characterization only; no IPs, hosts, banners, screenshots, vulnerabilities, credentials, exact locations or target-level records retained.',
-            'asn':ASN,
-            'status':'UNKNOWN',
-            'credits_before':None,'credits_after':None,'credits_delta':None,
-            'classes':{}
-          }
+          KEY=os.environ.get('SHODAN_API_KEY','').strip(); ASN='AS202279'
+          OUT={'generated_utc':datetime.datetime.now(datetime.timezone.utc).isoformat(),'scope':'Passive aggregate Shodan historical technology-class trends only; no IPs, hosts, banners, screenshots, vulnerabilities, credentials, exact locations or target-level records retained.','asn':ASN,'status':'UNKNOWN','credits_before':None,'credits_after':None,'credits_delta':None,'trends':{}}
           H={'User-Agent':'AI39-aggregate-passive-research/1.0'}
-
-          def getj(url,params,timeout=60):
-              r=requests.get(url,params=params,timeout=timeout,headers=H); r.raise_for_status(); return r.json()
           def api_info():
-              if not KEY:return None
-              return getj('https://api.shodan.io/api-info',{'key':KEY},30).get('query_credits')
-          def facet_count(query):
-              j=getj('https://api.shodan.io/shodan/host/count',{'key':KEY,'query':query,'facets':'product:20,device:20,os:20,org:10'},60)
-              rec={'total':j.get('total'),'facets':{}}
-              for f in ('product','device','os','org'):
-                  rows=[]
-                  for x in (j.get('facets') or {}).get(f,[])[:20]:
-                      v=x.get('value'); c=x.get('count')
-                      if isinstance(v,(str,int,float)) and isinstance(c,(int,float)):
-                          rows.append({'value':str(v),'count':int(c)})
-                  rec['facets'][f]=rows
-              return rec
-
-          # Broad technology families. Labels, not endpoint identities, are retained.
-          families={
+              r=requests.get('https://api.shodan.io/api-info',params={'key':KEY},timeout=30,headers=H); r.raise_for_status(); return r.json().get('query_credits')
+          tests={
+            'vendor_mikrotik':'product:"MikroTik"',
+            'vendor_cisco':'product:"Cisco"',
+            'vendor_juniper':'product:"Juniper"',
+            'vendor_huawei':'product:"Huawei"',
+            'vendor_zte':'product:"ZTE"',
+            'vendor_fortinet':'product:"Fortinet"',
+            'vendor_ubiquiti':'product:"Ubiquiti"',
+            'telecom_asterisk':'product:"Asterisk"',
+            'telecom_freeswitch':'product:"FreeSWITCH"',
+            'industrial_siemens':'product:"Siemens"',
+            'industrial_schneider':'product:"Schneider"',
+            'industrial_moxa':'product:"Moxa"',
             'network_management':'port:161',
             'realtime_comms_traversal':'port:3478',
-            'secure_alt_web_app':'port:4443',
-            'custom_app_5003':'port:5003',
-            'custom_app_8075':'port:8075',
-            'custom_app_8091':'port:8091',
             'sip_signaling':'port:5060',
-            'sip_signaling_tls':'port:5061',
             'industrial_modbus':'port:502',
             'industrial_s7':'port:102',
             'industrial_ethernet_ip':'port:44818',
             'industrial_bacnet':'port:47808',
             'industrial_dnp3':'port:20000'
           }
-          vendor_re=re.compile(r'(cisco|juniper|mikrotik|routeros|ubiquiti|fortinet|huawei|zte|nokia|ericsson|asterisk|freeswitch|kamailio|opensips|siemens|schneider|rockwell|allen[- ]?bradley|moxa|advantech|phoenix contact|honeywell|bacnet|modbus|dnp3)',re.I)
-          network_re=re.compile(r'(router|switch|firewall|gateway|vpn|snmp|sip|stun|turn|telecom|voip|network)',re.I)
-
+          def one(label,q):
+              rec={'status':'UNKNOWN','monthly':[]}
+              try:
+                  r=requests.get('https://trends.shodan.io/api/v1/search',params={'key':KEY,'query':f'asn:{ASN} {q}'},timeout=90,headers=H)
+                  rec['http_status']=r.status_code
+                  if r.status_code!=200:
+                      rec['status']='UNAVAILABLE'; return label,rec
+                  rows=[]
+                  for x in r.json().get('matches',[]):
+                      m=x.get('month'); c=x.get('count')
+                      if isinstance(m,str) and m>='2026-01' and isinstance(c,(int,float)): rows.append({'month':m,'count':int(c)})
+                  rows.sort(key=lambda x:x['month']); rec['monthly']=rows; rec['status']='MEASURED'
+                  rec['peak_2026']=max((x['count'] for x in rows),default=0); rec['latest_2026']=rows[-1]['count'] if rows else 0
+                  rec['present_before_april']=any(x['month']<'2026-04' and x['count']>0 for x in rows)
+                  rec['collapsed_after_q1']=bool(rec['present_before_april'] and rec['latest_2026']<=max(1,rec['peak_2026']*0.15))
+              except Exception as e:
+                  rec['status']='ERROR'; rec['error_class']=type(e).__name__
+              return label,rec
           if not KEY:
               OUT['status']='NO_SECRET'
           else:
-              try:
-                  OUT['credits_before']=api_info()
-                  for label,q in families.items():
-                      rec=facet_count(f'asn:{ASN} {q}')
-                      flat=[]
-                      for f,rows in rec['facets'].items():
-                          for x in rows:
-                              flat.append((f,x['value'],x['count']))
-                      spec=[]; net=[]
-                      for f,v,c in flat:
-                          if vendor_re.search(v): spec.append({'facet':f,'value':v,'count':c})
-                          elif network_re.search(v): net.append({'facet':f,'value':v,'count':c})
-                      if spec:
-                          cls='SPECIALIZED_VENDOR_SIGNAL'
-                      elif net:
-                          cls='NETWORK_TELECOM_SIGNAL'
-                      elif isinstance(rec.get('total'),int) and rec['total']>0:
-                          cls='EXPOSED_UNRESOLVED'
-                      else:
-                          cls='NO_CURRENT_EXPOSURE'
-                      rec['classification']=cls
-                      rec['specialized_vendor_facets']=spec
-                      rec['network_telecom_facets']=net
-                      OUT['classes'][label]=rec
-                  OUT['credits_after']=api_info()
-                  if isinstance(OUT['credits_before'],int) and isinstance(OUT['credits_after'],int):
-                      OUT['credits_delta']=OUT['credits_before']-OUT['credits_after']
-                  OUT['status']='MEASURED'
-              except Exception as e:
-                  OUT['status']='ERROR'; OUT['error_class']=type(e).__name__
-
-          # Compact summary without inventing meaning from an exposed port alone.
+              OUT['credits_before']=api_info()
+              with ThreadPoolExecutor(max_workers=6) as ex:
+                  fs=[ex.submit(one,k,v) for k,v in tests.items()]
+                  for f in as_completed(fs):
+                      k,r=f.result(); OUT['trends'][k]=r
+              OUT['credits_after']=api_info()
+              if isinstance(OUT['credits_before'],int) and isinstance(OUT['credits_after'],int): OUT['credits_delta']=OUT['credits_before']-OUT['credits_after']
+              OUT['status']='MEASURED'
           OUT['summary']={
-            'specialized_vendor_classes':[k for k,v in OUT['classes'].items() if v.get('classification')=='SPECIALIZED_VENDOR_SIGNAL'],
-            'network_telecom_classes':[k for k,v in OUT['classes'].items() if v.get('classification')=='NETWORK_TELECOM_SIGNAL'],
-            'exposed_unresolved_classes':[k for k,v in OUT['classes'].items() if v.get('classification')=='EXPOSED_UNRESOLVED'],
-            'industrial_classes_with_current_exposure':[k for k,v in OUT['classes'].items() if k.startswith('industrial_') and isinstance(v.get('total'),int) and v['total']>0]
+            'historical_vendor_signals':[k for k,v in OUT['trends'].items() if (k.startswith('vendor_') or k.startswith('telecom_') or k.startswith('industrial_')) and v.get('peak_2026',0)>0],
+            'collapsed_specialized_signals':[k for k,v in OUT['trends'].items() if v.get('collapsed_after_q1')],
+            'industrial_protocols_seen_2026':[k for k,v in OUT['trends'].items() if k.startswith('industrial_') and v.get('peak_2026',0)>0]
           }
-          OUT['interpretation_limit']='An indexed specialized product/service is a passive technical lead only. It does not establish military use, dangerous intent, physical location, ownership, operational control, or nearby personnel.'
-          with open('out/shodan_techclass.json','w') as f: json.dump(OUT,f,indent=2)
-          print(json.dumps({'status':OUT['status'],'credits_delta':OUT.get('credits_delta'),'summary':OUT.get('summary'),'class_totals':{k:v.get('total') for k,v in OUT['classes'].items()}},indent=2))
+          OUT['interpretation_limit']='Historical Shodan vendor/protocol counts are exposure fingerprints only. Absence is not proof that equipment did not exist; presence does not establish military use, dangerous intent, ownership, operational control or physical location.'
+          with open('out/shodan_techclass_history.json','w') as f: json.dump(OUT,f,indent=2)
+          print(json.dumps({'status':OUT['status'],'credits_delta':OUT.get('credits_delta'),'summary':OUT.get('summary'),'peaks':{k:v.get('peak_2026') for k,v in OUT['trends'].items()}},indent=2))
           PY
       - uses: actions/upload-artifact@v4
         with:
-          name: ai39-shodan-survivor-techclass
-          path: out/shodan_techclass.json
+          name: ai39-shodan-techclass-history
+          path: out/shodan_techclass_history.json
           if-no-files-found: error
           retention-days: 2
