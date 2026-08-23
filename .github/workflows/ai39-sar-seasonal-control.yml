@@ -1,0 +1,111 @@
+name: AI39 SAR seasonal control
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  sar:
+    runs-on: ubuntu-latest
+    timeout-minutes: 18
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install --disable-pip-version-check numpy rasterio pystac-client planetary-computer
+      - name: Compare 2025 same-season RTC repeat pattern
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          python - <<'PY'
+          import json, warnings
+          from collections import defaultdict
+          from datetime import datetime, timezone
+          import numpy as np, rasterio
+          from rasterio.vrt import WarpedVRT
+          from rasterio.enums import Resampling
+          from rasterio.transform import from_bounds
+          from pystac_client import Client
+          import planetary_computer
+          warnings.filterwarnings('ignore')
+
+          BBOX=[37.65,48.45,38.25,48.90]; W,H=640,480; TR=from_bounds(*BBOX,W,H)
+          START='2025-07-24'; END='2025-08-23'
+          cat=Client.open('https://planetarycomputer.microsoft.com/api/stac/v1',modifier=planetary_computer.sign_inplace)
+          items=list(cat.search(collections=['sentinel-1-rtc'],bbox=BBOX,datetime=START+'/'+END,max_items=400).items())
+          groups=defaultdict(lambda:defaultdict(list))
+          for it in items:
+              p=it.properties; dt=it.datetime; d=dt.date().isoformat() if dt else (p.get('datetime') or '')[:10]
+              platform=str(p.get('platform') or '').lower(); rel=p.get('sat:relative_orbit'); state=p.get('sat:orbit_state')
+              if d and platform and rel is not None and 'vv' in it.assets and 'vh' in it.assets:
+                  groups[(platform,int(rel),state)][d].append(it)
+          cand=[]
+          for geom,dates in groups.items():
+              ds=sorted(dates)
+              for i,a in enumerate(ds):
+                  for b in ds[i+1:]:
+                      sep=(datetime.fromisoformat(b)-datetime.fromisoformat(a)).days
+                      if 10<=sep<=14: cand.append((b,a,geom,dates[a],dates[b]))
+          cand.sort(reverse=True,key=lambda x:(x[0],x[1])); chosen=[]; seen=set()
+          for rec in cand:
+              k=(rec[2],rec[1],rec[0])
+              if k in seen: continue
+              seen.add(k); chosen.append(rec)
+              if len(chosen)>=10: break
+
+          def mosaic(its,key):
+              dst=np.full((H,W),np.nan,np.float32); ids=[]
+              for it in its:
+                  try:
+                      ids.append(it.id)
+                      with rasterio.open(it.assets[key].href) as ds:
+                          with WarpedVRT(ds,crs='EPSG:4326',transform=TR,width=W,height=H,resampling=Resampling.bilinear,nodata=np.nan) as vrt: a=vrt.read(1).astype(np.float32)
+                      m=np.isfinite(a)&(a!=0); both=m&np.isfinite(dst); dst[both]=(dst[both]+a[both])/2; only=m&~np.isfinite(dst); dst[only]=a[only]
+                  except Exception: pass
+              return dst,sorted(set(ids))
+          def db(x,valid):
+              med=float(np.nanmedian(x[valid])); return x.copy() if med<0 else 10*np.log10(np.maximum(x,1e-12))
+
+          pairs=[]
+          for b,a,geom,ia,ib in chosen:
+              va,idsa=mosaic(ia,'vv'); ha,_=mosaic(ia,'vh'); vb,idsb=mosaic(ib,'vv'); hb,_=mosaic(ib,'vh')
+              valid=np.isfinite(va)&np.isfinite(ha)&np.isfinite(vb)&np.isfinite(hb)&(va!=0)&(ha!=0)&(vb!=0)&(hb!=0)
+              if valid.mean()<0.35:
+                  pairs.append({'pair':[a,b],'geometry':{'platform':geom[0],'relative_orbit':geom[1],'orbit_state':geom[2]},'status':'INSUFFICIENT_OVERLAP','valid_percent':round(float(valid.mean()*100),2)}); continue
+              av=db(va,valid); ah=db(ha,valid); bv=db(vb,valid); bh=db(hb,valid); mag=np.sqrt(((bv-av)**2+(bh-ah)**2)/2)
+              cells=[]
+              for rr in range(4):
+                  for cc in range(4):
+                      sec=f"{'ABCD'[cc]}{rr+1}"; ys=slice(rr*H//4,(rr+1)*H//4); xs=slice(cc*W//4,(cc+1)*W//4); m=valid[ys,xs]
+                      r={'sector':sec,'valid_percent':round(float(m.mean()*100),2)}
+                      if m.sum()>150:
+                          z=mag[ys,xs][m]; r.update({'pct_ge_3db':round(float((z>=3).mean()*100),3),'p90_change_mag_db':round(float(np.percentile(z,90)),3)})
+                      cells.append(r)
+              scored=[x for x in cells if 'pct_ge_3db' in x]; base=float(np.median([x['pct_ge_3db'] for x in scored])) if scored else 0; scored.sort(key=lambda x:(x['pct_ge_3db'],x['p90_change_mag_db']),reverse=True)
+              for rank,x in enumerate(scored,1): x['rank']=rank; x['top4']=rank<=4; x['localized_excess_ratio']=round((x['pct_ge_3db']+0.05)/(base+0.05),2)
+              pairs.append({'pair':[a,b],'geometry':{'platform':geom[0],'relative_orbit':geom[1],'orbit_state':geom[2]},'status':'MEASURED','valid_overlap_percent':round(float(valid.mean()*100),2),'ids_a':idsa,'ids_b':idsb,'cells':cells})
+
+          measured=[p for p in pairs if p['status']=='MEASURED']; sectors=[]
+          for rr in range(4):
+              for cc in range(4):
+                  sec=f"{'ABCD'[cc]}{rr+1}"; ev=[]; geoms=set(); top4=0
+                  for p in measured:
+                      c=next((x for x in p['cells'] if x['sector']==sec and 'pct_ge_3db' in x),None)
+                      if not c: continue
+                      ev.append({'pair':p['pair'],'geometry':p['geometry'],'pct_ge_3db':c['pct_ge_3db'],'rank':c['rank'],'localized_excess_ratio':c['localized_excess_ratio']})
+                      if c['top4']: top4+=1; geoms.add((p['geometry']['platform'],p['geometry']['relative_orbit'],p['geometry']['orbit_state']))
+                  ratios=[e['localized_excess_ratio'] for e in ev]; sectors.append({'sector':sec,'measured_pairs':len(ev),'top4_pair_count':top4,'independent_top4_geometries':len(geoms),'median_localized_excess_ratio':round(float(np.median(ratios)),2) if ratios else None,'evidence':ev})
+          sectors.sort(key=lambda x:(x['top4_pair_count'],x['independent_top4_geometries'],x['median_localized_excess_ratio'] or 0),reverse=True)
+          out={'status':'MEASURED' if measured else 'NO_USABLE_PAIRS','generated_utc':datetime.now(timezone.utc).isoformat(),'scope':'AI-39 broad 4x4 2025 SAR seasonal control only; deliberately non-targetable','window':[START,END],'inventory_items':len(items),'candidate_pairs':len(chosen),'measured_pairs':len(measured),'pair_results':pairs,'sector_summary':sectors,'interpretation_rules':['Repeated top-sector behavior in the same season one year earlier supports recurring surface/agricultural sensitivity over a unique 2026 event.','SAR change alone is not causal attribution.','Broad-sector output only.']}
+          json.dump(out,open('out/analysis.json','w'),indent=2); print(json.dumps({'measured_pairs':len(measured),'top_sectors':sectors[:8]},indent=2))
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ai39-sar-seasonal-control
+          path: out/analysis.json
+          if-no-files-found: error
+          retention-days: 2
