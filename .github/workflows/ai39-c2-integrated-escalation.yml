@@ -1,0 +1,136 @@
+name: AI39 C2 integrated escalation
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  c2:
+    runs-on: ubuntu-latest
+    timeout-minutes: 22
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install --disable-pip-version-check pystac-client planetary-computer rasterio numpy requests pillow
+      - name: C2 multisource escalation
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          python - <<'PY'
+          import io,json
+          from datetime import datetime,timezone
+          import requests,numpy as np,rasterio
+          from PIL import Image
+          from rasterio.vrt import WarpedVRT
+          from rasterio.enums import Resampling
+          from rasterio.transform import from_bounds
+          import planetary_computer
+          from pystac_client import Client
+
+          FULL=[37.65,48.45,38.25,48.90]
+          dx=(FULL[2]-FULL[0])/4; dy=(FULL[3]-FULL[1])/4
+          # C2 = row C (third from north), column 2 in fixed 4x4 grid.
+          BBOX=[FULL[0]+dx, FULL[3]-3*dy, FULL[0]+2*dx, FULL[3]-2*dy]
+          W=H=360; TR=from_bounds(*BBOX,W,H)
+          cat=Client.open('https://planetarycomputer.microsoft.com/api/stac/v1',modifier=planetary_computer.sign_inplace)
+
+          def read(it,key,resamp=Resampling.bilinear,nodata=np.nan):
+              with rasterio.open(it.assets[key].href) as ds:
+                  with WarpedVRT(ds,crs='EPSG:4326',transform=TR,width=W,height=H,resampling=resamp,nodata=nodata) as vrt:
+                      return vrt.read(1).astype(np.float32)
+          def choose(year,target_day):
+              start=f'{year}-08-{max(1,target_day-3):02d}'; end=f'{year}-08-{min(31,target_day+3):02d}'
+              its=list(cat.search(collections=['sentinel-2-l2a'],bbox=BBOX,datetime=f'{start}/{end}',max_items=80).items())
+              target=datetime(year,8,target_day,tzinfo=timezone.utc); rows=[]
+              for it in its:
+                  dt=it.datetime; cloud=it.properties.get('eo:cloud_cover')
+                  if dt and isinstance(cloud,(int,float)):
+                      rows.append((abs((dt-target).total_seconds())/86400+max(float(cloud),0)/50,dt,float(cloud),it))
+              return min(rows,key=lambda x:x[0]) if rows else None
+          def calc(x):
+              _,dt,cloud,it=x
+              r=read(it,'B04'); n=read(it,'B08'); s1=read(it,'B11'); s2=read(it,'B12'); scl=read(it,'SCL',Resampling.nearest,0)
+              good=np.isfinite(r)&np.isfinite(n)&np.isfinite(s1)&np.isfinite(s2)&~np.isin(scl,[0,1,3,8,9,10,11])
+              eps=1e-6
+              return {'dt':dt,'cloud':cloud,'it':it,'good':good,'ndvi':(n-r)/(n+r+eps),'nbr':(n-s2)/(n+s2+eps),'ndbi':(s1-n)/(s1+n+eps)}
+          def opair(year):
+              a=choose(year,15); b=choose(year,20)
+              if not a or not b or a[3].id==b[3].id: return {'year':year,'status':'INSUFFICIENT_DATA'}
+              x=calc(a); y=calc(b); both=x['good']&y['good']
+              if both.mean()<.20: return {'year':year,'status':'INSUFFICIENT_CLEAR_OVERLAP','joint_valid_pct':round(float(both.mean()*100),2)}
+              dn=y['nbr']-x['nbr']; di=y['ndbi']-x['ndbi']; dv=y['ndvi']-x['ndvi']
+              return {'year':year,'status':'SCREENED','before_utc':x['dt'].isoformat(),'after_utc':y['dt'].isoformat(),
+                      'joint_valid_pct':round(float(both.mean()*100),2),'median_dndvi':round(float(np.median(dv[both])),4),
+                      'median_dnbr':round(float(np.median(dn[both])),4),'median_dndbi':round(float(np.median(di[both])),4),
+                      'pct_abs_dnbr_ge_0_10':round(float((np.abs(dn[both])>=.10).mean()*100),3),
+                      'pct_abs_dndbi_ge_0_10':round(float((np.abs(di[both])>=.10).mean()*100),3)}
+          optical=[opair(y) for y in (2023,2024,2025,2026)]
+
+          # 2026 fresh land-cover attribution.
+          aa=choose(2026,15); bb=choose(2026,20); land={'status':'INSUFFICIENT_DATA'}
+          if aa and bb and aa[3].id!=bb[3].id:
+              x=calc(aa); y=calc(bb); good=x['good']&y['good']; dn=y['nbr']-x['nbr']; di=y['ndbi']-x['ndbi']; dv=y['ndvi']-x['ndvi']
+              lc=np.zeros((H,W),np.uint8); ids=[]
+              for it in cat.search(collections=['io-lulc-9-class'],bbox=BBOX,datetime='2023-01-01/2023-12-31',max_items=20).items():
+                  asset=it.assets.get('data') or it.assets.get('map') or next((z for z in it.assets.values() if z.href.lower().endswith(('.tif','.tiff'))),None)
+                  if not asset: continue
+                  with rasterio.open(asset.href) as ds:
+                      with WarpedVRT(ds,crs='EPSG:4326',transform=TR,width=W,height=H,resampling=Resampling.nearest,nodata=0) as vrt: z=vrt.read(1).astype(np.uint8)
+                  m=z>0; lc[m]=z[m]; ids.append(it.id)
+              labels={1:'water',2:'trees',4:'flooded_vegetation',5:'crops',7:'built',8:'bare_ground',9:'snow_ice',10:'clouds',11:'rangeland'}
+              base=good&(lc>0)&(lc!=10)
+              masks={'abs_dnbr_ge_0_10':base&(np.abs(dn)>=.10),'abs_dndbi_ge_0_10':base&(np.abs(di)>=.10),'surface_exposure_like':base&(dn<=-.10)&(di>=.08),'vegetation_loss_like':base&(dv<=-.08)&(dn<=-.08)}
+              def dist(mask):
+                  tot=int(mask.sum()); d={}
+                  for code,name in labels.items():
+                      n=int((mask&(lc==code)).sum())
+                      if n: d[name]={'pixels':n,'share_pct':round(n/max(tot,1)*100,2)}
+                  return {'pixels':tot,'share_valid_pct':round(tot/max(int(base.sum()),1)*100,3),'classes':d}
+              land={'status':'SCREENED','base':dist(base),'change':{k:dist(v) for k,v in masks.items()},'landcover_items':ids}
+
+          # Thermal base rate: fixed C2 cell of same full WMS render.
+          WMS='https://gibs.earthdata.nasa.gov/wms/epsg4326/best/wms.cgi'; FB='37.65,48.45,38.25,48.90'; IW,IH=800,600
+          layers=['VIIRS_SNPP_Thermal_Anomalies_375m_All','VIIRS_NOAA20_Thermal_Anomalies_375m_All','VIIRS_NOAA21_Thermal_Anomalies_375m_All']
+          thermal=[]
+          for year in (2023,2024,2025,2026):
+              rec={'year':year,'dates':[],'peak_c2_symbol_pixels':0,'sum_c2_symbol_pixels':0}
+              for day in (17,18,19,20):
+                  date=f'{year}-08-{day:02d}'; union=np.zeros((IH,IW),bool); used=0
+                  for layer in layers:
+                      try:
+                          p={'SERVICE':'WMS','VERSION':'1.1.1','REQUEST':'GetMap','TIME':date+'T00:00:00Z','LAYERS':layer,'FORMAT':'image/png','STYLES':'','HEIGHT':IH,'SRS':'epsg:4326','WIDTH':IW,'BBOX':FB,'TRANSPARENT':'TRUE'}
+                          rr=requests.get(WMS,params=p,timeout=75); rr.raise_for_status()
+                          if 'image' not in rr.headers.get('content-type','').lower(): continue
+                          arr=np.array(Image.open(io.BytesIO(rr.content)).convert('RGBA')); union|=(arr[:,:,3]>0); used+=1
+                      except Exception: pass
+                  # C2 row index2, col index1.
+                  cell=union[2*IH//4:3*IH//4,1*IW//4:2*IW//4]; n=int(cell.sum())
+                  rec['dates'].append({'date':date,'c2_symbol_pixels':n,'layers_used':used}); rec['peak_c2_symbol_pixels']=max(rec['peak_c2_symbol_pixels'],n); rec['sum_c2_symbol_pixels']+=n
+              thermal.append(rec)
+
+          # Precipitation current event window at broad sector center, coordinate not retained.
+          weather={'status':'UNKNOWN'}
+          try:
+              lat=(BBOX[1]+BBOX[3])/2; lon=(BBOX[0]+BBOX[2])/2
+              rr=requests.get('https://archive-api.open-meteo.com/v1/archive',params={'latitude':lat,'longitude':lon,'start_date':'2026-08-12','end_date':'2026-08-20','daily':'precipitation_sum','timezone':'UTC'},timeout=60); rr.raise_for_status(); j=rr.json(); d=j.get('daily') or {}
+              rows=[{'date':a,'precip_mm':b} for a,b in zip(d.get('time') or [],d.get('precipitation_sum') or []) if isinstance(b,(int,float))]
+              evt=[x for x in rows if '2026-08-14'<=x['date']<='2026-08-20']
+              weather={'status':'SCREENED','event_total_mm':round(sum(x['precip_mm'] for x in evt),2),'event_max_daily_mm':round(max((x['precip_mm'] for x in evt),default=0),2),'daily':rows}
+          except Exception as e: weather={'status':'ERROR','error_class':type(e).__name__}
+
+          out={'generated_utc':datetime.now(timezone.utc).isoformat(),'sector':'C2','optical_same_season':optical,'thermal_same_window':thermal,'landcover_attribution_2026':land,'precipitation_2026':weather,
+               'interpretation_limit':'Integrated broad-sector discriminator. Historical optical/thermal base rate, land-cover prior and precipitation test whether current SAR/thermal/optical evidence is exceptional and whether crop/seasonal explanations dominate. None of these data alone prove people, equipment or military purpose.',
+               'safety':'Broad C2 only; no coordinates, routes, exact positions, equipment, trench or sensor locations.'}
+          json.dump(out,open('out/c2.json','w'),indent=2); print(json.dumps(out,indent=2))
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ai39-c2-integrated-escalation
+          path: out/c2.json
+          if-no-files-found: error
+          retention-days: 2
