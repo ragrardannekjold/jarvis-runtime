@@ -54,6 +54,18 @@ test("private job accepts bounded AI-39 CYBINT type without public metadata", ()
   assert.equal(job.payload.asn, "AS202279");
 });
 
+test("private job accepts bounded RTO multi-AS compare type with empty payload", () => {
+  const job = parsePrivateJob({
+    schema_version: 1,
+    job_ref: ref,
+    job_type: "ai39_rto_as_compare",
+    sensitivity: "private",
+    payload: {},
+  }, ref);
+  assert.equal(job.job_type, "ai39_rto_as_compare");
+  assert.deepEqual(job.payload, {});
+});
+
 test("private job rejects non-allowlisted execution", () => {
   assert.throws(
     () => parsePrivateJob({

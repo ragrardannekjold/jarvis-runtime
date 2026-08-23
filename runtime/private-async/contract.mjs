@@ -3,6 +3,7 @@ const PRIVATE_JOB_TYPES = new Set([
   "private_integrity_probe",
   "command_center_validation",
   "ai39_cybint_refresh",
+  "ai39_rto_as_compare",
 ]);
 
 const JOB_REF_RE = /^paj-[a-f0-9]{24}$/;

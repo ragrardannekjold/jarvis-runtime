@@ -4,6 +4,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { parsePublicTrigger, parsePrivateJob, buildPublicStatus } from "./contract.mjs";
 import { runAi39CybintRefresh } from "./ai39_cybint.mjs";
+import { runAi39RtoAsCompare } from "./ai39_rto_as_compare.mjs";
 
 const execFileAsync = promisify(execFile);
 const PRIVATE_REPO = "ragrardannekjold/jarvis-command-center";
@@ -142,6 +143,9 @@ async function executePrivateJob(job) {
   }
   if (job.job_type === "ai39_cybint_refresh") {
     return runAi39CybintRefresh(job.payload);
+  }
+  if (job.job_type === "ai39_rto_as_compare") {
+    return runAi39RtoAsCompare(job.payload);
   }
   throw new Error("unreachable_private_job_type");
 }
