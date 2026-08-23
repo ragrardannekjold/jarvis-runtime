@@ -7,6 +7,7 @@ on:
       - 'runtime/ai39_sar_noncrop_morphology.py'
       - 'runtime/ai39_sar_noncrop_compare_v2.py'
       - 'runtime/test_ai39_sar_noncrop_morphology.py'
+      - 'runtime/test_ai39_sar_noncrop_compare_v2.py'
       - '.github/workflows/ai39-sar-noncrop-morphology.yml'
 
 permissions:
@@ -28,8 +29,11 @@ jobs:
           python -m py_compile \
             runtime/ai39_sar_noncrop_morphology.py \
             runtime/ai39_sar_noncrop_compare_v2.py \
-            runtime/test_ai39_sar_noncrop_morphology.py
-          PYTHONPATH=runtime python -m unittest runtime/test_ai39_sar_noncrop_morphology.py -v
+            runtime/test_ai39_sar_noncrop_morphology.py \
+            runtime/test_ai39_sar_noncrop_compare_v2.py
+          PYTHONPATH=runtime python -m unittest \
+            runtime/test_ai39_sar_noncrop_morphology.py \
+            runtime/test_ai39_sar_noncrop_compare_v2.py -v
 
   year:
     strategy:
