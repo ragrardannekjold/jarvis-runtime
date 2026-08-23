@@ -1,4 +1,4 @@
-name: AI39 Shodan broad city-level concentration screen
+name: AI39 Shodan aggregate geolocation validity check
 
 on:
   pull_request:
@@ -10,7 +10,7 @@ permissions:
 jobs:
   analyze:
     runs-on: ubuntu-latest
-    timeout-minutes: 8
+    timeout-minutes: 6
     env:
       SHODAN_API_KEY: ${{ secrets.SHODAN_API_KEY }}
     steps:
@@ -18,67 +18,31 @@ jobs:
         with:
           python-version: '3.12'
       - run: python -m pip install --disable-pip-version-check requests
-      - name: Aggregate city-level Shodan facets inside AS202279
+      - name: Top city and region facets for AS202279 only
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p out
           python - <<'PY'
-          import json, os, datetime, requests, time
-          KEY=os.environ.get('SHODAN_API_KEY','').strip(); ASN='AS202279'
-          H={'User-Agent':'AI39-aggregate-passive-research/1.0'}
-          OUT={'generated_utc':datetime.datetime.now(datetime.timezone.utc).isoformat(),'scope':'Passive broad-city aggregate screen within AS202279; no IPs, hosts, banners, screenshots, vulnerabilities, credentials or exact locations retained. City geolocation is provider metadata and may be stale or inaccurate.','status':'UNKNOWN','credits_before':None,'credits_after':None,'credits_delta':None,'areas':{}}
-          aliases={
-            'Bakhmut':['Bakhmut','Artemivsk','Artemovsk'],
-            'Soledar':['Soledar'],
-            'Chasiv_Yar':['Chasiv Yar','Chasov Yar'],
-            'Kostiantynivka':['Kostiantynivka','Kostyantynivka','Konstantinovka'],
-            'Kramatorsk':['Kramatorsk'],
-            'Sloviansk':['Sloviansk','Slavyansk']
-          }
+          import json,os,datetime,requests
+          K=os.environ.get('SHODAN_API_KEY','').strip(); Q='asn:AS202279'; H={'User-Agent':'AI39-aggregate-passive-research/1.0'}
+          out={'generated_utc':datetime.datetime.now(datetime.timezone.utc).isoformat(),'scope':'Aggregate Shodan geolocation-facet validity check for AS202279 only; no IPs, hosts, banners, exact coordinates or target records retained.','status':'UNKNOWN'}
           def info():
-              r=requests.get('https://api.shodan.io/api-info',params={'key':KEY},timeout=30,headers=H);r.raise_for_status();return r.json().get('query_credits')
-          def count(q,facets='port:20,product:15,device:15,org:10'):
-              r=requests.get('https://api.shodan.io/shodan/host/count',params={'key':KEY,'query':q,'facets':facets},timeout=60,headers=H);r.raise_for_status();j=r.json();rec={'total':j.get('total'),'facets':{}}
-              for f in ('port','product','device','org'):
-                  rows=[]
-                  for x in (j.get('facets') or {}).get(f,[])[:20]:
-                      if isinstance(x.get('count'),(int,float)):rows.append({'value':str(x.get('value')),'count':int(x['count'])})
-                  rec['facets'][f]=rows
-              return rec
-          if not KEY:OUT['status']='NO_SECRET'
+              r=requests.get('https://api.shodan.io/api-info',params={'key':K},timeout=30,headers=H);r.raise_for_status();return r.json().get('query_credits')
+          if not K:out['status']='NO_SECRET'
           else:
-              OUT['credits_before']=info()
-              for area,names in aliases.items():
-                  rows=[]
-                  for name in names:
-                      try:
-                          q=f'asn:{ASN} city:"{name}"'; rec=count(q); rec['alias']=name; rows.append(rec); time.sleep(.15)
-                      except Exception as e:rows.append({'alias':name,'status':'ERROR','error_class':type(e).__name__})
-                  # Dedup is impossible without host rows, so use max alias count instead of summing aliases.
-                  valid=[x for x in rows if isinstance(x.get('total'),int)]
-                  best=max(valid,key=lambda x:x['total']) if valid else None
-                  area_rec={'aliases':rows,'best_alias':best.get('alias') if best else None,'current_total':best.get('total') if best else None,'facets':best.get('facets') if best else {}}
-                  if best and best.get('total',0)>0:
-                      ports={int(x['value']):x['count'] for x in best['facets'].get('port',[]) if str(x['value']).isdigit()}
-                      area_rec['service_family_counts_from_top_ports']={
-                        'network_management':ports.get(161,0),
-                        'realtime_comms_traversal':ports.get(3478,0),
-                        'sip_signaling':ports.get(5060,0)+ports.get(5061,0),
-                        'industrial_common':sum(ports.get(p,0) for p in (102,502,44818,47808,20000))
-                      }
-                  OUT['areas'][area]=area_rec
-              OUT['credits_after']=info();
-              if isinstance(OUT['credits_before'],int) and isinstance(OUT['credits_after'],int):OUT['credits_delta']=OUT['credits_before']-OUT['credits_after']
-              OUT['status']='MEASURED'
-          OUT['summary']={'areas_with_current_indexed_exposure':[k for k,v in OUT['areas'].items() if isinstance(v.get('current_total'),int) and v['current_total']>0],'areas_with_network_management':[k for k,v in OUT['areas'].items() if (v.get('service_family_counts_from_top_ports') or {}).get('network_management',0)>0],'areas_with_realtime_comms':[k for k,v in OUT['areas'].items() if (v.get('service_family_counts_from_top_ports') or {}).get('realtime_comms_traversal',0)>0],'areas_with_industrial_common':[k for k,v in OUT['areas'].items() if (v.get('service_family_counts_from_top_ports') or {}).get('industrial_common',0)>0]}
-          OUT['interpretation_limit']='City-level Shodan geolocation is coarse provider metadata. Exposure is a technical lead only and does not establish current physical location, people, military use, ownership, operational control or dangerous intent.'
-          with open('out/shodan_city_screen.json','w') as f:json.dump(OUT,f,indent=2)
-          print(json.dumps({'status':OUT['status'],'credits_delta':OUT.get('credits_delta'),'summary':OUT.get('summary'),'totals':{k:v.get('current_total') for k,v in OUT['areas'].items()}},indent=2))
+              b=info();r=requests.get('https://api.shodan.io/shodan/host/count',params={'key':K,'query':Q,'facets':'city:30,region:20,country:10'},timeout=60,headers=H);r.raise_for_status();j=r.json();a=info()
+              out['status']='MEASURED';out['current_total']=j.get('total');out['credits_delta']=(b-a) if isinstance(b,int) and isinstance(a,int) else None
+              out['facets']={}
+              for f in ('city','region','country'):
+                  out['facets'][f]=[{'value':str(x.get('value')),'count':int(x['count'])} for x in (j.get('facets') or {}).get(f,[])[:30] if isinstance(x.get('count'),(int,float))]
+          out['interpretation_limit']='Shodan city/region is provider geolocation metadata and can be stale, centralized or inaccurate. It is evaluated here only to decide whether Shodan can localize the regional infrastructure signal at broad-city level.'
+          with open('out/shodan_geo_validity.json','w') as f:json.dump(out,f,indent=2)
+          print(json.dumps(out,indent=2))
           PY
       - uses: actions/upload-artifact@v4
         with:
-          name: ai39-shodan-city-screen
-          path: out/shodan_city_screen.json
+          name: ai39-shodan-geo-validity
+          path: out/shodan_geo_validity.json
           if-no-files-found: error
           retention-days: 2
