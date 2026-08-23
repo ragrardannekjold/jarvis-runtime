@@ -51,6 +51,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ github.token }}
           COMMAND_CENTER_TOKEN: ${{ secrets.COMMAND_CENTER_TOKEN }}
+          SHODAN_API_KEY: ${{ secrets.SHODAN_API_KEY }}
         run: node runtime/private-async/worker.mjs
 
       - name: Public-safe terminal summary
