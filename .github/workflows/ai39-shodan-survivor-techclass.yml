@@ -1,4 +1,4 @@
-name: AI39 Shodan historical specialized tech exposure
+name: AI39 Shodan broad city-level concentration screen
 
 on:
   pull_request:
@@ -10,7 +10,7 @@ permissions:
 jobs:
   analyze:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 8
     env:
       SHODAN_API_KEY: ${{ secrets.SHODAN_API_KEY }}
     steps:
@@ -18,83 +18,67 @@ jobs:
         with:
           python-version: '3.12'
       - run: python -m pip install --disable-pip-version-check requests
-      - name: Aggregate historical vendor and protocol trends only
+      - name: Aggregate city-level Shodan facets inside AS202279
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p out
           python - <<'PY'
-          import json, os, datetime, requests
-          from concurrent.futures import ThreadPoolExecutor, as_completed
-
+          import json, os, datetime, requests, time
           KEY=os.environ.get('SHODAN_API_KEY','').strip(); ASN='AS202279'
-          OUT={'generated_utc':datetime.datetime.now(datetime.timezone.utc).isoformat(),'scope':'Passive aggregate Shodan historical technology-class trends only; no IPs, hosts, banners, screenshots, vulnerabilities, credentials, exact locations or target-level records retained.','asn':ASN,'status':'UNKNOWN','credits_before':None,'credits_after':None,'credits_delta':None,'trends':{}}
           H={'User-Agent':'AI39-aggregate-passive-research/1.0'}
-          def api_info():
-              r=requests.get('https://api.shodan.io/api-info',params={'key':KEY},timeout=30,headers=H); r.raise_for_status(); return r.json().get('query_credits')
-          tests={
-            'vendor_mikrotik':'product:"MikroTik"',
-            'vendor_cisco':'product:"Cisco"',
-            'vendor_juniper':'product:"Juniper"',
-            'vendor_huawei':'product:"Huawei"',
-            'vendor_zte':'product:"ZTE"',
-            'vendor_fortinet':'product:"Fortinet"',
-            'vendor_ubiquiti':'product:"Ubiquiti"',
-            'telecom_asterisk':'product:"Asterisk"',
-            'telecom_freeswitch':'product:"FreeSWITCH"',
-            'industrial_siemens':'product:"Siemens"',
-            'industrial_schneider':'product:"Schneider"',
-            'industrial_moxa':'product:"Moxa"',
-            'network_management':'port:161',
-            'realtime_comms_traversal':'port:3478',
-            'sip_signaling':'port:5060',
-            'industrial_modbus':'port:502',
-            'industrial_s7':'port:102',
-            'industrial_ethernet_ip':'port:44818',
-            'industrial_bacnet':'port:47808',
-            'industrial_dnp3':'port:20000'
+          OUT={'generated_utc':datetime.datetime.now(datetime.timezone.utc).isoformat(),'scope':'Passive broad-city aggregate screen within AS202279; no IPs, hosts, banners, screenshots, vulnerabilities, credentials or exact locations retained. City geolocation is provider metadata and may be stale or inaccurate.','status':'UNKNOWN','credits_before':None,'credits_after':None,'credits_delta':None,'areas':{}}
+          aliases={
+            'Bakhmut':['Bakhmut','Artemivsk','Artemovsk'],
+            'Soledar':['Soledar'],
+            'Chasiv_Yar':['Chasiv Yar','Chasov Yar'],
+            'Kostiantynivka':['Kostiantynivka','Kostyantynivka','Konstantinovka'],
+            'Kramatorsk':['Kramatorsk'],
+            'Sloviansk':['Sloviansk','Slavyansk']
           }
-          def one(label,q):
-              rec={'status':'UNKNOWN','monthly':[]}
-              try:
-                  r=requests.get('https://trends.shodan.io/api/v1/search',params={'key':KEY,'query':f'asn:{ASN} {q}'},timeout=90,headers=H)
-                  rec['http_status']=r.status_code
-                  if r.status_code!=200:
-                      rec['status']='UNAVAILABLE'; return label,rec
+          def info():
+              r=requests.get('https://api.shodan.io/api-info',params={'key':KEY},timeout=30,headers=H);r.raise_for_status();return r.json().get('query_credits')
+          def count(q,facets='port:20,product:15,device:15,org:10'):
+              r=requests.get('https://api.shodan.io/shodan/host/count',params={'key':KEY,'query':q,'facets':facets},timeout=60,headers=H);r.raise_for_status();j=r.json();rec={'total':j.get('total'),'facets':{}}
+              for f in ('port','product','device','org'):
                   rows=[]
-                  for x in r.json().get('matches',[]):
-                      m=x.get('month'); c=x.get('count')
-                      if isinstance(m,str) and m>='2026-01' and isinstance(c,(int,float)): rows.append({'month':m,'count':int(c)})
-                  rows.sort(key=lambda x:x['month']); rec['monthly']=rows; rec['status']='MEASURED'
-                  rec['peak_2026']=max((x['count'] for x in rows),default=0); rec['latest_2026']=rows[-1]['count'] if rows else 0
-                  rec['present_before_april']=any(x['month']<'2026-04' and x['count']>0 for x in rows)
-                  rec['collapsed_after_q1']=bool(rec['present_before_april'] and rec['latest_2026']<=max(1,rec['peak_2026']*0.15))
-              except Exception as e:
-                  rec['status']='ERROR'; rec['error_class']=type(e).__name__
-              return label,rec
-          if not KEY:
-              OUT['status']='NO_SECRET'
+                  for x in (j.get('facets') or {}).get(f,[])[:20]:
+                      if isinstance(x.get('count'),(int,float)):rows.append({'value':str(x.get('value')),'count':int(x['count'])})
+                  rec['facets'][f]=rows
+              return rec
+          if not KEY:OUT['status']='NO_SECRET'
           else:
-              OUT['credits_before']=api_info()
-              with ThreadPoolExecutor(max_workers=6) as ex:
-                  fs=[ex.submit(one,k,v) for k,v in tests.items()]
-                  for f in as_completed(fs):
-                      k,r=f.result(); OUT['trends'][k]=r
-              OUT['credits_after']=api_info()
-              if isinstance(OUT['credits_before'],int) and isinstance(OUT['credits_after'],int): OUT['credits_delta']=OUT['credits_before']-OUT['credits_after']
+              OUT['credits_before']=info()
+              for area,names in aliases.items():
+                  rows=[]
+                  for name in names:
+                      try:
+                          q=f'asn:{ASN} city:"{name}"'; rec=count(q); rec['alias']=name; rows.append(rec); time.sleep(.15)
+                      except Exception as e:rows.append({'alias':name,'status':'ERROR','error_class':type(e).__name__})
+                  # Dedup is impossible without host rows, so use max alias count instead of summing aliases.
+                  valid=[x for x in rows if isinstance(x.get('total'),int)]
+                  best=max(valid,key=lambda x:x['total']) if valid else None
+                  area_rec={'aliases':rows,'best_alias':best.get('alias') if best else None,'current_total':best.get('total') if best else None,'facets':best.get('facets') if best else {}}
+                  if best and best.get('total',0)>0:
+                      ports={int(x['value']):x['count'] for x in best['facets'].get('port',[]) if str(x['value']).isdigit()}
+                      area_rec['service_family_counts_from_top_ports']={
+                        'network_management':ports.get(161,0),
+                        'realtime_comms_traversal':ports.get(3478,0),
+                        'sip_signaling':ports.get(5060,0)+ports.get(5061,0),
+                        'industrial_common':sum(ports.get(p,0) for p in (102,502,44818,47808,20000))
+                      }
+                  OUT['areas'][area]=area_rec
+              OUT['credits_after']=info();
+              if isinstance(OUT['credits_before'],int) and isinstance(OUT['credits_after'],int):OUT['credits_delta']=OUT['credits_before']-OUT['credits_after']
               OUT['status']='MEASURED'
-          OUT['summary']={
-            'historical_vendor_signals':[k for k,v in OUT['trends'].items() if (k.startswith('vendor_') or k.startswith('telecom_') or k.startswith('industrial_')) and v.get('peak_2026',0)>0],
-            'collapsed_specialized_signals':[k for k,v in OUT['trends'].items() if v.get('collapsed_after_q1')],
-            'industrial_protocols_seen_2026':[k for k,v in OUT['trends'].items() if k.startswith('industrial_') and v.get('peak_2026',0)>0]
-          }
-          OUT['interpretation_limit']='Historical Shodan vendor/protocol counts are exposure fingerprints only. Absence is not proof that equipment did not exist; presence does not establish military use, dangerous intent, ownership, operational control or physical location.'
-          with open('out/shodan_techclass_history.json','w') as f: json.dump(OUT,f,indent=2)
-          print(json.dumps({'status':OUT['status'],'credits_delta':OUT.get('credits_delta'),'summary':OUT.get('summary'),'peaks':{k:v.get('peak_2026') for k,v in OUT['trends'].items()}},indent=2))
+          OUT['summary']={'areas_with_current_indexed_exposure':[k for k,v in OUT['areas'].items() if isinstance(v.get('current_total'),int) and v['current_total']>0],'areas_with_network_management':[k for k,v in OUT['areas'].items() if (v.get('service_family_counts_from_top_ports') or {}).get('network_management',0)>0],'areas_with_realtime_comms':[k for k,v in OUT['areas'].items() if (v.get('service_family_counts_from_top_ports') or {}).get('realtime_comms_traversal',0)>0],'areas_with_industrial_common':[k for k,v in OUT['areas'].items() if (v.get('service_family_counts_from_top_ports') or {}).get('industrial_common',0)>0]}
+          OUT['interpretation_limit']='City-level Shodan geolocation is coarse provider metadata. Exposure is a technical lead only and does not establish current physical location, people, military use, ownership, operational control or dangerous intent.'
+          with open('out/shodan_city_screen.json','w') as f:json.dump(OUT,f,indent=2)
+          print(json.dumps({'status':OUT['status'],'credits_delta':OUT.get('credits_delta'),'summary':OUT.get('summary'),'totals':{k:v.get('current_total') for k,v in OUT['areas'].items()}},indent=2))
           PY
       - uses: actions/upload-artifact@v4
         with:
-          name: ai39-shodan-techclass-history
-          path: out/shodan_techclass_history.json
+          name: ai39-shodan-city-screen
+          path: out/shodan_city_screen.json
           if-no-files-found: error
           retention-days: 2
