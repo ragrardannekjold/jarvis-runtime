@@ -1,0 +1,74 @@
+name: AI39 Shodan second ASN aggregate
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  classify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    env:
+      SHODAN_API_KEY: ${{ secrets.SHODAN_API_KEY }}
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install --disable-pip-version-check requests
+      - name: Aggregate specialized-class screen for second ASN
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          python - <<'PY'
+          import json, os
+          from datetime import datetime, timezone
+          import requests
+
+          key=os.environ.get('SHODAN_API_KEY','').strip()
+          ASN='AS214721'
+          signatures={
+            'surveillance_media':['port:554','device:webcam','product:"Hikvision"','product:"Dahua"'],
+            'network_management':['port:161','port:8291','port:8728','port:8729','port:7547'],
+            'industrial_ot':['port:502','port:102','port:47808','port:20000','port:44818'],
+            'telecom_edge':['port:3478','port:5060','port:5061','port:1812','port:1813','product:"MikroTik"','product:"Ubiquiti"'],
+            'remote_administration':['port:3389','port:5900']
+          }
+          out={'generated_utc':datetime.now(timezone.utc).isoformat(),'scope':'Aggregate-only passive class screen for second related telecom ASN; deliberately non-targetable','asn':ASN,'status':'UNKNOWN','current_total':None,'categories':{},'credits_before':None,'credits_after':None,'credits_delta':None,'interpretation_limit':'Overlapping indexed-service signatures only; not unique devices, people, physical presence, ownership, control or exact locations.','safety':'No IPs, hostnames, banners, versions, vulnerabilities, screenshots, credentials or exact locations requested or retained.'}
+          def info():
+            r=requests.get('https://api.shodan.io/api-info',params={'key':key},timeout=30); r.raise_for_status(); return r.json().get('query_credits')
+          def count(q):
+            r=requests.get('https://api.shodan.io/shodan/host/count',params={'key':key,'query':q},timeout=45); r.raise_for_status(); return r.json().get('total')
+          if not key:
+            out['status']='NO_SECRET'
+          else:
+            try:
+              out['credits_before']=info(); out['current_total']=count(f'asn:{ASN}')
+              for cat,sigs in signatures.items():
+                vals=[]; errors=0
+                for sig in sigs:
+                  try:
+                    n=count(f'asn:{ASN} {sig}')
+                    if isinstance(n,int): vals.append(n)
+                  except Exception: errors+=1
+                pos=[n for n in vals if n>0]
+                out['categories'][cat]={'signatures_tested':len(sigs),'successful_counts':len(vals),'positive_signatures':len(pos),'max_signature_count':max(pos) if pos else 0,'sum_signature_counts_overlap_possible':sum(pos),'query_errors':errors,'signal':'PRESENT' if len(pos)>=2 or (pos and max(pos)>=2) else ('WEAK' if pos else 'NONE')}
+              out['credits_after']=info()
+              if isinstance(out['credits_before'],int) and isinstance(out['credits_after'],int): out['credits_delta']=out['credits_before']-out['credits_after']
+              out['status']='VERIFIED_AGGREGATE'
+            except requests.HTTPError as e:
+              out['status']='HTTP_ERROR'; out['http_status']=getattr(e.response,'status_code',None)
+            except Exception as e:
+              out['status']='ERROR'; out['error_class']=type(e).__name__
+          with open('out/second_asn.json','w') as f: json.dump(out,f,indent=2)
+          print(json.dumps(out,indent=2))
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ai39-shodan-second-asn
+          path: out/second_asn.json
+          if-no-files-found: error
+          retention-days: 2
