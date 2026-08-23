@@ -1,0 +1,136 @@
+name: AI39 DEM relief features
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  relief:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install --disable-pip-version-check numpy scipy rasterio pystac-client planetary-computer
+      - name: Build broad DEM relief-feature context
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          python - <<'PY'
+          import json, math
+          from datetime import datetime, timezone
+          import numpy as np
+          from scipy.ndimage import gaussian_filter, uniform_filter
+          import rasterio
+          from rasterio.warp import reproject
+          from rasterio.enums import Resampling
+          from rasterio.transform import from_bounds
+          from pystac_client import Client
+          import planetary_computer
+
+          BBOX=[37.65,48.45,38.25,48.90]
+          W,H=1800,1350
+          tr=from_bounds(*BBOX,W,H)
+          dem=np.full((H,W),np.nan,np.float32)
+          ids=[]
+
+          cat=Client.open('https://planetarycomputer.microsoft.com/api/stac/v1')
+          items=list(cat.search(collections=['cop-dem-glo-30'],bbox=BBOX).items())
+          for it in items[:20]:
+              planetary_computer.sign_inplace(it)
+              asset=it.assets.get('data') or next((a for a in it.assets.values() if 'tif' in a.href.lower()),None)
+              if not asset: continue
+              tmp=np.full((H,W),np.nan,np.float32)
+              try:
+                  with rasterio.open(asset.href) as ds:
+                      reproject(source=rasterio.band(ds,1),destination=tmp,src_transform=ds.transform,src_crs=ds.crs,
+                                src_nodata=ds.nodata,dst_transform=tr,dst_crs='EPSG:4326',dst_nodata=np.nan,resampling=Resampling.bilinear)
+                  m=np.isfinite(tmp); dem[m]=tmp[m]; ids.append(it.id)
+              except Exception:
+                  pass
+
+          valid=np.isfinite(dem)
+          if valid.mean()<0.5:
+              raise RuntimeError('insufficient DEM coverage')
+          fill=float(np.nanmedian(dem[valid]))
+          d=np.where(valid,dem,fill)
+          lat=(BBOX[1]+BBOX[3])/2
+          dx=((BBOX[2]-BBOX[0])*111320*math.cos(math.radians(lat)))/W
+          dy=((BBOX[3]-BBOX[1])*110540)/H
+          gy,gx=np.gradient(d,dy,dx)
+          slope=np.degrees(np.arctan(np.hypot(gx,gy)))
+          aspect=np.arctan2(-gx,gy)
+
+          alt=math.radians(35)
+          hs=[]
+          slope_rad=np.arctan(np.hypot(gx,gy))
+          for az_deg in (45,135,225,315):
+              az=math.radians(az_deg)
+              h=np.sin(alt)*np.cos(slope_rad)+np.cos(alt)*np.sin(slope_rad)*np.cos(az-aspect)
+              hs.append(np.clip(h,0,1))
+          multi_hs=np.mean(hs,axis=0)
+
+          lrm_3=d-gaussian_filter(d,sigma=3)
+          lrm_10=d-gaussian_filter(d,sigma=10)
+          mean3=uniform_filter(d,size=7,mode='nearest')
+          mean11=uniform_filter(d,size=21,mode='nearest')
+          tpi3=d-mean3
+          tpi11=d-mean11
+          rough=np.sqrt(np.maximum(0,uniform_filter(d*d,size=7)-uniform_filter(d,size=7)**2))
+          gyy,gyx=np.gradient(gy,dy,dx)
+          gxy,gxx=np.gradient(gx,dy,dx)
+          curvature=gxx+gyy
+
+          cells=[]
+          for rr in range(4):
+              for cc in range(4):
+                  ys=slice(rr*H//4,(rr+1)*H//4); xs=slice(cc*W//4,(cc+1)*W//4)
+                  m=valid[ys,xs]
+                  rec={'sector':f"{'ABCD'[cc]}{rr+1}",'valid_percent':round(float(m.mean()*100),1)}
+                  if m.sum()>100:
+                      def q(a,p): return float(np.nanpercentile(a[ys,xs][m],p))
+                      rec.update({
+                        'elev_p05_p95_range_m':round(q(d,95)-q(d,5),1),
+                        'slope_median_deg':round(q(slope,50),2),
+                        'slope_p95_deg':round(q(slope,95),2),
+                        'multihillshade_std':round(float(np.nanstd(multi_hs[ys,xs][m])),4),
+                        'local_relief_3px_p95_abs_m':round(float(np.nanpercentile(np.abs(lrm_3[ys,xs][m]),95)),2),
+                        'local_relief_10px_p95_abs_m':round(float(np.nanpercentile(np.abs(lrm_10[ys,xs][m]),95)),2),
+                        'tpi_7px_p95_abs_m':round(float(np.nanpercentile(np.abs(tpi3[ys,xs][m]),95)),2),
+                        'tpi_21px_p95_abs_m':round(float(np.nanpercentile(np.abs(tpi11[ys,xs][m]),95)),2),
+                        'roughness_7px_p95_m':round(q(rough,95),2),
+                        'curvature_p95_abs':round(float(np.nanpercentile(np.abs(curvature[ys,xs][m]),95)),6),
+                      })
+                      lr=rec['local_relief_3px_p95_abs_m']; rg=rec['roughness_7px_p95_m']; cv=rec['curvature_p95_abs']
+                      score=min(10, 1.2*lr + 0.8*rg + min(3,cv*100000))
+                      rec['microrelief_context_score_0_10']=round(score,2)
+                  cells.append(rec)
+
+          out={
+            'generated_utc':datetime.now(timezone.utc).isoformat(),
+            'scope':'AI-39 broad 4x4 DEM-derived terrain context; no coordinates, routes, exact trench lines or target-level output',
+            'source':'Copernicus DEM GLO-30 via Planetary Computer',
+            'dem_ids':ids,
+            'pixel_scale_note':'approximately 30 m class after reprojection; too coarse to resolve individual trenches or small equipment directly',
+            'features':['slope','multi_direction_hillshade','local_relief_model_3px','local_relief_model_10px','TPI_7px','TPI_21px','roughness','curvature'],
+            'cells':cells,
+            'interpretation_rules':[
+              'Hillshade and DEM derivatives are terrain-shape context, not proof of people, equipment or fortifications.',
+              'Copernicus DEM 30 m class cannot resolve individual trench lines; use it to explain/suppress broad terrain confounds and prioritize higher-resolution follow-up.',
+              'A DEM feature becomes decision-relevant only when it helps discriminate an existing SAR/EO lead or a civilian mobility hazard at broad-sector level.'
+            ]
+          }
+          json.dump(out,open('out/dem_relief_features.json','w'),indent=2)
+          print(json.dumps({'source':out['source'],'pixel_scale_note':out['pixel_scale_note'],'top_context':sorted([{'sector':c['sector'],'score':c.get('microrelief_context_score_0_10')} for c in cells if c.get('microrelief_context_score_0_10') is not None],key=lambda x:x['score'],reverse=True)[:6]},indent=2))
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ai39-dem-relief-features
+          path: out/dem_relief_features.json
+          if-no-files-found: error
+          retention-days: 2
