@@ -1,0 +1,183 @@
+name: AI39 landcover-aware ground persistence
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  optical:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install --disable-pip-version-check requests numpy rasterio pystac-client planetary-computer
+      - name: Broad landcover-aware persistent ground-change triage
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          python - <<'PY'
+          import json, warnings
+          from collections import defaultdict
+          from datetime import datetime, timezone
+          import numpy as np, requests, rasterio
+          from rasterio.warp import reproject
+          from rasterio.enums import Resampling
+          from rasterio.transform import from_bounds
+          from pystac_client import Client
+          import planetary_computer
+
+          warnings.filterwarnings('ignore')
+          BBOX=[37.65,48.45,38.25,48.90]
+          W,H=960,720
+          TR=from_bounds(*BBOX,W,H)
+          START='2026-07-24'; END='2026-08-23'
+          STAC='https://earth-search.aws.element84.com/v1/search'
+
+          def rp(href, dtype='float32', resampling=Resampling.bilinear, nodata=0):
+              out=np.full((H,W), nodata, dtype=dtype)
+              with rasterio.Env(AWS_NO_SIGN_REQUEST='YES',GDAL_DISABLE_READDIR_ON_OPEN='EMPTY_DIR'):
+                  with rasterio.open(href) as ds:
+                      reproject(source=rasterio.band(ds,1),destination=out,src_transform=ds.transform,src_crs=ds.crs,
+                                src_nodata=ds.nodata,dst_transform=TR,dst_crs='EPSG:4326',dst_nodata=nodata,resampling=resampling)
+              return out
+
+          # Historic land-cover prior only. 2023 is not treated as 2026 truth.
+          cat=Client.open('https://planetarycomputer.microsoft.com/api/stac/v1',modifier=planetary_computer.sign_inplace)
+          lc_items=list(cat.search(collections=['io-lulc-9-class'],bbox=BBOX,datetime='2023-01-01/2023-12-31').items())
+          lc=np.zeros((H,W),np.uint8); lc_ids=[]
+          for it in lc_items:
+              a=it.assets.get('data') or it.assets.get('map') or next((x for x in it.assets.values() if x.href.lower().endswith(('.tif','.tiff'))),None)
+              if not a: continue
+              try:
+                  tmp=rp(a.href,'uint8',Resampling.nearest,0); m=tmp>0; lc[m]=tmp[m]; lc_ids.append(it.id)
+              except Exception: pass
+          if (lc>0).mean()<0.5:
+              raise SystemExit('Insufficient landcover prior coverage')
+
+          # Earth Search Sentinel-2 inventory, grouped by UTC date.
+          r=requests.post(STAC,json={'collections':['sentinel-2-c1-l2a'],'bbox':BBOX,'datetime':START+'T00:00:00Z/'+END+'T23:59:59Z','limit':500},timeout=90)
+          r.raise_for_status(); feats=r.json().get('features',[])
+          bydate=defaultdict(list)
+          for it in feats:
+              d=(it.get('properties',{}).get('datetime') or '')[:10]
+              if d: bydate[d].append(it)
+
+          def mosaic(day, items):
+              red=np.zeros((H,W),np.float32); blue=np.zeros_like(red); nir=np.zeros_like(red); s16=np.zeros_like(red); s22=np.zeros_like(red); scl=np.zeros((H,W),np.uint8)
+              ids=[]
+              for it in items:
+                  a=it.get('assets',{}); keys=['red','blue','nir08','swir16','swir22','scl']
+                  if not all((a.get(k) or {}).get('href') for k in keys): continue
+                  try:
+                      rr=rp(a['red']['href']); bb=rp(a['blue']['href']); nn=rp(a['nir08']['href']); x16=rp(a['swir16']['href']); x22=rp(a['swir22']['href']); cc=rp(a['scl']['href'],'uint8',Resampling.nearest,0)
+                  except Exception: continue
+                  m=(rr>0)&(bb>0)&(nn>0)&(x16>0)&(x22>0)
+                  red[m]=rr[m]; blue[m]=bb[m]; nir[m]=nn[m]; s16[m]=x16[m]; s22[m]=x22[m]; scl[m]=cc[m]; ids.append(it.get('id'))
+              valid=(red>0)&(blue>0)&(nir>0)&(s16>0)&(s22>0)
+              clear=valid & np.isin(scl,[2,4,5,6,7])
+              def idx(num,den):
+                  out=np.full((H,W),np.nan,np.float32); out[clear]=num[clear]/(den[clear]+1e-6); return out
+              ndvi=idx(nir-red,nir+red)
+              nbr=idx(nir-s22,nir+s22)
+              ndbi=idx(s16-nir,s16+nir)
+              bsi=idx((s16+red)-(nir+blue),(s16+red)+(nir+blue))
+              return {'date':day,'ids':ids,'clear':clear,'ndvi':ndvi,'nbr':nbr,'ndbi':ndbi,'bsi':bsi}
+
+          scenes=[]
+          for d in sorted(bydate):
+              sc=mosaic(d,bydate[d])
+              if sc['ids'] and sc['clear'].mean()>=0.40: scenes.append(sc)
+          if len(scenes)<5:
+              out={'status':'INSUFFICIENT_OPTICAL_DATES','usable_dates':[s['date'] for s in scenes]}; json.dump(out,open('out/analysis.json','w'),indent=2); print(json.dumps(out)); raise SystemExit(0)
+
+          # Use 3 early + 3 late dates. Require pixel support in >=2 of 3 on each side.
+          early=scenes[:3]; late=scenes[-3:]
+          def composite(key, arrs):
+              stack=np.stack([s[key] for s in arrs]); cnt=np.isfinite(stack).sum(0); med=np.nanmedian(stack,axis=0); med[cnt<2]=np.nan; return med,cnt
+          e={}; l={}
+          for k in ['ndvi','nbr','ndbi','bsi']:
+              e[k],_=composite(k,early); l[k],_=composite(k,late)
+          valid=np.isfinite(e['ndvi'])&np.isfinite(e['nbr'])&np.isfinite(e['bsi'])&np.isfinite(l['ndvi'])&np.isfinite(l['nbr'])&np.isfinite(l['bsi'])
+          dndvi=l['ndvi']-e['ndvi']; dnbr=l['nbr']-e['nbr']; dbsi=l['bsi']-e['bsi']; dndbi=l['ndbi']-e['ndbi']
+
+          crop=(lc==5); built=(lc==7); bare=(lc==8); rangeland=(lc==11)
+          nonbuilt_ground=crop|bare|rangeland
+          noncrop_ground=bare|rangeland
+          persistent_base=valid & nonbuilt_ground & (dndvi<=-0.08) & (dnbr<=-0.08) & (dbsi>=0.08)
+          persistent_noncrop=persistent_base & noncrop_ground
+
+          # Persistence confirmation: candidate state remains visible on >=2 of the final 3 dates relative to early composite.
+          persist_count=np.zeros((H,W),np.uint8)
+          for s in late:
+              m=s['clear'] & np.isfinite(e['ndvi']) & np.isfinite(e['bsi'])
+              cond=m & ((s['ndvi']-e['ndvi'])<=-0.06) & ((s['bsi']-e['bsi'])>=0.06)
+              persist_count += cond.astype(np.uint8)
+          persistent_base &= (persist_count>=2)
+          persistent_noncrop &= (persist_count>=2)
+
+          # Adjacent-pair recurrence for non-crop ground. This is deliberately stricter than the composite flag.
+          pair_stats={}
+          rec_count={f"{'ABCD'[c]}{r+1}":0 for r in range(4) for c in range(4)}
+          for a,b in zip(scenes[:-1],scenes[1:]):
+              ov=a['clear']&b['clear']&noncrop_ground
+              di=b['ndvi']-a['ndvi']; db=b['bsi']-a['bsi']; dn=b['nbr']-a['nbr']
+              ch=ov & (di<=-0.08)&(db>=0.08)&(dn<=-0.08)
+              key=a['date']+'->'+b['date']; pair_stats[key]={}
+              for rr in range(4):
+                  for cc in range(4):
+                      sec=f"{'ABCD'[cc]}{rr+1}"; ys=slice(rr*H//4,(rr+1)*H//4); xs=slice(cc*W//4,(cc+1)*W//4)
+                      den=ov[ys,xs].sum(); pct=float(ch[ys,xs].sum()/den*100) if den>100 else 0.0
+                      pair_stats[key][sec]=round(pct,3)
+                      if pct>=0.50: rec_count[sec]+=1
+
+          cells=[]
+          for rr in range(4):
+              for cc in range(4):
+                  sec=f"{'ABCD'[cc]}{rr+1}"; ys=slice(rr*H//4,(rr+1)*H//4); xs=slice(cc*W//4,(cc+1)*W//4)
+                  lcs=lc[ys,xs]; val=(lcs>0)&(lcs!=10)
+                  ng=(nonbuilt_ground[ys,xs]&valid[ys,xs]); nc=(noncrop_ground[ys,xs]&valid[ys,xs]); cp=(crop[ys,xs]&valid[ys,xs])
+                  pb=persistent_base[ys,xs]; pn=persistent_noncrop[ys,xs]
+                  crop_pct=float((lcs[val]==5).mean()*100) if val.sum()>100 else 0
+                  built_pct=float((lcs[val]==7).mean()*100) if val.sum()>100 else 0
+                  p_ground=float(pb.sum()/ng.sum()*100) if ng.sum()>100 else 0
+                  p_noncrop=float(pn.sum()/nc.sum()*100) if nc.sum()>100 else 0
+                  p_crop=float((pb&crop[ys,xs]).sum()/cp.sum()*100) if cp.sum()>100 else 0
+                  candidate_pixels=int(pb.sum()); crop_share=float(((pb&crop[ys,xs]).sum()/candidate_pixels*100)) if candidate_pixels else 0
+                  score=min(10, 2.2*p_noncrop + 0.45*rec_count[sec] + 0.15*p_ground)
+                  if crop_share>=80 and p_noncrop<0.4: score*=0.55
+                  status='LOW'
+                  if p_noncrop>=0.5 and rec_count[sec]>=1: status='CANDIDATE'
+                  if p_noncrop>=1.0 and rec_count[sec]>=2: status='STRONG_CANDIDATE'
+                  if crop_share>=80 and p_noncrop<0.4: status='AGRICULTURE_FAVORED'
+                  cells.append({'sector':sec,'historic_crops_percent':round(crop_pct,1),'historic_built_percent':round(built_pct,1),
+                      'persistent_ground_change_percent':round(p_ground,3),'persistent_crop_change_percent':round(p_crop,3),
+                      'persistent_noncrop_ground_change_percent':round(p_noncrop,3),'candidate_crop_share_percent':round(crop_share,1),
+                      'adjacent_pairs_noncrop_ge_0_5pct':rec_count[sec],'priority_score_0_10':round(score,2),'status':status})
+
+          cells.sort(key=lambda x:x['priority_score_0_10'],reverse=True)
+          out={'status':'MEASURED','generated_utc':datetime.now(timezone.utc).isoformat(),
+               'scope':'AI-39 broad 4x4 sector triage only; no coordinates, routes, presence claims or target-level output',
+               'window':[START,END],'usable_dates':[s['date'] for s in scenes],
+               'early_composite_dates':[s['date'] for s in early],'late_composite_dates':[s['date'] for s in late],
+               's2_product_ids':{s['date']:s['ids'] for s in scenes},'landcover_items':lc_ids,
+               'method':{'NBR':'(NIR-SWIR2)/(NIR+SWIR2)','NDBI':'(SWIR1-NIR)/(SWIR1+NIR)','BSI':'((SWIR1+RED)-(NIR+BLUE))/((SWIR1+RED)+(NIR+BLUE))',
+                         'persistent_ground_rule':'early-vs-late: dNDVI<=-0.08, dNBR<=-0.08, dBSI>=+0.08; state confirmed on >=2/3 late dates',
+                         'noncrop_priority':'2023 rangeland/bare-ground prior only; crops are separately reported and heavily down-weighted'},
+               'sector_summary':cells,'pairwise_noncrop_change_percent':pair_stats,
+               'interpretation_rules':['2023 land cover is a prior, not current truth.','Crop-dominant change is treated as agriculture/seasonality-favored unless independent evidence contradicts it.',
+                 'Persistent non-crop ground change is a candidate for deeper review, not proof of human activity.','Absence of optical change is not proof of absence under concealment.']}
+          json.dump(out,open('out/analysis.json','w'),indent=2)
+          print(json.dumps({'usable_dates':out['usable_dates'],'top_sectors':cells[:8]},indent=2))
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ai39-landcover-ground-persistence
+          path: out/analysis.json
+          if-no-files-found: error
+          retention-days: 2
