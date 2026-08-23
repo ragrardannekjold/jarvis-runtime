@@ -1,0 +1,181 @@
+name: AI39 SAR repeated broad-sector change
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  sar:
+    runs-on: ubuntu-latest
+    timeout-minutes: 22
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install --disable-pip-version-check requests numpy rasterio pystac-client planetary-computer
+      - name: Multi-orbit RTC repeat/localization test with weather confound
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          python - <<'PY'
+          import json, math, warnings
+          from collections import defaultdict
+          from datetime import datetime, timedelta, timezone
+          import numpy as np, requests, rasterio
+          from rasterio.vrt import WarpedVRT
+          from rasterio.enums import Resampling
+          from rasterio.transform import from_bounds
+          from pystac_client import Client
+          import planetary_computer
+
+          warnings.filterwarnings('ignore')
+          BBOX=[37.65,48.45,38.25,48.90]
+          START='2026-07-24'; END='2026-08-23'; W,H=800,600
+          TR=from_bounds(*BBOX,W,H)
+          LC={
+            'A1':(47.7,10.7),'B1':(56.0,3.4),'C1':(79.6,6.4),'D1':(78.0,2.9),
+            'A2':(85.9,2.1),'B2':(81.8,2.0),'C2':(80.3,7.5),'D2':(73.5,1.9),
+            'A3':(77.4,2.5),'B3':(59.9,9.6),'C3':(57.1,23.9),'D3':(81.0,2.5),
+            'A4':(49.7,27.7),'B4':(81.7,1.9),'C4':(71.4,4.6),'D4':(80.8,2.9)}
+
+          # Broad meteorological confound only; no location is retained in the artifact.
+          precip={}; weather_source=None
+          try:
+              params={'latitude':48.675,'longitude':37.95,'start_date':START,'end_date':END,'daily':'precipitation_sum','timezone':'UTC'}
+              for url in ['https://archive-api.open-meteo.com/v1/archive','https://historical-forecast-api.open-meteo.com/v1/forecast']:
+                  try:
+                      rr=requests.get(url,params=params,timeout=45); rr.raise_for_status(); jj=rr.json();
+                      ts=jj.get('daily',{}).get('time',[]); ps=jj.get('daily',{}).get('precipitation_sum',[])
+                      if ts and len(ts)==len(ps):
+                          precip={d:float(v or 0) for d,v in zip(ts,ps)}; weather_source=url; break
+                  except Exception: pass
+          except Exception: pass
+
+          cat=Client.open('https://planetarycomputer.microsoft.com/api/stac/v1',modifier=planetary_computer.sign_inplace)
+          items=list(cat.search(collections=['sentinel-1-rtc'],bbox=BBOX,datetime=START+'/'+END,max_items=400).items())
+          groups=defaultdict(lambda:defaultdict(list))
+          for it in items:
+              p=it.properties; dt=it.datetime; date=dt.date().isoformat() if dt else (p.get('datetime') or '')[:10]
+              platform=str(p.get('platform') or '').lower(); rel=p.get('sat:relative_orbit'); state=p.get('sat:orbit_state')
+              if date and platform and rel is not None and 'vv' in it.assets and 'vh' in it.assets:
+                  groups[(platform,int(rel),state)][date].append(it)
+
+          candidates=[]
+          for geom,dates in groups.items():
+              ds=sorted(dates)
+              for i,a in enumerate(ds):
+                  for b in ds[i+1:]:
+                      sep=(datetime.fromisoformat(b)-datetime.fromisoformat(a)).days
+                      if 10<=sep<=14:
+                          candidates.append((b,a,geom,dates[a],dates[b]))
+          candidates.sort(reverse=True,key=lambda x:(x[0],x[1]))
+          # Keep latest distinct geometry/date pairs to bound runtime.
+          seen=set(); chosen=[]
+          for rec in candidates:
+              key=(rec[2],rec[1],rec[0])
+              if key in seen: continue
+              seen.add(key); chosen.append(rec)
+              if len(chosen)>=10: break
+
+          def mosaic(its,key):
+              dst=np.full((H,W),np.nan,np.float32); ids=[]
+              for it in its:
+                  try:
+                      ids.append(it.id)
+                      with rasterio.open(it.assets[key].href) as ds:
+                          with WarpedVRT(ds,crs='EPSG:4326',transform=TR,width=W,height=H,resampling=Resampling.bilinear,nodata=np.nan) as vrt:
+                              a=vrt.read(1).astype(np.float32)
+                      m=np.isfinite(a)&(a!=0)
+                      both=m&np.isfinite(dst); dst[both]=(dst[both]+a[both])/2
+                      only=m&~np.isfinite(dst); dst[only]=a[only]
+                  except Exception: pass
+              return dst,sorted(set(ids))
+
+          def to_db(x,valid):
+              med=float(np.nanmedian(x[valid]))
+              return x.copy() if med<0 else 10*np.log10(np.maximum(x,1e-12))
+
+          def rain48(day):
+              if not precip: return None
+              d=datetime.fromisoformat(day).date(); p=d-timedelta(days=1)
+              return round(float(precip.get(p.isoformat(),0)+precip.get(d.isoformat(),0)),2)
+
+          pair_results=[]
+          for b,a,geom,ia,ib in chosen:
+              va,ids_a=mosaic(ia,'vv'); ha,_=mosaic(ia,'vh'); vb,ids_b=mosaic(ib,'vv'); hb,_=mosaic(ib,'vh')
+              valid=np.isfinite(va)&np.isfinite(ha)&np.isfinite(vb)&np.isfinite(hb)&(va!=0)&(ha!=0)&(vb!=0)&(hb!=0)
+              if valid.mean()<0.35:
+                  pair_results.append({'pair':[a,b],'geometry':{'platform':geom[0],'relative_orbit':geom[1],'orbit_state':geom[2]},'status':'INSUFFICIENT_OVERLAP','valid_percent':round(float(valid.mean()*100),2)})
+                  continue
+              av=to_db(va,valid); ah=to_db(ha,valid); bv=to_db(vb,valid); bh=to_db(hb,valid)
+              dv=bv-av; dh=bh-ah; mag=np.sqrt((dv*dv+dh*dh)/2)
+              cells=[]
+              for rr in range(4):
+                  for cc in range(4):
+                      sec=f"{'ABCD'[cc]}{rr+1}"; ys=slice(rr*H//4,(rr+1)*H//4); xs=slice(cc*W//4,(cc+1)*W//4); m=valid[ys,xs]
+                      rec={'sector':sec,'valid_percent':round(float(m.mean()*100),2)}
+                      if m.sum()>200:
+                          z=mag[ys,xs][m]
+                          rec.update({'median_change_mag_db':round(float(np.median(z)),3),'p90_change_mag_db':round(float(np.percentile(z,90)),3),
+                                      'pct_ge_2db':round(float((z>=2).mean()*100),3),'pct_ge_3db':round(float((z>=3).mean()*100),3)})
+                      cells.append(rec)
+              scored=[x for x in cells if 'pct_ge_3db' in x]
+              base=np.median([x['pct_ge_3db'] for x in scored]) if scored else 0
+              scored.sort(key=lambda x:(x['pct_ge_3db'],x['p90_change_mag_db']),reverse=True)
+              for rank,x in enumerate(scored,1):
+                  x['rank']=rank; x['localized_excess_ratio']=round((x['pct_ge_3db']+0.05)/(base+0.05),2); x['top4']=rank<=4
+              ra,rb=rain48(a),rain48(b)
+              conf='UNKNOWN'
+              if ra is not None and rb is not None:
+                  diff=abs(rb-ra)
+                  conf='HIGH' if max(ra,rb)>=10 or diff>=6 else ('MODERATE' if max(ra,rb)>=4 or diff>=3 else 'LOW')
+              pair_results.append({'pair':[a,b],'geometry':{'platform':geom[0],'relative_orbit':geom[1],'orbit_state':geom[2]},'status':'MEASURED',
+                   'valid_overlap_percent':round(float(valid.mean()*100),2),'ids_a':ids_a,'ids_b':ids_b,'rain48h_mm':[ra,rb],'moisture_confound':conf,'cells':cells})
+
+          measured=[p for p in pair_results if p.get('status')=='MEASURED']
+          sectors=[]
+          for rr in range(4):
+              for cc in range(4):
+                  sec=f"{'ABCD'[cc]}{rr+1}"; ev=[]; geoms=set(); top4=0
+                  for p in measured:
+                      c=next((x for x in p['cells'] if x['sector']==sec and 'pct_ge_3db' in x),None)
+                      if not c: continue
+                      ev.append({'pair':p['pair'],'geometry':p['geometry'],'pct_ge_3db':c['pct_ge_3db'],'p90_change_mag_db':c['p90_change_mag_db'],
+                                 'rank':c['rank'],'localized_excess_ratio':c['localized_excess_ratio'],'moisture_confound':p['moisture_confound']})
+                      if c['top4']:
+                          top4+=1; geoms.add((p['geometry']['platform'],p['geometry']['relative_orbit'],p['geometry']['orbit_state']))
+                  crop,built=LC[sec]
+                  ratios=[e['localized_excess_ratio'] for e in ev]; med_ratio=float(np.median(ratios)) if ratios else 0
+                  highrain=sum(1 for e in ev if e['moisture_confound']=='HIGH')
+                  score=min(10, 1.2*len(geoms)+0.7*top4+1.2*max(0,med_ratio-1))
+                  if crop>=70: score*=0.72
+                  if ev and highrain/len(ev)>=0.5: score*=0.72
+                  status='LOW'
+                  if top4>=2 and len(geoms)>=2: status='REPEAT_CANDIDATE'
+                  if top4>=3 and len(geoms)>=2 and med_ratio>=1.25: status='STRONG_REPEAT_CANDIDATE'
+                  if crop>=70 and top4<3: status='AGRICULTURE_CONFOUND_HIGH'
+                  sectors.append({'sector':sec,'historic_crops_percent':crop,'historic_built_percent':built,'measured_pairs':len(ev),
+                                  'top4_pair_count':top4,'independent_top4_geometries':len(geoms),'median_localized_excess_ratio':round(med_ratio,2),
+                                  'priority_score_0_10':round(score,2),'status':status,'evidence':ev})
+          sectors.sort(key=lambda x:x['priority_score_0_10'],reverse=True)
+          out={'status':'MEASURED' if measured else 'NO_USABLE_PAIRS','generated_utc':datetime.now(timezone.utc).isoformat(),
+               'scope':'AI-39 broad 4x4 sector SAR repeat/localization only; no coordinates, routes, presence claims or target-level output',
+               'window':[START,END],'inventory_items':len(items),'candidate_pairs_considered':len(chosen),'measured_pairs':len(measured),
+               'weather_source':weather_source,'landcover_prior':'canonical AI39 2023 Impact Observatory sector percentages',
+               'pair_results':pair_results,'sector_summary':sectors,
+               'interpretation_rules':['RTC backscatter is sensitive to structure, roughness, vegetation and moisture; it is not causal attribution.',
+                 'Repeated top-sector behavior across independent geometries is stronger than a one-pair anomaly.','Crop-heavy sectors are down-weighted unless repetition/localization is unusually strong.',
+                 'High 48-hour precipitation contrast weakens a physical-change interpretation.','Broad-sector output is deliberately non-targetable.']}
+          json.dump(out,open('out/analysis.json','w'),indent=2)
+          print(json.dumps({'measured_pairs':len(measured),'top_sectors':sectors[:8],'pair_statuses':[{'pair':p['pair'],'geometry':p['geometry'],'status':p['status'],'moisture_confound':p.get('moisture_confound')} for p in pair_results]},indent=2))
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ai39-sar-repeat-localization
+          path: out/analysis.json
+          if-no-files-found: error
+          retention-days: 2
