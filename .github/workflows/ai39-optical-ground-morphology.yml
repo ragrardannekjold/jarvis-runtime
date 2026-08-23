@@ -23,7 +23,6 @@ jobs:
           mkdir -p out
           python - <<'PY'
           import json, math, warnings
-          from collections import defaultdict
           from datetime import datetime, timezone
           import numpy as np, requests, rasterio
           from scipy import ndimage
@@ -44,6 +43,7 @@ jobs:
           px_x=((BBOX[2]-BBOX[0])*111320*math.cos(math.radians(lat)))/W
           px_y=((BBOX[3]-BBOX[1])*110540)/H
           px_m=(px_x*px_y)**0.5
+          minor_floor_m=0.5*min(px_x,px_y)
 
           def rp(href,dtype='float32',resampling=Resampling.bilinear,nodata=0):
               out=np.full((H,W),nodata,dtype=dtype)
@@ -53,7 +53,6 @@ jobs:
                                 src_nodata=ds.nodata,dst_transform=TR,dst_crs='EPSG:4326',dst_nodata=nodata,resampling=resampling)
               return out
 
-          # Historic land-cover prior.
           pc=Client.open('https://planetarycomputer.microsoft.com/api/stac/v1',modifier=planetary_computer.sign_inplace)
           lc_items=list(pc.search(collections=['io-lulc-9-class'],bbox=BBOX,datetime='2023-01-01/2023-12-31').items())
           lc=np.zeros((H,W),np.uint8); lc_ids=[]
@@ -109,19 +108,22 @@ jobs:
                   if area<3:continue
                   pts=np.column_stack((xx*px_x,yy*px_y)).astype(float)
                   ctr=pts-pts.mean(0)
-                  if area>=3:
-                      cov=np.cov(ctr,rowvar=False)
-                      vals=np.sort(np.maximum(np.linalg.eigvalsh(cov),1e-6))[::-1]
-                      aspect=float((vals[0]/vals[1])**0.5)
-                      major=float(4*np.sqrt(vals[0]))
-                  else: aspect=1;major=0
+                  cov=np.cov(ctr,rowvar=False)
+                  vals=np.sort(np.maximum(np.linalg.eigvalsh(cov),0))[::-1]
+                  major_sigma=float(np.sqrt(vals[0])) if len(vals) else 0.0
+                  minor_sigma=float(np.sqrt(vals[1])) if len(vals)>1 else 0.0
+                  effective_minor=max(minor_sigma,minor_floor_m)
+                  aspect=min(20.0,major_sigma/max(effective_minor,1e-6))
+                  major=float(4*major_sigma)
                   er=ndimage.binary_erosion(lab==i,structure=np.ones((3,3),int),border_value=0)
                   perimeter=int(((lab==i)&~er).sum())
                   compact=float(4*math.pi*area/max(perimeter*perimeter,1))
                   comps.append({'pixels':area,'aspect':aspect,'major_m':major,'compactness':compact})
               if not comps:
                   return {'components_ge3px':0,'components_ge6px':0,'linear_components':0,'linear_candidate_pixel_share_percent':0,'largest_component_pixels':0,'max_aspect_ratio':0,'median_aspect_ratio':0,'max_major_axis_class':'NONE'}
-              pix=sum(c['pixels'] for c in comps); lin=[c for c in comps if c['pixels']>=4 and c['aspect']>=3.5]
+              pix=sum(c['pixels'] for c in comps)
+              # Require enough support for a broad shape claim: >=6 pixels, regularized aspect >=3, approx major axis >=150 m.
+              lin=[c for c in comps if c['pixels']>=6 and c['aspect']>=3.0 and c['major_m']>=150]
               maxmajor=max(c['major_m'] for c in comps)
               cls='SHORT' if maxmajor<150 else ('MEDIUM' if maxmajor<400 else 'LONG')
               return {
@@ -142,25 +144,25 @@ jobs:
                   nc=noncrop[ys,xs]&valid[ys,xs];m=mask[ys,xs]
                   pct=float(m.sum()/nc.sum()*100) if nc.sum()>100 else 0
                   mm=morph_metrics(m)
-                  rec={'sector':sec,'persistent_noncrop_percent':round(pct,3),**mm}
-                  cells.append(rec)
+                  cells.append({'sector':sec,'persistent_noncrop_percent':round(pct,3),**mm})
 
-          # AOI-relative morphology ranking: no arbitrary absolute confidence score.
-          vals=np.array([c['linear_candidate_pixel_share_percent']*math.log1p(c['linear_components'])+0.25*c['max_aspect_ratio'] for c in cells],float)
-          order=np.argsort(vals)
-          ranks=np.empty_like(order);ranks[order]=np.arange(len(vals))
-          for i,c in enumerate(cells): c['morphology_percentile']=round(float(ranks[i]/max(len(vals)-1,1)*100),1)
+          # Transparent AOI-relative ranking, no arbitrary confidence formula.
+          ranked=sorted(range(len(cells)),key=lambda i:(cells[i]['linear_candidate_pixel_share_percent'],cells[i]['linear_components'],cells[i]['persistent_noncrop_percent'],cells[i]['largest_component_pixels']))
+          rankpos={idx:pos for pos,idx in enumerate(ranked)}
+          for i,c in enumerate(cells): c['morphology_percentile']=round(rankpos[i]/max(len(cells)-1,1)*100,1)
           cells.sort(key=lambda c:(c['morphology_percentile'],c['persistent_noncrop_percent']),reverse=True)
+
           out={
             'status':'MEASURED','generated_utc':datetime.now(timezone.utc).isoformat(),
             'scope':'AI-39 broad 4x4 persistent non-crop ground-change morphology only; no component coordinates, trench lines, routes or target-level output',
-            'pixel_scale_m_approx':round(px_m,1),'usable_dates':[s['date'] for s in usable],
-            'early_dates':[s['date'] for s in early],'late_dates':[s['date'] for s in late],
+            'pixel_scale_m_approx':round(px_m,1),'minor_axis_regularization_floor_m':round(minor_floor_m,1),
+            'usable_dates':[s['date'] for s in usable],'early_dates':[s['date'] for s in early],'late_dates':[s['date'] for s in late],
             'landcover_ids':lc_ids,'sector_summary':cells,
             'method':{
               'candidate':'historic bare/rangeland prior + early-to-late dNDVI<=-0.08, dNBR<=-0.08, dBSI>=0.08 + persistence on >=2/3 late dates',
-              'component_minimum':'3 connected pixels; linear candidate >=4 pixels and PCA aspect ratio >=3.5',
-              'ranking':'AOI-relative morphology percentile only; no absolute human/fortification confidence derived'
+              'component_minimum':'3 connected pixels; broad linear candidate >=6 pixels, regularized PCA aspect >=3.0, approximate major axis >=150 m',
+              'regularization':'PCA minor sigma cannot be smaller than half the physical pixel scale; aspect capped at 20 to prevent tiny collinear components from numerical blow-up',
+              'ranking':'lexicographic AOI-relative percentile by linear pixel share, linear component count, persistent noncrop percent, largest component; no absolute human/fortification confidence derived'
             },
             'interpretation_rules':[
               'At ~20-40m effective pixels, individual narrow trenches cannot be resolved reliably.',
@@ -169,7 +171,7 @@ jobs:
               'No component coordinates are emitted.'
             ]}
           json.dump(out,open('out/morphology.json','w'),indent=2)
-          print(json.dumps({'pixel_scale_m_approx':out['pixel_scale_m_approx'],'top':cells[:8]},indent=2))
+          print(json.dumps({'pixel_scale_m_approx':out['pixel_scale_m_approx'],'minor_axis_floor_m':out['minor_axis_regularization_floor_m'],'top':cells[:8]},indent=2))
           PY
       - uses: actions/upload-artifact@v4
         with:
