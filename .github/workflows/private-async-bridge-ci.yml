@@ -1,0 +1,26 @@
+name: Private Async Bridge CI
+
+on:
+  pull_request:
+    paths:
+      - 'runtime/private-async/**'
+      - '.github/workflows/private-async-bridge.yml'
+      - '.github/workflows/private-async-bridge-ci.yml'
+      - 'PUBLIC_EXPORT_MANIFEST.json'
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Contract tests
+        run: node --test runtime/private-async/contract.test.mjs
+      - name: Syntax check worker
+        run: node --check runtime/private-async/worker.mjs
