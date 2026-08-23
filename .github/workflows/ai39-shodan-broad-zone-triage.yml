@@ -1,0 +1,87 @@
+name: AI39 Shodan broad-zone aggregate triage
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  triage:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    env:
+      SHODAN_API_KEY: ${{ secrets.SHODAN_API_KEY }}
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install --disable-pip-version-check requests
+      - name: Broad-zone aggregate count/facet triage
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          python - <<'PY'
+          import json, os, datetime, requests
+          key=os.environ.get('SHODAN_API_KEY','').strip(); S=requests.Session(); S.headers.update({'User-Agent':'AI39-broad-zone-aggregate/1.0'})
+          zones={
+            'BAKHMUT':['Bakhmut','Artemivsk','Artyomovsk'],
+            'SOLEDAR':['Soledar'],
+            'CHASIV_YAR':['Chasiv Yar','Chasov Yar'],
+            'KRAMATORSK':['Kramatorsk'],
+            'SLOVIANSK':['Sloviansk','Slavyansk']
+          }
+          cats={
+            'network_management_surface':'port:161',
+            'realtime_relay_surface':'port:3478',
+            'ics_tagged_surface':'tag:ics',
+            'surveillance_device_surface':'device:webcam',
+            'routing_device_surface':'device:router',
+            'security_edge_surface':'device:firewall'
+          }
+          out={'generated_utc':datetime.datetime.now(datetime.timezone.utc).isoformat(),'scope':'Broad city/hromada-name aggregate Shodan lead generation only. No hosts, IPs, banners, vulnerabilities, screenshots, device models, exact locations or coordinates retained. Geolocation is provider metadata and may be stale/inaccurate.','zones':{},'credits_before':None,'credits_after':None,'credits_delta':None}
+          def info():
+              r=S.get('https://api.shodan.io/api-info',params={'key':key},timeout=30); r.raise_for_status(); return r.json().get('query_credits')
+          def count(q,facets=None):
+              p={'key':key,'query':q}
+              if facets: p['facets']=facets
+              r=S.get('https://api.shodan.io/shodan/host/count',params=p,timeout=45); r.raise_for_status(); return r.json()
+          if not key:
+              out['status']='NO_SECRET'
+          else:
+              try: out['credits_before']=info()
+              except Exception: pass
+              for zone,aliases in zones.items():
+                  rec={'aliases':[],'aggregate_total':0,'category_counts':{k:0 for k in cats},'top_asn_counts':{},'top_org_counts':{}}
+                  for city in aliases:
+                      base=f'city:"{city}"'
+                      a={'city_alias':city,'status':'UNKNOWN','total':0}
+                      try:
+                          j=count(base,'asn:10,org:10'); a['total']=int(j.get('total') or 0); a['status']='OK'; rec['aggregate_total']+=a['total']
+                          for x in (j.get('facets') or {}).get('asn',[]):
+                              v=str(x.get('value')); rec['top_asn_counts'][v]=rec['top_asn_counts'].get(v,0)+int(x.get('count') or 0)
+                          for x in (j.get('facets') or {}).get('org',[]):
+                              v=str(x.get('value')); rec['top_org_counts'][v]=rec['top_org_counts'].get(v,0)+int(x.get('count') or 0)
+                          for name,filt in cats.items():
+                              try: rec['category_counts'][name]+=int(count(base+' '+filt).get('total') or 0)
+                              except Exception: pass
+                      except Exception as e: a['status']='ERROR'; a['error_class']=type(e).__name__
+                      rec['aliases'].append(a)
+                  rec['top_asn_counts']=dict(sorted(rec['top_asn_counts'].items(),key=lambda kv:kv[1],reverse=True)[:10])
+                  rec['top_org_counts']=dict(sorted(rec['top_org_counts'].items(),key=lambda kv:kv[1],reverse=True)[:10])
+                  out['zones'][zone]=rec
+              try: out['credits_after']=info()
+              except Exception: pass
+              if isinstance(out['credits_before'],int) and isinstance(out['credits_after'],int): out['credits_delta']=out['credits_before']-out['credits_after']
+              out['status']='VERIFIED_AGGREGATE'
+          with open('out/broad_zone_triage.json','w') as f: json.dump(out,f,indent=2)
+          print(json.dumps(out,indent=2))
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ai39-shodan-broad-zone-triage
+          path: out/broad_zone_triage.json
+          if-no-files-found: error
+          retention-days: 2
