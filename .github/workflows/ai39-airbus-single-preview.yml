@@ -1,0 +1,86 @@
+name: AI39 Airbus single-scene quicklook
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 7
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install --disable-pip-version-check requests pillow
+      - name: Minimal footprint and public quicklook readback
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          python - <<'PY'
+          import json, requests, hashlib, io
+          from PIL import Image, ImageStat
+          TARGET='DS_PHR1B_202607310827289_FR1_PX_E037N49_1004_04826'
+          AOI=[37.65,48.45,38.25,48.90]
+          H={'User-Agent':'AI39-airbus-single-preview/1.0'}
+          OUT={'scene_hash':hashlib.sha256(TARGET.encode()).hexdigest()[:16],'scope':'Known July-31 Airbus archive scene: public quicklook and minimal footprint readback only; no new tasking, purchase, exact coordinates or target-level output.','footprint':{'status':'UNKNOWN'},'quicklook':{'status':'UNKNOWN'}}
+
+          # Minimal geometry query: one field, one record, reduced precision.
+          url='https://portal.intelligence-airbusds.com/arcgis/rest/services/OneAtlas/OADConstellationArchive/MapServer/9/query'
+          try:
+              r=requests.get(url,params={'f':'json','where':f"parentidentifier='{TARGET}'",'outFields':'parentidentifier','returnGeometry':'true','outSR':'4326','geometryPrecision':4,'resultRecordCount':1},timeout=45,headers=H)
+              OUT['footprint']['http_status']=r.status_code
+              if r.status_code==200:
+                  q=r.json(); fs=q.get('features',[]) if isinstance(q,dict) else []
+                  if fs:
+                      g=fs[0].get('geometry') or {}; rings=g.get('rings') or []
+                      pts=[p for ring in rings for p in ring if isinstance(p,list) and len(p)>=2]
+                      if pts:
+                          xs=[float(p[0]) for p in pts]; ys=[float(p[1]) for p in pts]; bb=[min(xs),min(ys),max(xs),max(ys)]
+                          ix=max(0,min(bb[2],AOI[2])-max(bb[0],AOI[0])); iy=max(0,min(bb[3],AOI[3])-max(bb[1],AOI[1]));
+                          cov=(ix*iy)/max((AOI[2]-AOI[0])*(AOI[3]-AOI[1]),1e-9)*100
+                          OUT['footprint'].update({'status':'MEASURED','broad_aoi_bbox_overlap_proxy_percent':round(cov,2),'ring_count':len(rings)})
+                      else: OUT['footprint']['status']='NO_GEOMETRY'
+                  else: OUT['footprint']['status']='NO_FEATURE'
+              else: OUT['footprint']['status']='HTTP_ERROR'
+          except Exception as e:
+              OUT['footprint'].update({'status':'ERROR','error_class':type(e).__name__})
+
+          candidates=[
+            'https://access.foundation.api.oneatlas.airbus.com/quicklook/'+TARGET,
+            'https://search.foundation.api.oneatlas.airbus.com/api/v2/opensearch?sourceIdentifier='+TARGET
+          ]
+          tests=[]
+          for u in candidates:
+              try:
+                  r=requests.get(u,timeout=40,headers=H,allow_redirects=True)
+                  ct=(r.headers.get('content-type') or '').lower(); rec={'url_class':'quicklook' if '/quicklook/' in u else 'opensearch','http_status':r.status_code,'content_type':ct,'bytes':len(r.content)}
+                  tests.append(rec)
+                  if r.status_code==200 and ct.startswith('image/') and len(r.content)>1000:
+                      im=Image.open(io.BytesIO(r.content)).convert('RGB')
+                      im.thumbnail((1600,1600))
+                      im.save('out/airbus_quicklook.jpg',quality=90)
+                      gray=im.convert('L'); st=ImageStat.Stat(gray)
+                      OUT['quicklook'].update({'status':'PUBLIC_IMAGE','width':im.width,'height':im.height,'mean_luma':round(st.mean[0],2),'std_luma':round(st.stddev[0],2),'source':'provider_native_quicklook'})
+                      break
+                  elif r.status_code==200 and ('json' in ct or 'text' in ct):
+                      try:
+                          j=r.json(); OUT['quicklook'].setdefault('opensearch_record_count',len(j.get('features',[])) if isinstance(j,dict) and isinstance(j.get('features'),list) else None)
+                      except Exception: pass
+              except Exception as e: tests.append({'url_class':'unknown','status':'ERROR','error_class':type(e).__name__})
+          OUT['quicklook']['tests']=tests
+          if OUT['quicklook']['status']=='UNKNOWN': OUT['quicklook']['status']='NOT_PUBLICLY_READABLE'
+          OUT['interpretation_limit']='A provider quicklook is browse imagery, lower fidelity than source data. It may support orientation/lead generation but is not equivalent to a purchased VHR product and cannot by itself establish change, people, military use or dangerous intent.'
+          with open('out/metadata.json','w') as f:json.dump(OUT,f,indent=2)
+          print(json.dumps(OUT,indent=2))
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ai39-airbus-single-preview
+          path: out/
+          if-no-files-found: error
+          retention-days: 2
