@@ -1,0 +1,55 @@
+name: AI39 allied sanctions entity pass
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'runtime/ai39_allied_sanctions_entity_pass.py'
+      - 'runtime/test_ai39_allied_sanctions_entity_pass.py'
+      - '.github/workflows/ai39-allied-sanctions-entity-pass.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  entity:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install --disable-pip-version-check requests openpyxl
+      - name: Compile and run focused tests
+        run: |
+          set -euo pipefail
+          python -m py_compile runtime/ai39_allied_sanctions_entity_pass.py runtime/test_ai39_allied_sanctions_entity_pass.py
+          PYTHONPATH=runtime python -m unittest runtime/test_ai39_allied_sanctions_entity_pass.py -v
+      - name: Query official allied lists and RIPE metadata
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          python runtime/ai39_allied_sanctions_entity_pass.py --out out/result.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ai39-allied-sanctions-entity-pass
+          path: out/result.json
+          if-no-files-found: error
+          retention-days: 2
+      - name: Truth gate
+        run: |
+          python - <<'PY'
+          import json
+          data=json.load(open('out/result.json'))
+          assert data['schema_version']=='AI39_ALLIED_SANCTIONS_ENTITY_V0_1', data
+          assert data['candidate_state'] in {
+              'SUPPORTED_DIRECT_LIST_MATCH',
+              'UNRESOLVED_CANDIDATE_MATCHES',
+              'NO_DIRECT_MATCH_ACROSS_AVAILABLE_LISTS',
+          }, data
+          assert len(data['source_state'])==7, data
+          assert data['result_sha256'], data
+          print('AI39_ALLIED_SANCTIONS_ENTITY_PASS')
+          PY
