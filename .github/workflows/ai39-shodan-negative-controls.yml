@@ -1,85 +1,13 @@
 name: AI39 Shodan negative controls
 
 on:
-  pull_request:
-    branches: [main]
+  workflow_dispatch:
 
 permissions:
   contents: read
 
 jobs:
-  controls:
+  completed-probe:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
-    env:
-      SHODAN_API_KEY: ${{ secrets.SHODAN_API_KEY }}
     steps:
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-      - run: python -m pip install --disable-pip-version-check requests
-      - name: Compare unrelated ASN controls over same 2026 breakpoint
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p out
-          python - <<'PY'
-          import json, os
-          from datetime import datetime, timezone
-          import requests
-
-          key=os.environ.get('SHODAN_API_KEY','').strip()
-          controls=[
-            {'asn':'AS6849','label':'UA_control_1'},
-            {'asn':'AS13188','label':'UA_control_2'},
-            {'asn':'AS21497','label':'UA_control_3'},
-            {'asn':'AS13335','label':'global_control_cloudflare'},
-            {'asn':'AS24940','label':'global_control_hetzner'},
-          ]
-          out={'generated_utc':datetime.now(timezone.utc).isoformat(),'status':'UNKNOWN','controls':[],'credits_before':None,'credits_after':None,'credits_delta':None,
-               'purpose':'Test whether the Jan-Feb-Mar 2026 exposure collapse seen across the occupied-region telecom cluster is likely a Shodan-wide/indexing artifact.',
-               'safety':'Aggregate counts/trends only; no host identifiers or banners.'}
-          def info():
-            r=requests.get('https://api.shodan.io/api-info',params={'key':key},timeout=30); r.raise_for_status(); return r.json()
-          if not key:
-            out['status']='NO_SECRET'
-          else:
-            before=info().get('query_credits'); out['credits_before']=before if isinstance(before,int) else None
-            for c in controls:
-              rec={'asn':c['asn'],'label':c['label'],'current_total':None,'trend_http_status':None,'monthly':[],'jan_to_mar_pct':None,'jan_to_aug_pct':None}
-              q='asn:'+c['asn']
-              try:
-                r=requests.get('https://api.shodan.io/shodan/host/count',params={'key':key,'query':q,'facets':'org:3,country:3'},timeout=60); r.raise_for_status(); j=r.json()
-                rec['current_total']=j.get('total')
-                rec['org_facets']=[{'value':x.get('value'),'count':x.get('count')} for x in (j.get('facets') or {}).get('org',[])[:3]]
-                rec['country_facets']=[{'value':x.get('value'),'count':x.get('count')} for x in (j.get('facets') or {}).get('country',[])[:3]]
-              except Exception as e:
-                rec['count_error']=type(e).__name__
-              try:
-                tr=requests.get('https://trends.shodan.io/api/v1/search',params={'key':key,'query':q},timeout=90)
-                rec['trend_http_status']=tr.status_code
-                if tr.status_code==200:
-                  tj=tr.json(); months=[]
-                  for m in tj.get('matches',[]):
-                    if isinstance(m.get('month'),str) and isinstance(m.get('count'),(int,float)):
-                      months.append({'month':m['month'],'count':int(m['count'])})
-                  months.sort(key=lambda x:x['month']); rec['monthly']=months[-24:]
-                  d={x['month']:x['count'] for x in months}
-                  jan=d.get('2026-01'); mar=d.get('2026-03'); aug=d.get('2026-08')
-                  if isinstance(jan,int) and jan>0 and isinstance(mar,int): rec['jan_to_mar_pct']=round((mar-jan)/jan*100,2)
-                  if isinstance(jan,int) and jan>0 and isinstance(aug,int): rec['jan_to_aug_pct']=round((aug-jan)/jan*100,2)
-              except Exception as e:
-                rec['trend_error']=type(e).__name__
-              out['controls'].append(rec)
-            after=info().get('query_credits'); out['credits_after']=after if isinstance(after,int) else None
-            if isinstance(out['credits_before'],int) and isinstance(out['credits_after'],int): out['credits_delta']=out['credits_before']-out['credits_after']
-            out['status']='VERIFIED_CONTROLS'
-          with open('out/controls.json','w') as f: json.dump(out,f,indent=2)
-          print(json.dumps({'status':out['status'],'controls':[{'asn':x['asn'],'org':x.get('org_facets'),'current_total':x.get('current_total'),'jan_to_mar_pct':x.get('jan_to_mar_pct'),'jan_to_aug_pct':x.get('jan_to_aug_pct')} for x in out['controls']],'credits_delta':out.get('credits_delta')},indent=2))
-          PY
-      - uses: actions/upload-artifact@v4
-        with:
-          name: ai39-shodan-negative-controls
-          path: out/controls.json
-          if-no-files-found: error
-          retention-days: 2
+      - run: echo 'Completed as PR #43 run 32615517310; frozen to prevent duplicate queries.'
