@@ -1,0 +1,106 @@
+name: AI39 SAR noncrop morphology
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'runtime/ai39_sar_noncrop_morphology.py'
+      - 'runtime/test_ai39_sar_noncrop_morphology.py'
+      - '.github/workflows/ai39-sar-noncrop-morphology.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install --disable-pip-version-check numpy scipy
+      - name: Compile and run morphology tests
+        run: |
+          set -euo pipefail
+          python -m py_compile runtime/ai39_sar_noncrop_morphology.py runtime/test_ai39_sar_noncrop_morphology.py
+          PYTHONPATH=runtime python -m unittest runtime/test_ai39_sar_noncrop_morphology.py -v
+
+  year:
+    strategy:
+      fail-fast: false
+      matrix:
+        year: [2025, 2026]
+    runs-on: ubuntu-latest
+    timeout-minutes: 24
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: >-
+          python -m pip install --disable-pip-version-check
+          numpy scipy rasterio pystac-client planetary-computer
+      - name: Run bounded year morphology
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          python runtime/ai39_sar_noncrop_morphology.py year \
+            --year ${{ matrix.year }} --max-pairs 4 \
+            --out out/year-${{ matrix.year }}.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ai39-sar-noncrop-${{ matrix.year }}
+          path: out/year-${{ matrix.year }}.json
+          if-no-files-found: error
+          retention-days: 2
+
+  compare:
+    needs: [tests, year]
+    if: ${{ always() && needs.tests.result == 'success' && needs.year.result == 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/download-artifact@v4
+        with:
+          name: ai39-sar-noncrop-2025
+          path: in/2025
+      - uses: actions/download-artifact@v4
+        with:
+          name: ai39-sar-noncrop-2026
+          path: in/2026
+      - name: Compare 2026 to seasonal control
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          python runtime/ai39_sar_noncrop_morphology.py compare \
+            --current in/2026/year-2026.json \
+            --historical in/2025/year-2025.json \
+            --out out/comparison.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ai39-sar-noncrop-morphology
+          path: out/comparison.json
+          if-no-files-found: error
+          retention-days: 2
+      - name: Truth gate
+        run: |
+          python - <<'PY'
+          import json
+          data=json.load(open('out/comparison.json'))
+          assert data['status']=='MEASURED', data
+          assert len(data['comparisons'])==16, data
+          assert data['d4']['state'] in {
+              'UNRESOLVED_NONCROP_REPEAT_LEAD',
+              'WEAK_NONCROP_DIFFERENCE',
+              'NO_NONCROP_ESCALATION',
+              'INSUFFICIENT_DATA',
+          }, data
+          print('AI39_SAR_NONCROP_MORPHOLOGY_PASS')
+          PY
