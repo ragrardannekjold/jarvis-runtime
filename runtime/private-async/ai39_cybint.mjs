@@ -1,5 +1,6 @@
 const ALLOWED_ASN = "AS202279";
 const ALLOWED_PAYLOAD_KEYS = new Set(["asn", "historical_reference_total"]);
+const PROVIDER_TIMEOUT_MS = 45000;
 
 function assertFiniteNonNegativeNumber(value, name) {
   if (value === undefined || value === null) return;
@@ -38,15 +39,66 @@ function limitedFacets(raw, limit) {
   });
 }
 
+function safeTransportCode(error) {
+  const name = typeof error?.name === "string" ? error.name : "";
+  if (name === "AbortError" || name === "TimeoutError") return "TIMEOUT";
+  return "NETWORK_ERROR";
+}
+
 async function getJson(url, fetchImpl) {
-  const response = await fetchImpl(url, {
-    method: "GET",
-    headers: { Accept: "application/json" },
-  });
-  if (!response || typeof response.status !== "number") throw new Error("invalid_provider_response");
-  if (response.status === 429) return { backpressure: true, status: 429, body: null };
-  if (!response.ok) return { backpressure: false, status: response.status, body: null };
-  return { backpressure: false, status: response.status, body: await response.json() };
+  let response;
+  try {
+    response = await fetchImpl(url, {
+      method: "GET",
+      headers: { Accept: "application/json" },
+      signal: typeof AbortSignal?.timeout === "function"
+        ? AbortSignal.timeout(PROVIDER_TIMEOUT_MS)
+        : undefined,
+    });
+  } catch (error) {
+    return {
+      backpressure: false,
+      status: null,
+      body: null,
+      transport_error: safeTransportCode(error),
+    };
+  }
+  if (!response || typeof response.status !== "number") {
+    return {
+      backpressure: false,
+      status: null,
+      body: null,
+      transport_error: "INVALID_RESPONSE",
+    };
+  }
+  if (response.status === 429) {
+    return { backpressure: true, status: 429, body: null, transport_error: null };
+  }
+  if (!response.ok) {
+    return { backpressure: false, status: response.status, body: null, transport_error: null };
+  }
+  try {
+    return {
+      backpressure: false,
+      status: response.status,
+      body: await response.json(),
+      transport_error: null,
+    };
+  } catch {
+    return {
+      backpressure: false,
+      status: response.status,
+      body: null,
+      transport_error: "INVALID_JSON",
+    };
+  }
+}
+
+function providerStatus(observation) {
+  if (observation.transport_error) return observation.transport_error;
+  if (observation.backpressure) return "BACKPRESSURE";
+  if (typeof observation.status === "number") return `HTTP_${observation.status}`;
+  return "UNKNOWN";
 }
 
 export async function runAi39CybintRefresh(
@@ -65,6 +117,7 @@ export async function runAi39CybintRefresh(
     active_scan_performed: false,
     exact_hosts_retained: false,
     exact_locations_retained: false,
+    provider_failures_isolated: true,
     routing: {
       provider: "RIPEstat",
       status: "UNKNOWN",
@@ -83,6 +136,7 @@ export async function runAi39CybintRefresh(
     },
     historical_reference_total: config.historical_reference_total,
     exposure_change_vs_reference: null,
+    evidence_status: "INSUFFICIENT_DATA",
     interpretation: "FACTS_ONLY_DIRECTIONAL_SCORING_EXTERNAL",
   };
 
@@ -95,7 +149,7 @@ export async function runAi39CybintRefresh(
     result.routing.announced_prefix_count = count;
     result.routing.routed = count > 0;
   } else {
-    result.routing.status = ripe.backpressure ? "BACKPRESSURE" : `HTTP_${ripe.status}`;
+    result.routing.status = providerStatus(ripe);
   }
 
   if (shodanKey) {
@@ -114,7 +168,7 @@ export async function runAi39CybintRefresh(
       result.shodan.product_facets = limitedFacets(facets.product, 10);
       result.shodan.device_facets = limitedFacets(facets.device, 10);
     } else {
-      result.shodan.status = shodan.backpressure ? "BACKPRESSURE" : `HTTP_${shodan.status}`;
+      result.shodan.status = providerStatus(shodan);
     }
   }
 
@@ -131,7 +185,11 @@ export async function runAi39CybintRefresh(
     };
   }
 
+  const routingUseful = result.routing.status === "OK";
+  const shodanUseful = result.shodan.status === "OK";
+  result.evidence_status = routingUseful || shodanUseful ? "PARTIAL_EVIDENCE" : "INSUFFICIENT_DATA";
+
   return result;
 }
 
-export { ALLOWED_ASN, ALLOWED_PAYLOAD_KEYS };
+export { ALLOWED_ASN, ALLOWED_PAYLOAD_KEYS, PROVIDER_TIMEOUT_MS };
