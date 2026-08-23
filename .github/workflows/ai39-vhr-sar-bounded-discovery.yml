@@ -1,0 +1,92 @@
+name: AI39 bounded open VHR SAR discovery
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  discovery:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install --disable-pip-version-check requests
+      - name: Bounded Capella 2026 traversal and Umbra S3 prefix readback
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          python - <<'PY'
+          import json, requests
+          from collections import deque
+          from datetime import datetime,timezone
+          from urllib.parse import urljoin
+          import xml.etree.ElementTree as ET
+
+          AOI=[37.65,48.45,38.25,48.90]
+          START=datetime(2026,7,23,tzinfo=timezone.utc); END=datetime(2026,8,24,tzinfo=timezone.utc)
+          def intersect(b):
+              return bool(b and len(b)>=4 and not (b[2]<AOI[0] or b[0]>AOI[2] or b[3]<AOI[1] or b[1]>AOI[3]))
+          def pdt(v):
+              if not isinstance(v,str): return None
+              try: return datetime.fromisoformat(v.replace('Z','+00:00'))
+              except: return None
+
+          cap={'status':'UNKNOWN','documents_fetched':0,'items_checked':0,'matches':[],'errors':[]}
+          start='https://capella-open-data.s3.us-west-2.amazonaws.com/stac/capella-open-data-by-datetime/capella-open-data-2026/catalog.json'
+          q=deque([start]); seen=set(); max_docs=700
+          while q and len(seen)<max_docs:
+              url=q.popleft()
+              if url in seen: continue
+              seen.add(url)
+              try:
+                  r=requests.get(url,timeout=30); r.raise_for_status(); obj=r.json(); cap['documents_fetched']+=1
+              except Exception as e:
+                  cap['errors'].append({'url_tail':url[-120:],'error_class':type(e).__name__}); continue
+              typ=obj.get('type')
+              if typ=='Feature':
+                  cap['items_checked']+=1
+                  props=obj.get('properties') or {}; dt=pdt(props.get('datetime') or props.get('start_datetime'))
+                  if dt and START<=dt<END and intersect(obj.get('bbox')):
+                      assets=obj.get('assets') or {}
+                      cap['matches'].append({'id':obj.get('id'),'datetime':dt.isoformat(),'collection':obj.get('collection'),'platform':props.get('platform'),'mode':props.get('sar:instrument_mode'),'product_type':props.get('sar:product_type'),'resolution_range':props.get('sar:resolution_range'),'resolution_azimuth':props.get('sar:resolution_azimuth'),'asset_keys':sorted(assets.keys())[:30],'has_thumbnail':any('thumb' in k.lower() or 'preview' in k.lower() for k in assets)})
+                  continue
+              for link in obj.get('links') or []:
+                  rel=link.get('rel'); href=link.get('href')
+                  if rel not in {'child','item','items'} or not isinstance(href,str): continue
+                  nxt=urljoin(url,href)
+                  # Stay inside the 2026 datetime branch; item links may not repeat the year in filename.
+                  if 'capella-open-data.s3.us-west-2.amazonaws.com/stac/' not in nxt: continue
+                  q.append(nxt)
+          cap['matches_count']=len(cap['matches'])
+          cap['status']='BOUNDED_SEARCH_COMPLETE' if not q else 'BOUNDED_LIMIT_REACHED'
+
+          # Umbra: list only root prefixes/first page via public S3 ListObjectsV2, not recursive crawl.
+          umb={'status':'UNKNOWN','root_prefixes':[],'sample_keys':[],'is_truncated':None,'errors':[]}
+          try:
+              rr=requests.get('https://umbra-open-data-catalog.s3.us-west-2.amazonaws.com/',params={'list-type':'2','delimiter':'/','max-keys':'1000'},timeout=60); rr.raise_for_status()
+              root=ET.fromstring(rr.text); ns={'s':'http://s3.amazonaws.com/doc/2006-03-01/'}
+              prefixes=[x.text for x in root.findall('s:CommonPrefixes/s:Prefix',ns) if x.text]
+              keys=[x.find('s:Key',ns).text for x in root.findall('s:Contents',ns) if x.find('s:Key',ns) is not None]
+              trunc=root.find('s:IsTruncated',ns)
+              umb={'status':'ROOT_LISTED','root_prefixes':prefixes[:200],'sample_keys':keys[:100],'is_truncated':(trunc.text.lower()=='true') if trunc is not None and trunc.text else None,'errors':[]}
+          except Exception as e:
+              umb={'status':'ERROR','root_prefixes':[],'sample_keys':[],'is_truncated':None,'errors':[type(e).__name__]}
+
+          out={'generated_utc':datetime.now(timezone.utc).isoformat(),'scope':'public open-data VHR SAR discovery only; Capella 2026 bounded datetime branch + Umbra root structure','capella':cap,'umbra':umb,
+               'interpretation_limit':'Open-data absence is only absence from these public archives, not absence of commercial coverage. Metadata match is availability evidence, not evidence of activity in the image.',
+               'safety':'No exact military positions or target-level interpretation. Match footprints are used internally for broad AOI intersection but are not retained in output.'}
+          json.dump(out,open('out/discovery.json','w'),indent=2)
+          print(json.dumps({'capella_status':cap['status'],'capella_docs':cap['documents_fetched'],'capella_items':cap['items_checked'],'capella_matches':cap['matches'],'umbra':umb},indent=2)[:50000])
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ai39-vhr-sar-bounded-discovery
+          path: out/discovery.json
+          if-no-files-found: error
+          retention-days: 2
