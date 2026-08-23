@@ -1,0 +1,58 @@
+name: AI39 ASN transition discriminator
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'runtime/ai39_asn_transition.py'
+      - 'runtime/test_ai39_asn_transition.py'
+      - '.github/workflows/ai39-asn-transition.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  transition:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    env:
+      SHODAN_API_KEY: ${{ secrets.SHODAN_API_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install --disable-pip-version-check requests
+      - name: Compile and run focused tests
+        run: |
+          set -euo pipefail
+          python -m py_compile runtime/ai39_asn_transition.py runtime/test_ai39_asn_transition.py
+          PYTHONPATH=runtime python -m unittest runtime/test_ai39_asn_transition.py -v
+      - name: Run passive aggregate transition discriminator
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          python runtime/ai39_asn_transition.py --out out/result.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ai39-asn-transition
+          path: out/result.json
+          if-no-files-found: error
+          retention-days: 2
+      - name: Truth gate
+        run: |
+          python - <<'PY'
+          import json
+          data=json.load(open('out/result.json'))
+          assert data['schema_version']=='AI39_ASN_TRANSITION_V0_1', data
+          assert data['transition_assessment']['state'] in {
+              'SUPPORTED_ASN_ROLE_SHIFT_OR_MIGRATION_LEAD',
+              'UNRESOLVED_DUAL_ASN_RESTRUCTURING',
+              'UNRESOLVED_RIPE_RELATION_ONLY',
+              'INSUFFICIENT_RELATIONSHIP_EVIDENCE',
+          }, data
+          assert data['result_sha256'], data
+          assert data['scope'].startswith('Aggregate comparison'), data
+          print('AI39_ASN_TRANSITION_PASS')
+          PY
