@@ -8,9 +8,9 @@ permissions:
   contents: read
 
 jobs:
-  profile:
+  shodan_broad:
     runs-on: ubuntu-latest
-    timeout-minutes: 12
+    timeout-minutes: 6
     env:
       SHODAN_API_KEY: ${{ secrets.SHODAN_API_KEY }}
     steps:
@@ -18,97 +18,92 @@ jobs:
         with:
           python-version: '3.12'
       - run: python -m pip install --disable-pip-version-check requests
-      - name: Aggregate-only broad-area Shodan facets + RIPE BGPlay history
+      - name: Aggregate-only broad-area Shodan facets
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p out
+          mkdir -p out/shodan
           python - <<'PY'
-          import json, os, requests
-          from datetime import datetime, timezone
-
-          ASN='AS202279'
-          key=os.environ.get('SHODAN_API_KEY','').strip()
-          # Broad city/hromada-scale labels only. No coordinates or host output.
+          import json,os,requests
+          from datetime import datetime,timezone
+          ASN='AS202279'; key=os.environ.get('SHODAN_API_KEY','').strip()
           areas=['Bakhmut','Soledar','Chasiv Yar','Kramatorsk','Donetsk']
-          out={
-            'generated_utc':datetime.now(timezone.utc).isoformat(),
-            'shodan':{'status':'UNKNOWN','areas':{},'credits_before':None,'credits_after':None,'credits_delta':None},
-            'bgp_history':{},
-            'safety':'Aggregate city/hromada-scale counts and ASN relationships only. No IPs, hostnames, banners, vulnerabilities, credentials, screenshots or exact device locations.',
-            'interpretation_limit':'Shodan geolocation is Internet-registration/geolocation metadata and may not equal physical device location. Product/port labels do not prove military use, price, surveillance function or current operator. BGP adjacency is routing evidence, not physical presence.'
-          }
+          out={'generated_utc':datetime.now(timezone.utc).isoformat(),'status':'UNKNOWN','areas':{},'credits_before':None,'credits_after':None,'credits_delta':None,
+               'safety':'Aggregate city/hromada-scale counts only. No IPs, hostnames, banners, vulnerabilities, credentials, screenshots or exact device locations.',
+               'interpretation_limit':'Shodan geolocation may not equal physical device location. Product/port labels do not prove military use, price, surveillance function or current operator.'}
           def api_info():
-              r=requests.get('https://api.shodan.io/api-info',params={'key':key},timeout=30); r.raise_for_status(); return r.json().get('query_credits')
-          if key:
+              r=requests.get('https://api.shodan.io/api-info',params={'key':key},timeout=20); r.raise_for_status(); return r.json().get('query_credits')
+          if not key: out['status']='NO_SECRET'
+          else:
               try:
-                  out['shodan']['credits_before']=api_info()
+                  out['credits_before']=api_info()
                   for area in areas:
                       q=f'asn:{ASN} city:"{area}"'
-                      r=requests.get('https://api.shodan.io/shodan/host/count',params={'key':key,'query':q,'facets':'product:50,port:50,org:10,isp:10,os:20'},timeout=60)
+                      r=requests.get('https://api.shodan.io/shodan/host/count',params={'key':key,'query':q,'facets':'product:50,port:50,org:10,isp:10,os:20'},timeout=35)
                       if r.status_code==200:
                           j=r.json(); rec={'status':'VERIFIED_AGGREGATE','total':j.get('total'),'facets':{}}
                           for f,vals in (j.get('facets') or {}).items():
                               rec['facets'][f]=[{'value':x.get('value'),'count':x.get('count')} for x in vals or [] if x.get('value') is not None and isinstance(x.get('count'),int)]
-                          out['shodan']['areas'][area]=rec
-                      else:
-                          out['shodan']['areas'][area]={'status':'HTTP_ERROR','http_status':r.status_code}
-                  out['shodan']['credits_after']=api_info()
-                  if isinstance(out['shodan']['credits_before'],int) and isinstance(out['shodan']['credits_after'],int):
-                      out['shodan']['credits_delta']=out['shodan']['credits_before']-out['shodan']['credits_after']
-                  out['shodan']['status']='VERIFIED_AGGREGATE'
-              except Exception as e:
-                  out['shodan']['status']='ERROR'; out['shodan']['error_class']=type(e).__name__
-          else:
-              out['shodan']['status']='NO_SECRET'
-
-          def neighbors_from_path(path):
-              vals=[]
-              if isinstance(path,list):
-                  vals=[str(x) for x in path]
-              elif isinstance(path,str):
-                  vals=path.split()
-              target=ASN.replace('AS','')
-              res=[]
-              for i,x in enumerate(vals):
-                  sx=x.replace('AS','')
-                  if sx==target:
-                      if i>0: res.append(vals[i-1].replace('AS',''))
-                      if i+1<len(vals): res.append(vals[i+1].replace('AS',''))
-              return res
-
-          windows=[
-            ('2026-01','2026-01-01T00:00:00','2026-02-01T00:00:00'),
-            ('2026-02','2026-02-01T00:00:00','2026-03-01T00:00:00'),
-            ('2026-03','2026-03-01T00:00:00','2026-04-01T00:00:00'),
-            ('2026-04','2026-04-01T00:00:00','2026-05-01T00:00:00'),
-            ('2026-08','2026-08-01T00:00:00','2026-08-23T23:59:59')
-          ]
-          for label,start,end in windows:
-              rec={'status':'UNKNOWN','neighbors':{},'events':0,'initial_paths':0}
-              try:
-                  r=requests.get('https://stat.ripe.net/data/bgplay/data.json',params={'resource':ASN,'starttime':start,'endtime':end},timeout=90)
-                  r.raise_for_status(); d=(r.json().get('data') or {})
-                  counts={}
-                  for st in d.get('initial_state') or []:
-                      rec['initial_paths']+=1
-                      for n in neighbors_from_path(st.get('path')): counts[n]=counts.get(n,0)+1
-                  for ev in d.get('events') or []:
-                      rec['events']+=1
-                      attrs=ev.get('attrs') or {}
-                      for n in neighbors_from_path(attrs.get('path')): counts[n]=counts.get(n,0)+1
-                  rec['neighbors']={k:counts[k] for k in sorted(counts,key=lambda x:(-counts[x],x))[:30]}
-                  rec['status']='VERIFIED_AGGREGATE'
-              except Exception as e:
-                  rec={'status':'ERROR','error_class':type(e).__name__}
-              out['bgp_history'][label]=rec
-
-          json.dump(out,open('out/network_profile.json','w'),indent=2,ensure_ascii=False)
-          print(json.dumps(out,indent=2,ensure_ascii=False)[:50000])
+                          out['areas'][area]=rec
+                      else: out['areas'][area]={'status':'HTTP_ERROR','http_status':r.status_code}
+                  out['credits_after']=api_info()
+                  if isinstance(out['credits_before'],int) and isinstance(out['credits_after'],int): out['credits_delta']=out['credits_before']-out['credits_after']
+                  out['status']='VERIFIED_AGGREGATE'
+              except Exception as e: out['status']='ERROR'; out['error_class']=type(e).__name__
+          json.dump(out,open('out/shodan/profile.json','w'),indent=2,ensure_ascii=False); print(json.dumps(out,indent=2,ensure_ascii=False))
           PY
       - uses: actions/upload-artifact@v4
         with:
-          name: ai39-network-broad-risk
-          path: out/network_profile.json
+          name: ai39-shodan-broad-areas
+          path: out/shodan/profile.json
+          if-no-files-found: error
+          retention-days: 2
+
+  bgp_history:
+    runs-on: ubuntu-latest
+    timeout-minutes: 7
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install --disable-pip-version-check requests
+      - name: RIPE BGPlay monthly adjacency summary
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p out/bgp
+          python - <<'PY'
+          import json,requests
+          from datetime import datetime,timezone
+          ASN='AS202279'; target='202279'
+          def neigh(path):
+              vals=[str(x).replace('AS','') for x in path] if isinstance(path,list) else str(path or '').replace('AS','').split()
+              out=[]
+              for i,x in enumerate(vals):
+                  if x==target:
+                      if i>0: out.append(vals[i-1])
+                      if i+1<len(vals): out.append(vals[i+1])
+              return out
+          windows=[('2026-01','2026-01-01T00:00:00','2026-02-01T00:00:00'),('2026-02','2026-02-01T00:00:00','2026-03-01T00:00:00'),('2026-03','2026-03-01T00:00:00','2026-04-01T00:00:00'),('2026-04','2026-04-01T00:00:00','2026-05-01T00:00:00'),('2026-08','2026-08-01T00:00:00','2026-08-23T23:59:59')]
+          out={'generated_utc':datetime.now(timezone.utc).isoformat(),'asn':ASN,'months':{},'interpretation_limit':'BGP adjacency is routing evidence, not physical presence or equipment evidence.'}
+          for label,start,end in windows:
+              rec={'status':'UNKNOWN','neighbors':{},'events':0,'initial_paths':0}
+              try:
+                  r=requests.get('https://stat.ripe.net/data/bgplay/data.json',params={'resource':ASN,'starttime':start,'endtime':end},timeout=35); r.raise_for_status(); d=r.json().get('data') or {}; counts={}
+                  for st in d.get('initial_state') or []:
+                      rec['initial_paths']+=1
+                      for n in neigh(st.get('path')): counts[n]=counts.get(n,0)+1
+                  for ev in d.get('events') or []:
+                      rec['events']+=1
+                      for n in neigh((ev.get('attrs') or {}).get('path')): counts[n]=counts.get(n,0)+1
+                  rec['neighbors']={k:counts[k] for k in sorted(counts,key=lambda x:(-counts[x],x))[:30]}; rec['status']='VERIFIED_AGGREGATE'
+              except Exception as e: rec={'status':'ERROR','error_class':type(e).__name__}
+              out['months'][label]=rec
+          json.dump(out,open('out/bgp/history.json','w'),indent=2); print(json.dumps(out,indent=2))
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ai39-bgp-history
+          path: out/bgp/history.json
           if-no-files-found: error
           retention-days: 2
