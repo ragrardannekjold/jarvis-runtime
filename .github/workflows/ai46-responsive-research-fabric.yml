@@ -6,6 +6,8 @@ on:
     paths:
       - 'runtime/ai46_research_fabric.py'
       - 'runtime/test_ai46_research_fabric.py'
+      - 'runtime/ai46_result_hardener.py'
+      - 'runtime/test_ai46_result_hardener.py'
       - '.github/workflows/ai46-responsive-research-fabric.yml'
   workflow_dispatch:
 
@@ -25,8 +27,14 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          python -m py_compile runtime/ai46_research_fabric.py runtime/test_ai46_research_fabric.py
-          PYTHONPATH=runtime python -m unittest runtime/test_ai46_research_fabric.py -v
+          python -m py_compile \
+            runtime/ai46_research_fabric.py \
+            runtime/test_ai46_research_fabric.py \
+            runtime/ai46_result_hardener.py \
+            runtime/test_ai46_result_hardener.py
+          PYTHONPATH=runtime python -m unittest \
+            runtime/test_ai46_research_fabric.py \
+            runtime/test_ai46_result_hardener.py -v
 
   compile:
     runs-on: ubuntu-latest
@@ -161,27 +169,38 @@ jobs:
         with:
           name: ai46-worker-entity
           path: in/workers/entity
-      - name: Merge valid worker envelopes and re-score
+      - name: Merge valid worker envelopes
         run: |
           mkdir -p out in/workers
           python runtime/ai46_research_fabric.py aggregate \
             --mission in/mission/mission.json \
             --workers-root in/workers \
             --out out/aggregate.json
+      - name: Block uncalibrated numeric promotion and validate safe values
+        run: |
+          python runtime/ai46_result_hardener.py \
+            --input out/aggregate.json \
+            --output out/hardened.json
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: ai46-research-fabric-result
-          path: out/aggregate.json
+          path: |
+            out/aggregate.json
+            out/hardened.json
           if-no-files-found: error
           retention-days: 2
       - name: Acceptance gate
         run: |
           python - <<'PY'
           import json
-          data=json.load(open('out/aggregate.json'))
+          data=json.load(open('out/hardened.json'))
+          assert data['status'] == 'VERIFIED_DIRECTIONAL_UPDATE', data
           assert data['worker_count_accepted'] >= 2, data
-          assert data['decision_change_count'] >= 1, data
+          assert data['material_evidence_change_count'] >= 1, data
+          assert data['numeric_updates_promoted'] == 0, data
+          assert data['safe_output_validation'] == 'PASS', data
+          assert data['candidate_ledger']['D4']['organized_presence_movement'] == 'UNCHANGED', data
           assert data['external_side_effects'] is False, data
-          print('AI46_EXTERNAL_FABRIC_ACCEPTANCE_PASS')
+          print('AI46_EXTERNAL_FABRIC_HARDENED_ACCEPTANCE_PASS')
           PY
