@@ -1,0 +1,102 @@
+name: AI39 machine enrichment
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  enrich:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      SHODAN_API_KEY: ${{ secrets.SHODAN_API_KEY }}
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install --disable-pip-version-check requests
+      - name: Aggregate service facets registry and Airbus preview metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          python - <<'PY'
+          import json,os,requests
+          from datetime import datetime,timezone
+
+          key=os.environ.get('SHODAN_API_KEY','').strip()
+          out={
+            'generated_utc':datetime.now(timezone.utc).isoformat(),
+            'shodan':{'status':'UNKNOWN','leads':{},'credits_before':None,'credits_after':None,'credits_delta':None},
+            'ripe_registry':{'status':'UNKNOWN'},
+            'airbus_single_scene':{'status':'UNKNOWN'},
+            'safety':'Aggregate/registry/archive metadata only. No IPs, hostnames, banners, CVEs, exact equipment or sensor locations.'
+          }
+          def api_info():
+              r=requests.get('https://api.shodan.io/api-info',params={'key':key},timeout=30); r.raise_for_status(); return r.json().get('query_credits')
+          if key:
+              try:
+                  out['shodan']['credits_before']=api_info()
+                  for label,port in [('port_4443',4443),('port_8091',8091),('snmp_161',161),('stun_3478',3478)]:
+                      q=f'asn:AS202279 port:{port}'
+                      r=requests.get('https://api.shodan.io/shodan/host/count',params={'key':key,'query':q,'facets':'product:20,org:20,isp:20,os:20'},timeout=60)
+                      r.raise_for_status(); j=r.json()
+                      rec={'current_total':j.get('total'),'facets':{}}
+                      for f,vals in (j.get('facets') or {}).items():
+                          rec['facets'][f]=[{'value':x.get('value'),'count':x.get('count')} for x in vals or [] if x.get('value') is not None and isinstance(x.get('count'),int)]
+                      out['shodan']['leads'][label]=rec
+                  out['shodan']['credits_after']=api_info()
+                  if isinstance(out['shodan']['credits_before'],int) and isinstance(out['shodan']['credits_after'],int):
+                      out['shodan']['credits_delta']=out['shodan']['credits_before']-out['shodan']['credits_after']
+                  out['shodan']['status']='VERIFIED_AGGREGATE'
+              except Exception as e:
+                  out['shodan']['status']='ERROR'; out['shodan']['error_class']=type(e).__name__
+          else:
+              out['shodan']['status']='NO_SECRET'
+
+          try:
+              w=requests.get('https://stat.ripe.net/data/whois/data.json',params={'resource':'AS202279'},timeout=60); w.raise_for_status(); data=w.json().get('data') or {}
+              keep=[]
+              for rec in data.get('records') or []:
+                  for x in rec or []:
+                      keyname=str(x.get('key') or '').lower(); value=x.get('value')
+                      if keyname in {'aut-num','as-name','org','organisation','country','descr','mnt-by','source'} and isinstance(value,str):
+                          keep.append({'key':keyname,'value':value})
+              # dedupe exact registry lines only
+              seen=set(); rows=[]
+              for x in keep:
+                  t=(x['key'],x['value'])
+                  if t not in seen: seen.add(t); rows.append(x)
+              out['ripe_registry']={'status':'VERIFIED_REGISTRY','records':rows[:50]}
+          except Exception as e:
+              out['ripe_registry']={'status':'ERROR','error_class':type(e).__name__}
+
+          try:
+              BASE='https://portal.intelligence-airbusds.com/arcgis/rest/services/OneAtlas/OADConstellationArchive/MapServer'
+              # Pleiades 50cm layer. Query exact known scene id; return no geometry.
+              scene='DS_PHR1B_202607310827289_FR1_PX_E037N49_1004_04826'
+              layer=requests.get(f'{BASE}/9',params={'f':'json'},timeout=60); layer.raise_for_status(); lj=layer.json()
+              fields=[f.get('name') for f in lj.get('fields',[]) if isinstance(f,dict) and f.get('name')]
+              wanted=[x for x in fields if any(k in x.lower() for k in ['quick','thumb','browse','preview','url','identifier','acquisition','cloud','incidence'])]
+              q=requests.get(f'{BASE}/9/query',params={'f':'json','where':f"parentidentifier='{scene}'",'outFields':'*','returnGeometry':'false','resultRecordCount':10},timeout=60)
+              q.raise_for_status(); feats=q.json().get('features') or []
+              attrs=(feats[0].get('attributes') or {}) if feats else {}
+              selected={k:v for k,v in attrs.items() if k in wanted or k.lower() in {'parentidentifier','cloudcover','incidenceangle','acquisitiondate','processinglevel'}}
+              # Never retain geometry; URLs are retained only if they are archive preview/browse metadata, not target coordinates.
+              out['airbus_single_scene']={'status':'FOUND' if feats else 'NOT_FOUND','scene_id':scene,'candidate_preview_fields':wanted,'selected_attributes':selected}
+          except Exception as e:
+              out['airbus_single_scene']={'status':'ERROR','error_class':type(e).__name__}
+
+          out['interpretation_limit']='Shodan facet labels and RIPE registry lines can establish service/operator relationships but not physical device placement, military purpose, price or current human presence. Airbus metadata can establish scene availability; a preview is contextual imagery, not change attribution.'
+          json.dump(out,open('out/enrichment.json','w'),indent=2,ensure_ascii=False)
+          print(json.dumps({'shodan':out['shodan'],'ripe_registry':out['ripe_registry'],'airbus_single_scene':out['airbus_single_scene']},indent=2,ensure_ascii=False)[:50000])
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ai39-machine-enrichment
+          path: out/enrichment.json
+          if-no-files-found: error
+          retention-days: 2
