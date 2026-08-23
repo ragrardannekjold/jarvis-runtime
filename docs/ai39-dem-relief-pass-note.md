@@ -1,0 +1,1 @@
+Temporary Investigation-only DEM feature extraction. Broad 4x4 context only; no exact military positions, routes, trench lines or target-level output. This branch remains unmerged.
