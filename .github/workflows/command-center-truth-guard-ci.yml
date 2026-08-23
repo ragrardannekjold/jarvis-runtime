@@ -14,8 +14,8 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  verify-core:
-    name: Verify exact AI-49 truth-guard core
+  verify:
+    name: Verify exact AI-49 core and guarded wrapper
     runs-on: ubuntu-latest
     timeout-minutes: 10
 
@@ -32,8 +32,10 @@ jobs:
         run: |
           test "$(git hash-object ci/ai49_core/jarvis/truth_guard.py)" = "76dcc503495bce5ab393012ca6f495a562c396aa"
           test "$(git hash-object ci/ai49_core/tests/test_truth_guard.py)" = "ad290e4587687629292fcff6890054fad22c6226"
+          test "$(git hash-object ci/ai49_core/jarvis/truth_guarded_orchestration.py)" = "a769618f9b56364544a9dc63204640b42c96874b"
+          test "$(git hash-object ci/ai49_core/tests/test_truth_guarded_orchestration.py)" = "96d5cc3c09387fda2b8594e874f1b124ba8a84e3"
 
-      - name: Run exact core unit suite
+      - name: Run exact core and wrapper unit suites
         env:
           PYTHONPATH: ci/ai49_core
         run: python -m unittest discover -s ci/ai49_core/tests -v
@@ -42,15 +44,23 @@ jobs:
         env:
           PYTHONPATH: ci/ai49_core
         run: |
-          rm -rf /tmp/ai49-truth-guard-core
+          rm -rf /tmp/ai49-truth-guard
           python ci/ai49_core/run_canary.py \
             --repeat 10 \
-            --output /tmp/ai49-truth-guard-core/terminal-readback.json
+            --output /tmp/ai49-truth-guard/core-terminal-readback.json
 
-      - name: Upload terminal readback
+      - name: Run ten guarded-wrapper canaries
+        env:
+          PYTHONPATH: ci/ai49_core
+        run: |
+          python ci/ai49_core/run_wrapper_canary.py \
+            --repeat 10 \
+            --output /tmp/ai49-truth-guard/wrapper-terminal-readback.json
+
+      - name: Upload terminal readbacks
         uses: actions/upload-artifact@v4
         with:
-          name: ai49-truth-guard-core-terminal-readback
-          path: /tmp/ai49-truth-guard-core/terminal-readback.json
+          name: ai49-truth-guard-terminal-readbacks
+          path: /tmp/ai49-truth-guard/*.json
           if-no-files-found: error
           retention-days: 7
