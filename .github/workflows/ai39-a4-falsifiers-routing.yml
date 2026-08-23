@@ -1,0 +1,191 @@
+name: AI39 A4 falsifiers + routing history
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  a4_falsifiers:
+    runs-on: ubuntu-latest
+    timeout-minutes: 18
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install --disable-pip-version-check pystac-client planetary-computer rasterio numpy requests
+      - name: A4 optical + precipitation falsifiers
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p out/a4
+          python - <<'PY'
+          import json
+          from datetime import datetime, timezone
+          import numpy as np, rasterio, requests
+          from rasterio.vrt import WarpedVRT
+          from rasterio.enums import Resampling
+          from rasterio.transform import from_bounds
+          import planetary_computer
+          from pystac_client import Client
+
+          FULL=[37.65,48.45,38.25,48.90]
+          # A4 = broad NE quarter-cell of the fixed 4x4 AI-39 grid. Keep only sector code in output.
+          dx=(FULL[2]-FULL[0])/4; dy=(FULL[3]-FULL[1])/4
+          BBOX=[FULL[0]+3*dx, FULL[3]-dy, FULL[2], FULL[3]]
+          W=H=320
+
+          cat=Client.open('https://planetarycomputer.microsoft.com/api/stac/v1',modifier=planetary_computer.sign_inplace)
+          items=list(cat.search(collections=['sentinel-2-l2a'],bbox=BBOX,datetime='2026-08-12/2026-08-21',max_items=100).items())
+          candidates=[]
+          for it in items:
+              p=it.properties; cloud=p.get('eo:cloud_cover'); dt=it.datetime
+              if dt and isinstance(cloud,(int,float)):
+                  candidates.append((dt,cloud,it))
+          candidates.sort(key=lambda x:x[0])
+
+          def usable_score(x,target):
+              dt,cloud,_=x
+              return abs((dt-target).total_seconds())/86400 + max(cloud,0)/50
+          t0=datetime(2026,8,14,tzinfo=timezone.utc); t1=datetime(2026,8,20,tzinfo=timezone.utc)
+          before=min(candidates,key=lambda x:usable_score(x,t0)) if candidates else None
+          after=min(candidates,key=lambda x:usable_score(x,t1)) if candidates else None
+
+          transform=from_bounds(*BBOX,W,H)
+          def read_asset(it,key,resampling=Resampling.bilinear):
+              with rasterio.open(it.assets[key].href) as ds:
+                  with WarpedVRT(ds,crs='EPSG:4326',transform=transform,width=W,height=H,resampling=resampling,nodata=np.nan) as vrt:
+                      return vrt.read(1).astype(np.float32)
+          def metrics(x):
+              dt,cloud,it=x
+              b4=read_asset(it,'B04'); b8=read_asset(it,'B08'); b11=read_asset(it,'B11'); b12=read_asset(it,'B12')
+              scl=read_asset(it,'SCL',Resampling.nearest)
+              good=np.isfinite(b4)&np.isfinite(b8)&np.isfinite(b11)&np.isfinite(b12)&~np.isin(scl,[0,1,3,8,9,10,11])
+              eps=1e-6
+              ndvi=(b8-b4)/(b8+b4+eps)
+              nbr=(b8-b12)/(b8+b12+eps)
+              ndbi=(b11-b8)/(b11+b8+eps)
+              bsi=((b11+b4)-(b8+b2 if False else b8+b4))/( (b11+b4)+(b8+b4)+eps )
+              # Use SWIR1 vs NIR/red summary; BSI value is secondary and not used alone.
+              vals={
+                'acquisition_utc':dt.isoformat(),
+                'cloud_scene_pct':round(float(cloud),2),
+                'valid_sector_pct':round(float(good.mean()*100),2),
+                'median_ndvi':round(float(np.nanmedian(ndvi[good])),4) if good.any() else None,
+                'median_nbr':round(float(np.nanmedian(nbr[good])),4) if good.any() else None,
+                'median_ndbi':round(float(np.nanmedian(ndbi[good])),4) if good.any() else None,
+                'item_id':it.id
+              }
+              return vals, {'ndvi':ndvi,'nbr':nbr,'ndbi':ndbi,'good':good}
+
+          optical={'status':'INSUFFICIENT_DATA'}
+          if before and after and before[2].id!=after[2].id:
+              mb,ab=metrics(before); ma,aa=metrics(after)
+              both=ab['good']&aa['good']
+              if both.mean()>=0.20:
+                  dndvi=aa['ndvi']-ab['ndvi']; dnbr=aa['nbr']-ab['nbr']; dndbi=aa['ndbi']-ab['ndbi']
+                  optical={
+                    'status':'SCREENED',
+                    'before':mb,'after':ma,
+                    'joint_valid_pct':round(float(both.mean()*100),2),
+                    'median_dndvi':round(float(np.median(dndvi[both])),4),
+                    'median_dnbr':round(float(np.median(dnbr[both])),4),
+                    'median_dndbi':round(float(np.median(dndbi[both])),4),
+                    'pct_joint_abs_dnbr_ge_0_10':round(float((np.abs(dnbr[both])>=0.10).mean()*100),3),
+                    'pct_joint_abs_dndbi_ge_0_10':round(float((np.abs(dndbi[both])>=0.10).mean()*100),3)
+                  }
+
+          # Broad environmental falsifier, sampled at A4 center only; no coordinate emitted.
+          lat=(BBOX[1]+BBOX[3])/2; lon=(BBOX[0]+BBOX[2])/2
+          weather={'status':'UNKNOWN'}
+          try:
+              r=requests.get('https://archive-api.open-meteo.com/v1/archive',params={
+                'latitude':lat,'longitude':lon,'start_date':'2026-08-12','end_date':'2026-08-20',
+                'daily':'precipitation_sum','timezone':'UTC'
+              },timeout=60); r.raise_for_status(); j=r.json()
+              daily=(j.get('daily') or {}); dates=daily.get('time') or []; ps=daily.get('precipitation_sum') or []
+              rows=[{'date':d,'precip_mm':p} for d,p in zip(dates,ps) if isinstance(p,(int,float))]
+              event=[x for x in rows if '2026-08-14'<=x['date']<='2026-08-20']
+              pre=[x for x in rows if '2026-08-12'<=x['date']<'2026-08-14']
+              weather={
+                'status':'SCREENED',
+                'event_window_total_mm':round(sum(x['precip_mm'] for x in event),2),
+                'event_window_max_daily_mm':round(max((x['precip_mm'] for x in event),default=0),2),
+                'pre_window_total_mm':round(sum(x['precip_mm'] for x in pre),2),
+                'daily':rows
+              }
+          except Exception as e:
+              weather={'status':'ERROR','error_class':type(e).__name__}
+
+          out={
+            'generated_utc':datetime.now(timezone.utc).isoformat(),
+            'sector':'A4',
+            'optical':optical,
+            'precipitation':weather,
+            'interpretation_limit':'Broad optical and precipitation falsifiers only. Optical index changes can reflect crops, vegetation, soil, cloud residuals, damage or other surface processes; precipitation is a confound check, not causal proof.',
+            'safety':'No coordinates, routes, exact positions, equipment, trench or sensor locations in output.'
+          }
+          json.dump(out,open('out/a4/falsifiers.json','w'),indent=2)
+          print(json.dumps(out,indent=2))
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ai39-a4-falsifiers
+          path: out/a4/falsifiers.json
+          if-no-files-found: error
+          retention-days: 2
+
+  routing_history:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install --disable-pip-version-check requests
+      - name: Monthly BGP continuity summary
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p out/routing
+          python - <<'PY'
+          import json, requests
+          from datetime import datetime, timezone
+          from collections import defaultdict
+
+          ASN='AS202279'
+          r=requests.get('https://stat.ripe.net/data/routing-history/data.json',params={'resource':ASN,'min_peers':0},timeout=90)
+          r.raise_for_status(); data=(r.json().get('data') or {})
+          monthly=defaultdict(set); intervals=0
+          for origin in data.get('by_origin') or []:
+              for p in origin.get('prefixes') or []:
+                  pref=p.get('prefix')
+                  for t in p.get('timelines') or []:
+                      s=t.get('starttime'); e=t.get('endtime')
+                      if not pref or not s or not e: continue
+                      intervals+=1
+                      sd=datetime.fromisoformat(s.replace('Z','+00:00')); ed=datetime.fromisoformat(e.replace('Z','+00:00'))
+                      for m in range(1,9):
+                          ms=datetime(2026,m,1,tzinfo=timezone.utc)
+                          me=datetime(2026,m+1,1,tzinfo=timezone.utc) if m<12 else datetime(2027,1,1,tzinfo=timezone.utc)
+                          if sd < me and ed >= ms: monthly[f'2026-{m:02d}'].add(pref)
+          rows=[{'month':k,'active_prefixes':len(monthly.get(k,set()))} for k in [f'2026-{m:02d}' for m in range(1,9)]]
+          out={
+            'generated_utc':datetime.now(timezone.utc).isoformat(),
+            'asn':ASN,
+            'monthly_active_prefixes_2026':rows,
+            'timeline_intervals_parsed':intervals,
+            'interpretation_limit':'BGP prefix visibility is routing evidence, not physical equipment or human-presence evidence.',
+            'safety':'Aggregate ASN-level routing only; no host-level output.'
+          }
+          json.dump(out,open('out/routing/monthly.json','w'),indent=2)
+          print(json.dumps(out,indent=2))
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ai39-routing-monthly
+          path: out/routing/monthly.json
+          if-no-files-found: error
+          retention-days: 2
