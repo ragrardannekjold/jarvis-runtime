@@ -2,6 +2,7 @@ const TREND_PROFILES = Object.freeze({
   rto_core: [202279, 204108, 214721],
   neighbour_control: [201776, 206810, 39089],
   allied_external_control: [3320, 2856, 7018],
+  russia_external_control: [8359, 3216, 31133],
 });
 const TREND_START = "2026-01";
 const PROVIDER_TIMEOUT_MS = 45000;
