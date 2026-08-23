@@ -18,7 +18,7 @@ jobs:
         with:
           python-version: '3.12'
       - run: python -m pip install --disable-pip-version-check requests
-      - name: Aggregate-only device and service-family characterization
+      - name: Aggregate-only device, related-ASN and trend characterization
         shell: bash
         run: |
           set -euo pipefail
@@ -29,53 +29,45 @@ jobs:
           import requests
 
           key=os.environ.get('SHODAN_API_KEY','').strip()
-          base='asn:AS202279'
           primary_org="STATE UNITARY ENTERPRISE OF THE DONETSK PEOPLE'S REPUBLIC REPUBLICAN TELECOMMUNICATIONS OPERATOR"
-          out={
-            'generated_utc':datetime.now(timezone.utc).isoformat(),
-            'scope':'Aggregate-only passive device/service-family characterization and related-ASN expansion. No hosts, IPs, banners, versions, vulnerabilities, screenshots, credentials, or exact locations retained.',
-            'asn':'AS202279','status':'UNKNOWN','base_total':None,'facets':{},
-            'service_family_counts':{},'related_asns_by_org':{},'related_primary_asn_profiles':{},
-            'credits_before':None,'credits_after':None,'credits_delta':None,
-            'interpretation_limit':'Ports/products indicate exposed service families, not physical device identity, military ownership, people, exact location, or operational purpose.'
-          }
-
-          def get(path, params):
-              r=requests.get('https://api.shodan.io'+path,params=params,timeout=60)
-              r.raise_for_status(); return r.json()
-          def api_info(): return get('/api-info',{'key':key}).get('query_credits')
+          out={'generated_utc':datetime.now(timezone.utc).isoformat(),'scope':'Aggregate-only passive device/service-family, related-ASN and monthly trend characterization. No hosts, IPs, banners, versions, vulnerabilities, screenshots, credentials, or exact locations retained.','status':'UNKNOWN','profiles':{},'related_asns_by_org':{},'trends':{},'credits_before':None,'credits_after':None,'credits_delta':None,'interpretation_limit':'Ports/products and monthly counts are infrastructure signals, not proof of physical device identity, military ownership, people, exact location, or operational purpose.'}
+          families={'network_management_snmp':'port:161','network_management_mikrotik_winbox':'port:8291','network_management_mikrotik_api':'port:8728','video_streaming_rtsp':'port:554','industrial_modbus':'port:502','industrial_s7':'port:102','industrial_bacnet':'port:47808','industrial_ethernet_ip':'port:44818','industrial_dnp3':'port:20000','iot_mqtt':'port:1883','realtime_nat_traversal_stun':'port:3478'}
+          def get(url, params):
+              r=requests.get(url,params=params,timeout=60); r.raise_for_status(); return r.json()
+          def api_info(): return get('https://api.shodan.io/api-info',{'key':key}).get('query_credits')
           def count(query, facets=None):
               p={'key':key,'query':query}
               if facets: p['facets']=facets
-              return get('/shodan/host/count',p)
-          families={
-            'network_management_snmp':'port:161','network_management_mikrotik_winbox':'port:8291','network_management_mikrotik_api':'port:8728',
-            'video_streaming_rtsp':'port:554','industrial_modbus':'port:502','industrial_s7':'port:102','industrial_bacnet':'port:47808',
-            'industrial_ethernet_ip':'port:44818','industrial_dnp3':'port:20000','iot_mqtt':'port:1883','realtime_nat_traversal_stun':'port:3478'
-          }
+              return get('https://api.shodan.io/shodan/host/count',p)
           def profile(asn):
-              q='asn:'+asn.upper().replace('AS','AS')
+              q='asn:'+asn
               b=count(q,'port:100,product:50,os:50,org:20')
               rec={'total':b.get('total'),'facets':b.get('facets') or {},'service_family_counts':{}}
               for name,flt in families.items():
                   try: rec['service_family_counts'][name]=int(count(q+' '+flt).get('total') or 0)
                   except Exception as e: rec['service_family_counts'][name]={'status':'ERROR','error_class':type(e).__name__}
               return rec
-
+          def trend(asn):
+              r=requests.get('https://trends.shodan.io/api/v1/search',params={'key':key,'query':'asn:'+asn},timeout=90)
+              if r.status_code!=200: return {'status':'UNAVAILABLE','http_status':r.status_code}
+              j=r.json(); monthly=[]
+              for m in j.get('matches',[]):
+                  if isinstance(m.get('month'),str) and isinstance(m.get('count'),(int,float)): monthly.append({'month':m['month'],'count':int(m['count'])})
+              monthly.sort(key=lambda x:x['month'])
+              return {'status':'VERIFIED_AGGREGATE','monthly':monthly[-24:]}
           if not key: out['status']='NO_SECRET'
           else:
               try:
                   out['credits_before']=api_info()
-                  p=profile('AS202279'); out['base_total']=p['total']; out['facets']=p['facets']; out['service_family_counts']=p['service_family_counts']
-                  q='org:"'+primary_org+'"'
-                  j=count(q,'asn:50')
-                  af=(j.get('facets') or {}).get('asn',[])
+                  q='org:"'+primary_org+'"'; j=count(q,'asn:50'); af=(j.get('facets') or {}).get('asn',[])
                   out['related_asns_by_org']['primary_operator']={'total_indexed_services':j.get('total'),'asn_facets':af}
+                  asns=[]
                   for row in af:
-                      asn=str(row.get('value','')).upper()
-                      if asn and asn!='AS202279':
-                          try: out['related_primary_asn_profiles'][asn]=profile(asn)
-                          except Exception as e: out['related_primary_asn_profiles'][asn]={'status':'ERROR','error_class':type(e).__name__}
+                      a=str(row.get('value','')).upper()
+                      if a and a not in asns: asns.append(a)
+                  for a in asns:
+                      out['profiles'][a]=profile(a)
+                      out['trends'][a]=trend(a)
                   out['credits_after']=api_info()
                   if isinstance(out['credits_before'],int) and isinstance(out['credits_after'],int): out['credits_delta']=out['credits_before']-out['credits_after']
                   out['status']='VERIFIED_AGGREGATE'
