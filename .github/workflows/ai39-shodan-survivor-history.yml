@@ -1,0 +1,184 @@
+name: AI39 Shodan survivor + routing history
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  analyze:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      SHODAN_API_KEY: ${{ secrets.SHODAN_API_KEY }}
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install --disable-pip-version-check requests
+      - name: Aggregate survivor classes and routing history
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          python - <<'PY'
+          import json, os, datetime, requests
+
+          KEY=os.environ.get('SHODAN_API_KEY','').strip()
+          ASN='AS202279'
+          OUT={
+            'generated_utc': datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            'scope': 'Aggregate passive infrastructure characterization only; no hosts, IPs, banners, vulnerabilities, screenshots, credentials, exact locations or prefix identities retained.',
+            'asn': ASN,
+            'shodan': {'status':'UNKNOWN','credits_before':None,'credits_after':None,'credits_delta':None},
+            'ripe': {'status':'UNKNOWN'},
+            'interpretation_limit': 'Indexed services and BGP visibility are infrastructure signals. They do not prove people, military use, ownership, operational control or physical location.'
+          }
+
+          def get_json(url, params=None, timeout=60):
+              r=requests.get(url, params=params or {}, timeout=timeout, headers={'User-Agent':'AI39-aggregate-passive-research/1.0'})
+              r.raise_for_status()
+              return r.json()
+
+          def api_info():
+              if not KEY: return None
+              j=get_json('https://api.shodan.io/api-info', {'key':KEY}, 30)
+              return j.get('query_credits')
+
+          # ---- Shodan aggregate current composition + historical service-family trends ----
+          if not KEY:
+              OUT['shodan']['status']='NO_SECRET'
+          else:
+              try:
+                  OUT['shodan']['credits_before']=api_info()
+                  count=get_json('https://api.shodan.io/shodan/host/count', {
+                    'key':KEY,
+                    'query':f'asn:{ASN}',
+                    'facets':'port:25,product:25,device:25,os:25,org:10'
+                  }, 60)
+                  OUT['shodan']['current_total']=count.get('total')
+                  safe_facets={}
+                  for facet in ('port','product','device','os','org'):
+                      rows=[]
+                      for row in (count.get('facets') or {}).get(facet,[])[:25]:
+                          v=row.get('value'); c=row.get('count')
+                          if isinstance(v,(str,int,float)) and isinstance(c,(int,float)):
+                              rows.append({'value':str(v), 'count':int(c)})
+                      safe_facets[facet]=rows
+                  OUT['shodan']['facets']=safe_facets
+
+                  # Coarse service-family census derived only from aggregate port counts.
+                  pcounts={int(x['value']):x['count'] for x in safe_facets.get('port',[]) if str(x['value']).isdigit()}
+                  families={
+                    'web_frontend': [80,443,4443],
+                    'dns': [53],
+                    'mail': [25,465,587],
+                    'network_management': [161],
+                    'realtime_comms_traversal': [3478],
+                    'custom_application_ports': [5003,8075,8091]
+                  }
+                  OUT['shodan']['current_service_families']={k:sum(pcounts.get(p,0) for p in ps) for k,ps in families.items()}
+
+                  trend_queries={
+                    'all_indexed':f'asn:{ASN}',
+                    'dns':f'asn:{ASN} port:53',
+                    'web_tls':f'asn:{ASN} port:443',
+                    'web_plain':f'asn:{ASN} port:80',
+                    'network_management':f'asn:{ASN} port:161',
+                    'realtime_comms_traversal':f'asn:{ASN} port:3478',
+                    'mail':f'asn:{ASN} port:25'
+                  }
+                  trends={}
+                  for label,q in trend_queries.items():
+                      rec={'status':'UNKNOWN','monthly':[]}
+                      try:
+                          r=requests.get('https://trends.shodan.io/api/v1/search', params={'key':KEY,'query':q}, timeout=90)
+                          rec['http_status']=r.status_code
+                          if r.status_code==200:
+                              tj=r.json()
+                              rows=[]
+                              for m in tj.get('matches',[]):
+                                  month=m.get('month'); n=m.get('count')
+                                  if isinstance(month,str) and isinstance(n,(int,float)) and month>='2026-01':
+                                      rows.append({'month':month,'count':int(n)})
+                              rows.sort(key=lambda x:x['month'])
+                              rec['monthly']=rows
+                              rec['status']='MEASURED'
+                          else:
+                              rec['status']='UNAVAILABLE'
+                      except Exception as e:
+                          rec['status']='ERROR'
+                          rec['error_class']=type(e).__name__
+                      trends[label]=rec
+                  OUT['shodan']['trends_2026']=trends
+                  OUT['shodan']['credits_after']=api_info()
+                  if isinstance(OUT['shodan']['credits_before'],int) and isinstance(OUT['shodan']['credits_after'],int):
+                      OUT['shodan']['credits_delta']=OUT['shodan']['credits_before']-OUT['shodan']['credits_after']
+                  OUT['shodan']['status']='MEASURED'
+              except Exception as e:
+                  OUT['shodan']['status']='ERROR'
+                  OUT['shodan']['error_class']=type(e).__name__
+
+          # ---- RIPE Stat routing history; retain only monthly active-prefix counts, never prefix identities ----
+          try:
+              rj=get_json('https://stat.ripe.net/data/routing-history/data.json', {
+                'resource':ASN,
+                'starttime':'2026-01-01T00:00:00',
+                'endtime':'2026-08-23T00:00:00',
+                'min_peers':5
+              }, 90)
+              data=rj.get('data') or {}
+              timelines=[]
+              for origin in data.get('by_origin') or []:
+                  for pref in origin.get('prefixes') or []:
+                      tls=[]
+                      for tl in pref.get('timelines') or []:
+                          s=tl.get('starttime'); e=tl.get('endtime')
+                          if isinstance(s,str) and isinstance(e,str): tls.append((s,e))
+                      if tls: timelines.append(tls)
+              months=['2026-01-15','2026-02-15','2026-03-15','2026-04-15','2026-05-15','2026-06-15','2026-07-15','2026-08-15']
+              monthly=[]
+              for day in months:
+                  t=datetime.datetime.fromisoformat(day+'T12:00:00+00:00')
+                  n=0
+                  for tls in timelines:
+                      active=False
+                      for s,e in tls:
+                          try:
+                              sd=datetime.datetime.fromisoformat(s.replace('Z','+00:00'))
+                              ed=datetime.datetime.fromisoformat(e.replace('Z','+00:00'))
+                              if sd <= t <= ed:
+                                  active=True; break
+                          except Exception:
+                              pass
+                      if active: n+=1
+                  monthly.append({'month':day[:7], 'active_prefix_count':n})
+              OUT['ripe']['status']='MEASURED'
+              OUT['ripe']['monthly_active_prefix_count']=monthly
+              OUT['ripe']['prefix_records_with_timeline']=len(timelines)
+          except Exception as e:
+              OUT['ripe']['status']='ERROR'
+              OUT['ripe']['error_class']=type(e).__name__
+
+          # Compare infrastructure exposure and routing persistence only at scalar level.
+          base_tr=(OUT.get('shodan',{}).get('trends_2026',{}).get('all_indexed',{}).get('monthly') or [])
+          if len(base_tr)>=2:
+              first=base_tr[0]['count']; last=base_tr[-1]['count']
+              OUT['shodan']['first_to_latest_pct']=round((last-first)/max(first,1)*100,2)
+          rc=OUT.get('ripe',{}).get('monthly_active_prefix_count') or []
+          if rc:
+              vals=[x['active_prefix_count'] for x in rc]
+              OUT['ripe']['monthly_prefix_count_range']=[min(vals),max(vals)]
+
+          with open('out/aggregate_survivor_history.json','w') as f:
+              json.dump(OUT,f,indent=2)
+          print(json.dumps(OUT,indent=2))
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ai39-shodan-survivor-history
+          path: out/aggregate_survivor_history.json
+          if-no-files-found: error
+          retention-days: 2
