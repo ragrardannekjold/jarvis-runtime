@@ -1,0 +1,239 @@
+name: AI39 Shodan full passive telecom cluster
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  shodan-passive:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    env:
+      SHODAN_API_KEY: ${{ secrets.SHODAN_API_KEY }}
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install --disable-pip-version-check requests
+      - name: Passive multi-ASN Shodan collection and aggregation
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          python - <<'PY'
+          import collections, datetime as dt, json, os, re
+          import requests
+
+          KEY=os.environ.get('SHODAN_API_KEY','').strip()
+          BASE='https://api.shodan.io'
+          TRENDS='https://trends.shodan.io/api/v1/search'
+          # Structural telecom cluster relevant to occupied Donetsk-region connectivity.
+          ANCHORS=[
+              {'asn':'AS202279','role':'KOMTEL_DPR_anchor','priority':1},
+              {'asn':'AS206810','role':'UGLETELECOM_primary','priority':1},
+              {'asn':'AS39089','role':'UGLETELECOM_secondary','priority':1},
+              {'asn':'AS201776','role':'MIRANDA_upstream_peer','priority':2},
+              {'asn':'AS35273','role':'CITYLINE_downstream_control','priority':2},
+          ]
+          FACETS='port:20,org:10,product:20,os:10,country:10,city:15'
+
+          out={
+            'generated_utc':dt.datetime.now(dt.timezone.utc).isoformat(),
+            'status':'UNKNOWN',
+            'scope':'passive Shodan multi-ASN aggregate + one current metadata page per selected ASN',
+            'anchors':[],
+            'cross_anchor':{},
+            'credits_before':None,
+            'credits_after':None,
+            'credits_delta':None,
+            'safety':'Passive Shodan only. No scans. No IPs, hostnames, domains, raw banners, vulnerabilities, screenshots, exact coordinates or reversible host identifiers retained.',
+            'interpretation_limit':'Shodan exposure reflects crawler/indexing and service visibility, not physical presence, personnel or operational control. All anomalies require independent corroboration.'
+          }
+
+          def get(url, **params):
+              params['key']=KEY
+              r=requests.get(url, params=params, timeout=90)
+              r.raise_for_status()
+              return r.json()
+
+          def api_info():
+              return get(BASE+'/api-info')
+
+          def facet_rows(obj):
+              res={}
+              for name, rows in (obj.get('facets') or {}).items():
+                  clean=[]
+                  for x in rows[:20]:
+                      value=x.get('value')
+                      count=x.get('count')
+                      if isinstance(value,(str,int,float)) and isinstance(count,int):
+                          clean.append({'value':str(value)[:120], 'count':count})
+                  res[name]=clean
+              return res
+
+          def age_bucket(ts):
+              if not isinstance(ts,str): return 'unknown'
+              try:
+                  t=dt.datetime.fromisoformat(ts.replace('Z','+00:00'))
+                  days=(dt.datetime.now(dt.timezone.utc)-t).total_seconds()/86400
+              except Exception:
+                  return 'unknown'
+              if days < 2: return '<2d'
+              if days < 7: return '2-7d'
+              if days < 30: return '7-30d'
+              if days < 90: return '30-90d'
+              return '90d+'
+
+          def safe_cn(name):
+              # Issuer names are retained only as coarse CA identity, never cert subject/domain.
+              if not isinstance(name,str): return None
+              m=re.search(r'(?:CN=|commonName=)([^,/]+)', name, flags=re.I)
+              v=(m.group(1) if m else name).strip()
+              return v[:100] if v else None
+
+          if not KEY:
+              out['status']='NO_SECRET'
+          else:
+              try:
+                  info=api_info()
+                  credits=info.get('query_credits')
+                  out['credits_before']=credits if isinstance(credits,int) else None
+                  # Cap paid current-search pages to the available anchors; count + facets + trends remain first-class.
+                  budget=min(len(ANCHORS), credits if isinstance(credits,int) else len(ANCHORS))
+                  paid_used=0
+                  shared_cert_sets=[]
+                  shared_stack_sets=[]
+
+                  for a in sorted(ANCHORS,key=lambda x:(x['priority'],x['asn'])):
+                      q=f"asn:{a['asn']}"
+                      rec={'asn':a['asn'],'role':a['role'],'priority':a['priority'],'status':'PARTIAL','current_total':None,'facets':{},'trend':{},'search_sample':None}
+                      try:
+                          cnt=get(BASE+'/shodan/host/count', query=q, facets=FACETS)
+                          rec['current_total']=cnt.get('total')
+                          rec['facets']=facet_rows(cnt)
+                      except Exception as e:
+                          rec['count_error']=type(e).__name__
+
+                      try:
+                          tr=requests.get(TRENDS,params={'key':KEY,'query':q},timeout=90)
+                          rec['trend_http_status']=tr.status_code
+                          if tr.status_code==200:
+                              tj=tr.json(); months=[]
+                              for m in tj.get('matches',[]):
+                                  month=m.get('month'); count=m.get('count')
+                                  if isinstance(month,str) and isinstance(count,(int,float)):
+                                      months.append({'month':month,'count':int(count)})
+                              months.sort(key=lambda x:x['month'])
+                              rec['trend']={'total':tj.get('total'),'monthly':months[-24:]}
+                      except Exception as e:
+                          rec['trend_error']=type(e).__name__
+
+                      # One current metadata page for each anchor while credits permit.
+                      if paid_used < budget and isinstance(rec.get('current_total'),int) and rec['current_total']>0:
+                          try:
+                              sj=get(BASE+'/shodan/host/search', query=q, page=1)
+                              paid_used += 1
+                              matches=(sj.get('matches') or [])[:100]
+                              ports=collections.Counter(); products=collections.Counter(); stacks=collections.Counter()
+                              modules=collections.Counter(); transports=collections.Counter(); ages=collections.Counter()
+                              http_servers=collections.Counter(); ssl_issuers=collections.Counter()
+                              certfps=set(); stackset=set(); with_ssl=with_http=with_hostnames=with_domains=0
+                              for m in matches:
+                                  p=m.get('port'); prod=m.get('product'); ver=m.get('version')
+                                  if isinstance(p,int): ports[str(p)] += 1
+                                  if isinstance(prod,str) and prod: products[prod[:80]] += 1
+                                  stack='|'.join([str(p) if p is not None else '', str(prod or '')[:60], str(ver or '')[:40]])
+                                  if stack.strip('|'): stacks[stack] += 1; stackset.add(stack)
+                                  mod=((m.get('_shodan') or {}).get('module'))
+                                  if isinstance(mod,str): modules[mod[:80]] += 1
+                                  trn=m.get('transport')
+                                  if isinstance(trn,str): transports[trn[:20]] += 1
+                                  ages[age_bucket(m.get('timestamp') or m.get('last_update'))] += 1
+                                  if m.get('hostnames'): with_hostnames += 1
+                                  if m.get('domains'): with_domains += 1
+                                  http=m.get('http') or {}
+                                  if http:
+                                      with_http += 1
+                                      server=http.get('server')
+                                      if isinstance(server,str) and server: http_servers[server[:100]] += 1
+                                  ssl=m.get('ssl') or {}
+                                  if ssl:
+                                      with_ssl += 1
+                                      cert=(ssl.get('cert') or {})
+                                      fp=(cert.get('fingerprint') or {}).get('sha256')
+                                      if isinstance(fp,str) and fp: certfps.add(fp)
+                                      issuer=cert.get('issuer')
+                                      if isinstance(issuer,dict):
+                                          cn=issuer.get('CN') or issuer.get('commonName')
+                                      else:
+                                          cn=safe_cn(str(issuer)) if issuer else None
+                                      if isinstance(cn,str) and cn: ssl_issuers[cn[:100]] += 1
+                              rec['search_sample']={
+                                'returned_matches':len(matches),
+                                'distinct_observed_ips':len({m.get('ip_str') for m in matches if m.get('ip_str')}),
+                                'top_ports':ports.most_common(20),
+                                'top_products':products.most_common(20),
+                                'top_product_version_stacks':stacks.most_common(20),
+                                'top_modules':modules.most_common(15),
+                                'transports':transports.most_common(10),
+                                'freshness_histogram':dict(ages),
+                                'http_present':with_http,
+                                'ssl_present':with_ssl,
+                                'hostnames_present':with_hostnames,
+                                'domains_present':with_domains,
+                                'top_http_servers':http_servers.most_common(15),
+                                'top_ssl_issuers':ssl_issuers.most_common(15),
+                                'distinct_ssl_certificate_count':len(certfps),
+                                'raw_identifiers_retained':False
+                              }
+                              shared_cert_sets.append((a['asn'],certfps))
+                              shared_stack_sets.append((a['asn'],stackset))
+                              rec['status']='VERIFIED_PASSIVE_SAMPLE'
+                          except Exception as e:
+                              rec['search_error']=type(e).__name__
+                      out['anchors'].append(rec)
+
+                  cert_overlaps=[]; stack_overlaps=[]
+                  for i in range(len(shared_cert_sets)):
+                      for j in range(i+1,len(shared_cert_sets)):
+                          a,sa=shared_cert_sets[i]; b,sb=shared_cert_sets[j]
+                          n=len(sa & sb)
+                          if n: cert_overlaps.append({'asn_pair':[a,b],'shared_certificate_count':n})
+                  for i in range(len(shared_stack_sets)):
+                      for j in range(i+1,len(shared_stack_sets)):
+                          a,sa=shared_stack_sets[i]; b,sb=shared_stack_sets[j]
+                          n=len(sa & sb)
+                          if n: stack_overlaps.append({'asn_pair':[a,b],'shared_product_version_stack_count':n})
+                  out['cross_anchor']={
+                    'shared_certificate_overlap':cert_overlaps,
+                    'shared_product_version_stack_overlap':stack_overlaps,
+                    'paid_search_pages_used':paid_used,
+                    'note':'Overlap counts are retained, but certificate fingerprints and host identifiers are discarded.'
+                  }
+                  info2=api_info(); credits2=info2.get('query_credits')
+                  out['credits_after']=credits2 if isinstance(credits2,int) else None
+                  if isinstance(out['credits_before'],int) and isinstance(out['credits_after'],int):
+                      out['credits_delta']=out['credits_before']-out['credits_after']
+                  out['status']='VERIFIED_PASSIVE_CLUSTER'
+              except Exception as e:
+                  out['status']='ERROR'
+                  out['error_class']=type(e).__name__
+
+          with open('out/shodan_cluster.json','w') as f:
+              json.dump(out,f,indent=2,ensure_ascii=False)
+          print(json.dumps({
+            'status':out['status'],
+            'anchors':[{'asn':x['asn'],'role':x['role'],'status':x['status'],'current_total':x.get('current_total')} for x in out['anchors']],
+            'cross_anchor':out.get('cross_anchor',{}),
+            'credits_delta':out.get('credits_delta')
+          },indent=2))
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ai39-shodan-full-passive
+          path: out/shodan_cluster.json
+          if-no-files-found: error
+          retention-days: 2
