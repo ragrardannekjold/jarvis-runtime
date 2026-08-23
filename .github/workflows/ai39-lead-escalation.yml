@@ -1,4 +1,4 @@
-name: AI39 fresh SAR pair retry
+name: AI39 fresh Sentinel-1 RTC pair
 
 on:
   pull_request:
@@ -8,120 +8,126 @@ permissions:
   contents: read
 
 jobs:
-  sar_pair:
+  rtc_pair:
     runs-on: ubuntu-latest
-    timeout-minutes: 12
-    env:
-      AWS_NO_SIGN_REQUEST: "YES"
+    timeout-minutes: 18
     steps:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - run: python -m pip install --disable-pip-version-check requests rasterio numpy
-      - name: Broad-sector change screen for 16 to 22 Aug pair
+      - run: python -m pip install --disable-pip-version-check pystac-client planetary-computer rasterio numpy
+      - name: Broad-sector RTC change for newest valid 6d pair
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p out/sar_pair
+          mkdir -p out
           python - <<'PY'
           import json
+          from collections import defaultdict
           from datetime import datetime, timezone
-          import requests, numpy as np, rasterio
-          from rasterio.windows import from_bounds
-          from rasterio.warp import transform_bounds
+          import numpy as np, rasterio
+          from rasterio.vrt import WarpedVRT
           from rasterio.enums import Resampling
-          from rasterio.env import Env
-          from rasterio.crs import CRS
+          from rasterio.transform import from_bounds
+          import planetary_computer
+          from pystac_client import Client
 
-          API='https://earth-search.aws.element84.com/v1/search'
           BBOX=[37.65,48.45,38.25,48.90]
-          IDS=[
-            'S1C_IW_GRDH_1SDV_20260816T034638_20260816T034703_009015_011E59',
-            'S1D_IW_GRDH_1SDV_20260822T034651_20260822T034716_004233_007C63'
-          ]
+          W,H=1000,800
+          cat=Client.open('https://planetarycomputer.microsoft.com/api/stac/v1',modifier=planetary_computer.sign_inplace)
+          items=list(cat.search(collections=['sentinel-1-rtc'],bbox=BBOX,datetime='2026-08-14/2026-08-23',max_items=300).items())
 
-          def get_item(item_id):
-              r=requests.post(API,json={'collections':['sentinel-1-grd'],'ids':[item_id],'limit':1},timeout=90)
-              r.raise_for_status()
-              fs=r.json().get('features',[])
-              if not fs: raise RuntimeError('item_not_found')
-              return fs[0]
+          bygeom=defaultdict(lambda: defaultdict(list))
+          for it in items:
+              p=it.properties
+              rel=p.get('sat:relative_orbit'); state=p.get('sat:orbit_state')
+              dt=it.datetime
+              date=dt.date().isoformat() if dt else (p.get('datetime') or '')[:10]
+              if rel is None or not state or not date or 'vv' not in it.assets or 'vh' not in it.assets:
+                  continue
+              bygeom[(int(rel),state)][date].append(it)
 
-          items=[get_item(x) for x in IDS]
-          def vv_href(f):
-              a=f.get('assets') or {}
-              for k in ('vv','VV'):
-                  if k in a and a[k].get('href'): return a[k]['href']
-              for k,v in a.items():
-                  if 'vv' in k.lower() and isinstance(v,dict) and v.get('href'): return v['href']
-              raise RuntimeError('vv_asset_missing')
+          candidates=[]
+          for geom, dates in bygeom.items():
+              ds=sorted(dates)
+              for i,a in enumerate(ds):
+                  for b in ds[i+1:]:
+                      sep=(datetime.fromisoformat(b)-datetime.fromisoformat(a)).days
+                      if 5 <= sep <= 7 and b >= '2026-08-20':
+                          candidates.append((b, -abs(sep-6), geom, a, b, dates[a], dates[b]))
+          if not candidates:
+              out={'status':'NO_VALID_6D_RTC_PAIR','item_count':len(items),'available_geometries':{f'{k[0]}_{k[1]}':sorted(v) for k,v in bygeom.items()}}
+              json.dump(out,open('out/analysis.json','w'),indent=2); print(json.dumps(out)); raise SystemExit(0)
 
-          def item_crs(f, ds):
-              if ds.crs: return ds.crs
-              p=f.get('properties') or {}
-              code=p.get('proj:code')
-              epsg=p.get('proj:epsg')
-              if code: return CRS.from_user_input(code)
-              if epsg: return CRS.from_epsg(int(epsg))
-              # Broad AOI is in UTM zone 37N; this is a metadata fallback only.
-              return CRS.from_epsg(32637)
+          candidates.sort(key=lambda x:(x[0],x[1]),reverse=True)
+          _,_,geom,date_a,date_b,ia,ib=candidates[0]
+          transform=from_bounds(*BBOX,W,H)
 
-          hrefs=[vv_href(x) for x in items]
-          arrays=[]
-          shape=(800,1000)
-          with Env(AWS_NO_SIGN_REQUEST='YES'):
-              for f,href in zip(items,hrefs):
-                  with rasterio.open(href) as ds:
-                      src_crs=item_crs(f,ds)
-                      b=transform_bounds('EPSG:4326',src_crs,*BBOX,densify_pts=21)
-                      win=from_bounds(*b,transform=ds.transform)
-                      arr=ds.read(1,window=win,out_shape=shape,resampling=Resampling.bilinear,boundless=True,fill_value=np.nan).astype('float32')
-                      if ds.nodata is not None: arr[arr==ds.nodata]=np.nan
-                      arr[arr<=0]=np.nan
-                      arrays.append(10*np.log10(arr))
+          def mosaic(its,key):
+              dst=np.full((H,W),np.nan,np.float32); ids=[]; platforms=[]
+              for it in its:
+                  ids.append(it.id); platforms.append(str(it.properties.get('platform') or ''))
+                  with rasterio.open(it.assets[key].href) as ds:
+                      with WarpedVRT(ds,crs='EPSG:4326',transform=transform,width=W,height=H,resampling=Resampling.bilinear,nodata=np.nan) as vrt:
+                          a=vrt.read(1).astype(np.float32)
+                  m=np.isfinite(a)&(a!=0)
+                  both=m&np.isfinite(dst); dst[both]=(dst[both]+a[both])/2
+                  only=m&~np.isfinite(dst); dst[only]=a[only]
+              return dst,sorted(ids),sorted(set(platforms))
 
-          old,new=arrays
-          diff=new-old
-          rows=[]
-          h,w=diff.shape
-          for r in range(4):
-              for c in range(4):
-                  y0,y1=round(r*h/4),round((r+1)*h/4)
-                  x0,x1=round(c*w/4),round((c+1)*w/4)
-                  vals=diff[y0:y1,x0:x1]
-                  vals=vals[np.isfinite(vals)]
-                  code=f'{chr(65+r)}{c+1}'
-                  if vals.size<100:
-                      rows.append({'sector':code,'valid_px':int(vals.size),'status':'INSUFFICIENT_DATA'})
-                      continue
-                  rows.append({
-                      'sector':code,
-                      'valid_px':int(vals.size),
-                      'median_db_change':round(float(np.median(vals)),3),
-                      'median_abs_db_change':round(float(np.median(np.abs(vals))),3),
-                      'pct_abs_ge_3db':round(float(np.mean(np.abs(vals)>=3)*100),3),
-                      'pct_pos_ge_3db':round(float(np.mean(vals>=3)*100),3),
-                      'pct_neg_le_m3db':round(float(np.mean(vals<=-3)*100),3),
-                      'status':'SCREENED'
-                  })
-          ranked=sorted([x for x in rows if x.get('status')=='SCREENED'],key=lambda x:x['pct_abs_ge_3db'],reverse=True)
+          va,ids_a,platforms_a=mosaic(ia,'vv'); ha,_,_=mosaic(ia,'vh')
+          vb,ids_b,platforms_b=mosaic(ib,'vv'); hb,_,_=mosaic(ib,'vh')
+          valid=np.isfinite(va)&np.isfinite(ha)&np.isfinite(vb)&np.isfinite(hb)&(va!=0)&(ha!=0)&(vb!=0)&(hb!=0)
+          if valid.mean()<0.35:
+              out={'status':'INSUFFICIENT_RTC_OVERLAP','pair':[date_a,date_b],'geometry':{'relative_orbit':geom[0],'orbit_state':geom[1]},'valid_percent':round(float(valid.mean()*100),2),'platforms_a':platforms_a,'platforms_b':platforms_b}
+              json.dump(out,open('out/analysis.json','w'),indent=2); print(json.dumps(out)); raise SystemExit(0)
+
+          def to_db(x):
+              med=float(np.nanmedian(x[valid]))
+              return x.copy() if med<0 else 10*np.log10(np.maximum(x,1e-12))
+          vv_a,vv_b,vh_a,vh_b=map(to_db,[va,vb,ha,hb])
+          dvv=vv_b-vv_a; dvh=vh_b-vh_a
+          ratio_delta=(vv_b-vh_b)-(vv_a-vh_a)
+          mag=np.sqrt((dvv*dvv+dvh*dvh)/2)
+
+          cells=[]
+          for rr in range(4):
+              for cc in range(4):
+                  ys=slice(rr*H//4,(rr+1)*H//4); xs=slice(cc*W//4,(cc+1)*W//4)
+                  m=valid[ys,xs]
+                  rec={'sector':f'{chr(65+rr)}{cc+1}','valid_percent':round(float(m.mean()*100),2)}
+                  if m.sum()>200:
+                      z=mag[ys,xs][m]; r=ratio_delta[ys,xs][m]
+                      rec.update({
+                          'median_change_mag_db':round(float(np.median(z)),3),
+                          'p90_change_mag_db':round(float(np.percentile(z,90)),3),
+                          'pct_change_mag_ge_3db':round(float((z>=3).mean()*100),3),
+                          'median_abs_ratio_change_db':round(float(np.median(np.abs(r))),3)
+                      })
+                  cells.append(rec)
+          scored=[c for c in cells if 'p90_change_mag_db' in c]
+          scored.sort(key=lambda c:(c['pct_change_mag_ge_3db'],c['p90_change_mag_db']),reverse=True)
+          for i,c in enumerate(scored,1): c['relative_rank']=i
+
           out={
-             'generated_utc':datetime.now(timezone.utc).isoformat(),
-             'scope':'broad 4x4 sector screen only; same relative orbit 167 descending pair; no target-level localization',
-             'older_acquisition_utc':(items[0].get('properties') or {}).get('datetime'),
-             'newer_acquisition_utc':(items[1].get('properties') or {}).get('datetime'),
-             'days_apart':6,
-             'sector_metrics':rows,
-             'top4_by_abs3db_fraction':ranked[:4],
-             'interpretation_limit':'GRD broad-sector screen is a lead generator. Backscatter change can reflect moisture, vegetation, agriculture, geometry, damage or other surface change; human/equipment attribution requires independent corroboration.',
-             'safety':'No exact coordinates, positions, routes, trench lines or sensor locations.'
+              'status':'VERIFIED_RTC_PAIR',
+              'generated_utc':datetime.now(timezone.utc).isoformat(),
+              'pair':[date_a,date_b],
+              'geometry':{'relative_orbit':geom[0],'orbit_state':geom[1]},
+              'platforms_a':platforms_a,
+              'platforms_b':platforms_b,
+              'valid_overlap_percent':round(float(valid.mean()*100),2),
+              'cells_4x4':cells,
+              'top4':[dict(c) for c in scored[:4]],
+              'interpretation_limit':'RTC backscatter change is physical surface/structure/moisture-sensitive evidence, not causal attribution. Agriculture, vegetation, soil moisture, precipitation, roughness, damage and other surface changes remain competing explanations.',
+              'safety':'Broad 4x4 sector statistics only; no coordinates, routes, exact equipment, trench or sensor locations.'
           }
-          with open('out/sar_pair/pair.json','w') as f: json.dump(out,f,indent=2)
-          print(json.dumps({'older':out['older_acquisition_utc'],'newer':out['newer_acquisition_utc'],'top4':out['top4_by_abs3db_fraction']},indent=2))
+          json.dump(out,open('out/analysis.json','w'),indent=2)
+          print(json.dumps({'status':out['status'],'pair':out['pair'],'geometry':out['geometry'],'platforms_a':platforms_a,'platforms_b':platforms_b,'valid_overlap_percent':out['valid_overlap_percent'],'top4':out['top4']},indent=2))
           PY
       - uses: actions/upload-artifact@v4
         with:
-          name: ai39-sar-16-22-pair
-          path: out/sar_pair/pair.json
+          name: ai39-fresh-s1-rtc-pair
+          path: out/analysis.json
           if-no-files-found: error
           retention-days: 2
