@@ -1,4 +1,4 @@
-name: AI39 bounded VHR SAR archive index
+name: AI39 bounded Capella 2026 VHR SAR AOI search
 
 on:
   pull_request:
@@ -8,64 +8,109 @@ permissions:
   contents: read
 
 jobs:
-  inspect:
+  search:
     runs-on: ubuntu-latest
-    timeout-minutes: 7
+    timeout-minutes: 10
     steps:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
       - run: python -m pip install --disable-pip-version-check requests
-      - name: Inspect bounded public bucket and STAC structure
+      - name: Traverse only 2026 Jul-Aug datetime branch and filter broad AI39 AOI
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p out
           python - <<'PY'
-          import json, requests, xml.etree.ElementTree as ET, urllib.parse, os, datetime
-          OUT={'generated_utc':datetime.datetime.now(datetime.timezone.utc).isoformat(),'scope':'Public Capella/Umbra archive structure discovery only; bounded root/one-level indexes, no imagery download, no exact tactical footprints or target-level interpretation.','providers':{}}
-          H={'User-Agent':'AI39-bounded-open-vhr-index/1.0'}
-          providers={
-            'capella':{
-              'bucket':'https://capella-open-data.s3.us-west-2.amazonaws.com/',
-              'stac':'https://capella-open-data.s3.us-west-2.amazonaws.com/stac/catalog.json'},
-            'umbra':{
-              'bucket':'https://umbra-open-data-catalog.s3.us-west-2.amazonaws.com/',
-              'stac':'https://s3.us-west-2.amazonaws.com/umbra-open-data-catalog/stac/catalog.json'}
-          }
-          def s3_list(base,prefix='',delimiter='/'):
-              r=requests.get(base,params={'list-type':'2','prefix':prefix,'delimiter':delimiter,'max-keys':1000},timeout=45,headers=H)
-              rec={'http_status':r.status_code,'prefix':prefix,'common_prefixes':[],'object_keys':[],'is_truncated':None}
-              if r.status_code!=200:return rec
-              root=ET.fromstring(r.content); ns={'s3':'http://s3.amazonaws.com/doc/2006-03-01/'}
-              rec['common_prefixes']=[x.text for x in root.findall('s3:CommonPrefixes/s3:Prefix',ns) if x.text][:100]
-              rec['object_keys']=[x.text for x in root.findall('s3:Contents/s3:Key',ns) if x.text][:100]
-              tr=root.find('s3:IsTruncated',ns); rec['is_truncated']=(tr.text.lower()=='true') if tr is not None and tr.text else None
-              return rec
-          def stac_links(url):
-              r=requests.get(url,timeout=45,headers=H); rec={'http_status':r.status_code,'links':[]}
-              if r.status_code!=200:return rec
-              try:o=r.json()
-              except:return rec
-              for x in o.get('links',[]) if isinstance(o,dict) else []:
-                  if not isinstance(x,dict):continue
-                  rel=x.get('rel'); href=x.get('href')
-                  if isinstance(rel,str) and isinstance(href,str):
-                      rec['links'].append({'rel':rel,'href_basename':os.path.basename(urllib.parse.urlparse(href).path.rstrip('/')),'href_parent_basename':os.path.basename(os.path.dirname(urllib.parse.urlparse(href).path.rstrip('/')))})
-              rec['links']=rec['links'][:200]
-              return rec
-          for name,p in providers.items():
-              rec={'bucket_root':s3_list(p['bucket']),'stac_root':stac_links(p['stac']),'one_level':{}}
-              # Bounded one-level discovery only for at most 20 root prefixes.
-              for pref in rec['bucket_root'].get('common_prefixes',[])[:20]:
-                  rec['one_level'][pref]=s3_list(p['bucket'],pref)
-              OUT['providers'][name]=rec
-          with open('out/vhr_index.json','w') as f:json.dump(OUT,f,indent=2)
-          print(json.dumps({k:{'root_prefixes':v['bucket_root'].get('common_prefixes'),'root_objects':v['bucket_root'].get('object_keys'),'stac_links':v['stac_root'].get('links')[:30]} for k,v in OUT['providers'].items()},indent=2))
+          import json, requests, urllib.parse, os, re, hashlib, datetime
+          H={'User-Agent':'AI39-bounded-open-vhr-search/1.0'}
+          ROOT='https://capella-open-data.s3.us-west-2.amazonaws.com/stac/capella-open-data-by-datetime/capella-open-data-2026/catalog.json'
+          AOI=[37.65,48.45,38.25,48.90]
+          START=datetime.datetime(2026,7,24,tzinfo=datetime.timezone.utc)
+          END=datetime.datetime(2026,8,23,23,59,59,tzinfo=datetime.timezone.utc)
+          OUT={'generated_utc':datetime.datetime.now(datetime.timezone.utc).isoformat(),'scope':'Bounded public Capella 2026 Jul-Aug STAC search intersecting broad AI-39 AOI; no imagery download, exact footprints, coordinates or target-level output retained.','status':'UNKNOWN','catalogs_fetched':0,'items_fetched':0,'matches':[],'errors':[]}
+          def getj(url):
+              r=requests.get(url,timeout=45,headers=H)
+              if r.status_code!=200:
+                  OUT['errors'].append({'http_status':r.status_code,'url_hash':hashlib.sha256(url.encode()).hexdigest()[:12]}); return None
+              try:return r.json()
+              except Exception:return None
+          def dtparse(p):
+              s=(p or {}).get('datetime') or (p or {}).get('start_datetime') or (p or {}).get('end_datetime')
+              if not isinstance(s,str):return None
+              try:
+                  d=datetime.datetime.fromisoformat(s.replace('Z','+00:00')); return d if d.tzinfo else d.replace(tzinfo=datetime.timezone.utc)
+              except:return None
+          def intersects(b):
+              if not isinstance(b,list) or len(b)<4:return False
+              try:return not (float(b[2])<AOI[0] or float(b[0])>AOI[2] or float(b[3])<AOI[1] or float(b[1])>AOI[3])
+              except:return False
+          def in_jul_aug(text):
+              t=(text or '').lower()
+              return bool(re.search(r'2026[-_/](?:0?7|0?8)(?:\D|$)',t) or 'july' in t or 'august' in t)
+          def process_item(obj,url):
+              OUT['items_fetched']+=1
+              p=obj.get('properties') if isinstance(obj,dict) and isinstance(obj.get('properties'),dict) else {}
+              d=dtparse(p); b=obj.get('bbox') if isinstance(obj,dict) else None
+              if not d or d<START or d>END or not intersects(b):return
+              iid=str(obj.get('id') or url)
+              assets=obj.get('assets') if isinstance(obj.get('assets'),dict) else {}
+              OUT['matches'].append({
+                'item_hash':hashlib.sha256(iid.encode()).hexdigest()[:16],
+                'acquisition_utc':d.astimezone(datetime.timezone.utc).isoformat(),
+                'platform':p.get('platform'),
+                'instrument_mode':p.get('sar:instrument_mode'),
+                'product_type':p.get('sar:product_type'),
+                'resolution_range_m':p.get('sar:resolution_range'),
+                'resolution_azimuth_m':p.get('sar:resolution_azimuth'),
+                'asset_count':len(assets),
+                'has_visual_asset':any(k.lower() in {'preview','thumbnail','browse','visual'} for k in assets)
+              })
+          root=getj(ROOT)
+          if not root:
+              OUT['status']='ROOT_UNAVAILABLE'
+          else:
+              OUT['catalogs_fetched']=1
+              children=[]
+              for l in root.get('links',[]):
+                  if not isinstance(l,dict) or l.get('rel')!='child' or not isinstance(l.get('href'),str):continue
+                  u=urllib.parse.urljoin(ROOT,l['href']); title=str(l.get('title') or '')
+                  if in_jul_aug(u+' '+title):children.append(u)
+              if not children:
+                  # Fail visibly, never fall back to whole-year traversal.
+                  OUT['status']='MONTH_BRANCH_NOT_RESOLVED'
+                  OUT['root_child_labels']=[str((l.get('title') or os.path.basename(urllib.parse.urlparse(str(l.get('href',''))).path)))[:120] for l in root.get('links',[]) if isinstance(l,dict) and l.get('rel')=='child'][:30]
+              else:
+                  q=[(u,1) for u in children]; seen=set(); max_catalogs=450; max_items=2500
+                  while q and OUT['catalogs_fetched']<max_catalogs and OUT['items_fetched']<max_items:
+                      url,depth=q.pop(0)
+                      if url in seen:continue
+                      seen.add(url); obj=getj(url)
+                      if not obj:continue
+                      if obj.get('type')=='Feature' or ('properties' in obj and 'bbox' in obj):
+                          process_item(obj,url); continue
+                      OUT['catalogs_fetched']+=1
+                      for l in obj.get('links',[]) if isinstance(obj,dict) else []:
+                          if not isinstance(l,dict) or not isinstance(l.get('href'),str):continue
+                          rel=l.get('rel'); u=urllib.parse.urljoin(url,l['href'])
+                          if rel=='item':
+                              io=getj(u)
+                              if io:process_item(io,u)
+                              if OUT['items_fetched']>=max_items:break
+                          elif rel=='child' and depth<6:
+                              # Once inside a selected July/August branch, descend only that branch.
+                              if in_jul_aug(u+' '+str(l.get('title') or '')) or in_jul_aug(url): q.append((u,depth+1))
+                  OUT['matches'].sort(key=lambda x:x['acquisition_utc'])
+                  OUT['status']='MATCHES_FOUND' if OUT['matches'] else 'NO_AOI_MATCH_IN_WINDOW'
+                  OUT['match_count']=len(OUT['matches'])
+                  OUT['search_bounds']={'catalog_cap':max_catalogs,'item_cap':max_items,'hit_catalog_cap':OUT['catalogs_fetched']>=max_catalogs,'hit_item_cap':OUT['items_fetched']>=max_items}
+          OUT['interpretation_limit']='A matching open-data acquisition is imagery availability only. A single image can support orientation/lead generation but cannot by itself establish change, people, military use or dangerous intent.'
+          with open('out/capella_aoi_search.json','w') as f:json.dump(OUT,f,indent=2)
+          print(json.dumps({'status':OUT['status'],'catalogs_fetched':OUT['catalogs_fetched'],'items_fetched':OUT['items_fetched'],'match_count':len(OUT['matches']),'matches':OUT['matches'][:20],'errors':OUT['errors'][:5]},indent=2))
           PY
       - uses: actions/upload-artifact@v4
         with:
-          name: ai39-vhr-sar-bounded-index
-          path: out/vhr_index.json
+          name: ai39-capella-2026-aoi-search
+          path: out/capella_aoi_search.json
           if-no-files-found: error
           retention-days: 2
