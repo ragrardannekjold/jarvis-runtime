@@ -1,0 +1,208 @@
+name: AI39 lead escalation
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  shodan_history:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      SHODAN_API_KEY: ${{ secrets.SHODAN_API_KEY }}
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install --disable-pip-version-check requests
+      - name: Aggregate service history and routing context
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p out/shodan_history
+          python - <<'PY'
+          import json, os
+          from datetime import datetime, timezone
+          import requests
+
+          key=os.environ.get('SHODAN_API_KEY','').strip()
+          queries={
+            'snmp_161':'asn:AS202279 port:161',
+            'stun_3478':'asn:AS202279 port:3478',
+            'https_alt_4443':'asn:AS202279 port:4443',
+            'port_5003':'asn:AS202279 port:5003',
+            'port_8075':'asn:AS202279 port:8075',
+            'port_8091':'asn:AS202279 port:8091'
+          }
+          out={
+            'generated_utc':datetime.now(timezone.utc).isoformat(),
+            'status':'UNKNOWN',
+            'service_trends':{},
+            'routing_history':{},
+            'credits_before':None,
+            'credits_after':None,
+            'credits_delta':None,
+            'interpretation_limit':'Aggregate port-history and BGP data only. A port is not proof of device type, price, military use, physical location, or current operator.',
+            'safety':'No hosts, IPs, banners, credentials, CVEs or exact locations retained.'
+          }
+          def api_info():
+              r=requests.get('https://api.shodan.io/api-info',params={'key':key},timeout=30); r.raise_for_status(); return r.json().get('query_credits')
+          try:
+              if key:
+                  out['credits_before']=api_info()
+                  for label,q in queries.items():
+                      rec={'query_class':label,'current_total':None,'monthly':[],'status':'UNKNOWN'}
+                      c=requests.get('https://api.shodan.io/shodan/host/count',params={'key':key,'query':q},timeout=45)
+                      if c.ok: rec['current_total']=c.json().get('total')
+                      t=requests.get('https://trends.shodan.io/api/v1/search',params={'key':key,'query':q},timeout=75)
+                      if t.status_code==200:
+                          j=t.json(); rows=[]
+                          for m in j.get('matches',[]):
+                              month=m.get('month'); count=m.get('count')
+                              if isinstance(month,str) and isinstance(count,(int,float)):
+                                  rows.append({'month':month,'count':int(count)})
+                          rows.sort(key=lambda x:x['month'])
+                          rec['monthly']=rows[-24:]; rec['status']='VERIFIED_AGGREGATE'
+                      else:
+                          rec['status']='TRENDS_UNAVAILABLE'; rec['trends_http_status']=t.status_code
+                      out['service_trends'][label]=rec
+                  out['credits_after']=api_info()
+                  if isinstance(out['credits_before'],int) and isinstance(out['credits_after'],int): out['credits_delta']=out['credits_before']-out['credits_after']
+              else:
+                  out['status']='NO_SECRET'
+
+              rr=requests.get('https://stat.ripe.net/data/routing-history/data.json',params={'resource':'AS202279','min_peers':0},timeout=60)
+              rr.raise_for_status(); rj=rr.json().get('data') or {}
+              by_origin=rj.get('by_origin') or []
+              prefixes=set(); intervals=[]
+              for origin in by_origin:
+                  for p in origin.get('prefixes') or []:
+                      pref=p.get('prefix')
+                      if pref: prefixes.add(pref)
+                      for t in p.get('timelines') or []:
+                          if t.get('starttime') and t.get('endtime'):
+                              intervals.append({'starttime':t['starttime'],'endtime':t['endtime']})
+              out['routing_history']={
+                  'prefixes_seen':len(prefixes),
+                  'timeline_intervals':len(intervals),
+                  'earliest_start':min((x['starttime'] for x in intervals),default=None),
+                  'latest_end':max((x['endtime'] for x in intervals),default=None),
+                  'status':'VERIFIED_AGGREGATE'
+              }
+              if out['status']=='UNKNOWN': out['status']='VERIFIED_AGGREGATE'
+          except Exception as e:
+              out['status']='ERROR'; out['error_class']=type(e).__name__
+
+          with open('out/shodan_history/history.json','w') as f: json.dump(out,f,indent=2)
+          print(json.dumps({'status':out['status'],'credits_delta':out['credits_delta'],'service_summary':{k:{'current_total':v.get('current_total'),'status':v.get('status')} for k,v in out['service_trends'].items()},'routing_history':out['routing_history']},indent=2))
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ai39-shodan-service-history
+          path: out/shodan_history/history.json
+          if-no-files-found: error
+          retention-days: 2
+
+  sar_pair:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install --disable-pip-version-check requests rasterio numpy
+      - name: Broad-sector change screen for 16 to 22 Aug pair
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p out/sar_pair
+          python - <<'PY'
+          import json, math
+          from datetime import datetime, timezone
+          import requests, numpy as np, rasterio
+          from rasterio.windows import from_bounds
+          from rasterio.warp import transform_bounds
+          from rasterio.enums import Resampling
+
+          API='https://earth-search.aws.element84.com/v1/search'
+          BBOX=[37.65,48.45,38.25,48.90]
+          IDS=[
+            'S1C_IW_GRDH_1SDV_20260816T034638_20260816T034703_009015_011E59',
+            'S1D_IW_GRDH_1SDV_20260822T034651_20260822T034716_004233_007C63'
+          ]
+
+          def get_item(item_id):
+              r=requests.post(API,json={'collections':['sentinel-1-grd'],'ids':[item_id],'limit':1},timeout=90); r.raise_for_status()
+              fs=r.json().get('features',[])
+              if not fs: raise RuntimeError('item_not_found')
+              return fs[0]
+
+          items=[get_item(x) for x in IDS]
+          def vv_href(f):
+              a=f.get('assets') or {}
+              for k in ('vv','VV'):
+                  if k in a and a[k].get('href'): return a[k]['href']
+              for k,v in a.items():
+                  if 'vv' in k.lower() and isinstance(v,dict) and v.get('href'): return v['href']
+              raise RuntimeError('vv_asset_missing')
+
+          hrefs=[vv_href(x) for x in items]
+          arrays=[]
+          shape=(800,1000)
+          for href in hrefs:
+              with rasterio.open(href) as ds:
+                  b=transform_bounds('EPSG:4326',ds.crs,*BBOX,densify_pts=21)
+                  w=from_bounds(*b,transform=ds.transform)
+                  arr=ds.read(1,window=w,out_shape=shape,resampling=Resampling.bilinear,boundless=True,fill_value=np.nan).astype('float32')
+                  nodata=ds.nodata
+                  if nodata is not None: arr[arr==nodata]=np.nan
+                  arr[arr<=0]=np.nan
+                  arrays.append(10*np.log10(arr))
+
+          old,new=arrays
+          diff=new-old
+          valid=np.isfinite(diff)
+          rows=[]
+          h,w=diff.shape
+          for r in range(4):
+              for c in range(4):
+                  y0,y1=round(r*h/4),round((r+1)*h/4); x0,x1=round(c*w/4),round((c+1)*w/4)
+                  d=diff[y0:y1,x0:x1]; v=np.isfinite(d)
+                  vals=d[v]
+                  code=f'{chr(65+r)}{c+1}'
+                  if vals.size<100:
+                      rows.append({'sector':code,'valid_px':int(vals.size),'status':'INSUFFICIENT_DATA'}); continue
+                  rows.append({
+                      'sector':code,
+                      'valid_px':int(vals.size),
+                      'median_db_change':round(float(np.nanmedian(vals)),3),
+                      'median_abs_db_change':round(float(np.nanmedian(np.abs(vals))),3),
+                      'pct_abs_ge_3db':round(float(np.mean(np.abs(vals)>=3)*100),3),
+                      'pct_pos_ge_3db':round(float(np.mean(vals>=3)*100),3),
+                      'pct_neg_le_m3db':round(float(np.mean(vals<=-3)*100),3),
+                      'status':'SCREENED'
+                  })
+          ranked=sorted([x for x in rows if x.get('status')=='SCREENED'],key=lambda x:x['pct_abs_ge_3db'],reverse=True)
+          out={
+             'generated_utc':datetime.now(timezone.utc).isoformat(),
+             'scope':'broad 4x4 sector screen only; same relative orbit 167 descending pair; no target-level localization',
+             'older':{'id':IDS[0],'acquisition_utc':(items[0].get('properties') or {}).get('datetime')},
+             'newer':{'id':IDS[1],'acquisition_utc':(items[1].get('properties') or {}).get('datetime')},
+             'days_apart':6,
+             'sector_metrics':rows,
+             'top4_by_abs3db_fraction':ranked[:4],
+             'interpretation_limit':'GRD broad-sector screen is a lead generator. Backscatter change can reflect moisture, vegetation, agriculture, geometry, damage or other surface change; human/equipment attribution requires independent corroboration.',
+             'safety':'No exact coordinates, positions, routes, trench lines or sensor locations.'
+          }
+          with open('out/sar_pair/pair.json','w') as f: json.dump(out,f,indent=2)
+          print(json.dumps({'older':out['older'],'newer':out['newer'],'top4':out['top4_by_abs3db_fraction']},indent=2))
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ai39-sar-16-22-pair
+          path: out/sar_pair/pair.json
+          if-no-files-found: error
+          retention-days: 2
