@@ -1,0 +1,71 @@
+name: AI39 bounded VHR SAR archive index
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 7
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install --disable-pip-version-check requests
+      - name: Inspect bounded public bucket and STAC structure
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          python - <<'PY'
+          import json, requests, xml.etree.ElementTree as ET, urllib.parse, os, datetime
+          OUT={'generated_utc':datetime.datetime.now(datetime.timezone.utc).isoformat(),'scope':'Public Capella/Umbra archive structure discovery only; bounded root/one-level indexes, no imagery download, no exact tactical footprints or target-level interpretation.','providers':{}}
+          H={'User-Agent':'AI39-bounded-open-vhr-index/1.0'}
+          providers={
+            'capella':{
+              'bucket':'https://capella-open-data.s3.us-west-2.amazonaws.com/',
+              'stac':'https://capella-open-data.s3.us-west-2.amazonaws.com/stac/catalog.json'},
+            'umbra':{
+              'bucket':'https://umbra-open-data-catalog.s3.us-west-2.amazonaws.com/',
+              'stac':'https://s3.us-west-2.amazonaws.com/umbra-open-data-catalog/stac/catalog.json'}
+          }
+          def s3_list(base,prefix='',delimiter='/'):
+              r=requests.get(base,params={'list-type':'2','prefix':prefix,'delimiter':delimiter,'max-keys':1000},timeout=45,headers=H)
+              rec={'http_status':r.status_code,'prefix':prefix,'common_prefixes':[],'object_keys':[],'is_truncated':None}
+              if r.status_code!=200:return rec
+              root=ET.fromstring(r.content); ns={'s3':'http://s3.amazonaws.com/doc/2006-03-01/'}
+              rec['common_prefixes']=[x.text for x in root.findall('s3:CommonPrefixes/s3:Prefix',ns) if x.text][:100]
+              rec['object_keys']=[x.text for x in root.findall('s3:Contents/s3:Key',ns) if x.text][:100]
+              tr=root.find('s3:IsTruncated',ns); rec['is_truncated']=(tr.text.lower()=='true') if tr is not None and tr.text else None
+              return rec
+          def stac_links(url):
+              r=requests.get(url,timeout=45,headers=H); rec={'http_status':r.status_code,'links':[]}
+              if r.status_code!=200:return rec
+              try:o=r.json()
+              except:return rec
+              for x in o.get('links',[]) if isinstance(o,dict) else []:
+                  if not isinstance(x,dict):continue
+                  rel=x.get('rel'); href=x.get('href')
+                  if isinstance(rel,str) and isinstance(href,str):
+                      rec['links'].append({'rel':rel,'href_basename':os.path.basename(urllib.parse.urlparse(href).path.rstrip('/')),'href_parent_basename':os.path.basename(os.path.dirname(urllib.parse.urlparse(href).path.rstrip('/')))})
+              rec['links']=rec['links'][:200]
+              return rec
+          for name,p in providers.items():
+              rec={'bucket_root':s3_list(p['bucket']),'stac_root':stac_links(p['stac']),'one_level':{}}
+              # Bounded one-level discovery only for at most 20 root prefixes.
+              for pref in rec['bucket_root'].get('common_prefixes',[])[:20]:
+                  rec['one_level'][pref]=s3_list(p['bucket'],pref)
+              OUT['providers'][name]=rec
+          with open('out/vhr_index.json','w') as f:json.dump(OUT,f,indent=2)
+          print(json.dumps({k:{'root_prefixes':v['bucket_root'].get('common_prefixes'),'root_objects':v['bucket_root'].get('object_keys'),'stac_links':v['stac_root'].get('links')[:30]} for k,v in OUT['providers'].items()},indent=2))
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ai39-vhr-sar-bounded-index
+          path: out/vhr_index.json
+          if-no-files-found: error
+          retention-days: 2
