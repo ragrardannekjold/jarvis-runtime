@@ -1,0 +1,77 @@
+name: AI39 Capella Jul-Aug direct
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  capella:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install --disable-pip-version-check requests
+      - name: Traverse only Jul23-Aug23 Capella datetime catalogs
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          python - <<'PY'
+          import json,re,requests
+          from collections import deque
+          from datetime import datetime,timezone,date
+          from urllib.parse import urljoin
+
+          AOI=[37.65,48.45,38.25,48.90]
+          START=date(2026,7,23); END=date(2026,8,23)
+          BASE='https://capella-open-data.s3.us-west-2.amazonaws.com/stac/capella-open-data-by-datetime/capella-open-data-2026/'
+          MONTHS=[BASE+'capella-open-data-2026-07/catalog.json',BASE+'capella-open-data-2026-08/catalog.json']
+          S=requests.Session(); S.headers.update({'User-Agent':'AI39-bounded-capella/1.0'})
+          def intersect(b): return bool(b and len(b)>=4 and not (b[2]<AOI[0] or b[0]>AOI[2] or b[3]<AOI[1] or b[1]>AOI[3]))
+          def parse_dt(v):
+              if not isinstance(v,str): return None
+              try:return datetime.fromisoformat(v.replace('Z','+00:00'))
+              except:return None
+          def day_from_url(u):
+              m=re.search(r'capella-open-data-2026-(07|08)-(\d{2})',u)
+              if not m:return None
+              return date(2026,int(m.group(1)),int(m.group(2)))
+
+          q=deque(MONTHS); seen=set(); matches=[]; docs=0; items=0; errors=[]
+          while q and docs<350:
+              u=q.popleft()
+              if u in seen: continue
+              seen.add(u)
+              d=day_from_url(u)
+              if d and not (START<=d<=END): continue
+              try:
+                  r=S.get(u,timeout=20); r.raise_for_status(); obj=r.json(); docs+=1
+              except Exception as e:
+                  errors.append({'url_tail':u[-120:],'error_class':type(e).__name__}); continue
+              if obj.get('type')=='Feature':
+                  items+=1; p=obj.get('properties') or {}; dt=parse_dt(p.get('datetime') or p.get('start_datetime'))
+                  if dt and START<=dt.date()<=END and intersect(obj.get('bbox')):
+                      assets=obj.get('assets') or {}
+                      matches.append({'id':obj.get('id'),'datetime':dt.isoformat(),'platform':p.get('platform'),'mode':p.get('sar:instrument_mode'),'product_type':p.get('sar:product_type'),'resolution_range':p.get('sar:resolution_range'),'resolution_azimuth':p.get('sar:resolution_azimuth'),'asset_keys':sorted(assets),'has_preview':any(('preview' in k.lower() or 'thumb' in k.lower()) for k in assets)})
+                  continue
+              for l in obj.get('links') or []:
+                  if l.get('rel') not in {'child','item'} or not isinstance(l.get('href'),str): continue
+                  nxt=urljoin(u,l['href']); nd=day_from_url(nxt)
+                  if nd and not (START<=nd<=END): continue
+                  q.append(nxt)
+          out={'generated_utc':datetime.now(timezone.utc).isoformat(),'status':'COMPLETE' if not q else 'DOC_LIMIT','documents_fetched':docs,'items_checked':items,'matches_count':len(matches),'matches':matches,'errors':errors[:30],
+               'interpretation_limit':'Correct bounded public-open-data archive check only. Zero match means no relevant scene in this Capella public open-data branch/window, not no commercial Capella coverage.',
+               'safety':'Broad AOI intersection only; exact footprints are not retained.'}
+          json.dump(out,open('out/capella.json','w'),indent=2); print(json.dumps(out,indent=2)[:50000])
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ai39-capella-julaug-direct
+          path: out/capella.json
+          if-no-files-found: error
+          retention-days: 2
