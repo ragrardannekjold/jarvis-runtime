@@ -16,7 +16,7 @@ jobs:
         with:
           python-version: '3.12'
       - run: python -m pip install --disable-pip-version-check requests numpy rasterio pystac-client planetary-computer
-      - name: Compare same seasonal transition across 2023-2026
+      - name: Sectorwise same-season control 2023-2026
         shell: bash
         run: |
           set -euo pipefail
@@ -31,47 +31,37 @@ jobs:
           from rasterio.transform import from_bounds
           from pystac_client import Client
           import planetary_computer
-
           warnings.filterwarnings('ignore')
-          BBOX=[37.65,48.45,38.25,48.90]; W,H=400,300
-          TR=from_bounds(*BBOX,W,H); STAC='https://earth-search.aws.element84.com/v1/search'; YEARS=[2023,2024,2025,2026]
-
+          BBOX=[37.65,48.45,38.25,48.90]; W,H=400,300; TR=from_bounds(*BBOX,W,H)
+          STAC='https://earth-search.aws.element84.com/v1/search'; YEARS=[2023,2024,2025,2026]
           def rp(href,dtype='float32',resampling=Resampling.bilinear,nodata=0):
               out=np.full((H,W),nodata,dtype=dtype)
               with rasterio.Env(AWS_NO_SIGN_REQUEST='YES',GDAL_DISABLE_READDIR_ON_OPEN='EMPTY_DIR'):
                   with rasterio.open(href) as ds:
-                      reproject(source=rasterio.band(ds,1),destination=out,src_transform=ds.transform,src_crs=ds.crs,src_nodata=ds.nodata,
-                                dst_transform=TR,dst_crs='EPSG:4326',dst_nodata=nodata,resampling=resampling)
+                      reproject(source=rasterio.band(ds,1),destination=out,src_transform=ds.transform,src_crs=ds.crs,src_nodata=ds.nodata,dst_transform=TR,dst_crs='EPSG:4326',dst_nodata=nodata,resampling=resampling)
               return out
-
           cat=Client.open('https://planetarycomputer.microsoft.com/api/stac/v1',modifier=planetary_computer.sign_inplace)
           lc=np.zeros((H,W),np.uint8); lc_ids=[]
           for it in list(cat.search(collections=['io-lulc-9-class'],bbox=BBOX,datetime='2023-01-01/2023-12-31').items()):
               a=it.assets.get('data') or it.assets.get('map') or next((x for x in it.assets.values() if x.href.lower().endswith(('.tif','.tiff'))),None)
               if not a: continue
               try:
-                  tmp=rp(a.href,'uint8',Resampling.nearest,0); m=tmp>0; lc[m]=tmp[m]; lc_ids.append(it.id)
+                  t=rp(a.href,'uint8',Resampling.nearest,0); m=t>0; lc[m]=t[m]; lc_ids.append(it.id)
               except Exception: pass
-          if (lc>0).mean()<0.5: raise SystemExit('Insufficient landcover coverage')
+          if (lc>0).mean()<0.5: raise SystemExit('Insufficient landcover')
           crop=(lc==5); noncrop=(lc==8)|(lc==11)
-
-          def inventory(year):
-              r=requests.post(STAC,json={'collections':['sentinel-2-c1-l2a'],'bbox':BBOX,'datetime':f'{year}-07-24T00:00:00Z/{year}-08-23T23:59:59Z','limit':500},timeout=90)
-              r.raise_for_status(); bd=defaultdict(list)
+          def inv(y):
+              r=requests.post(STAC,json={'collections':['sentinel-2-c1-l2a'],'bbox':BBOX,'datetime':f'{y}-07-24T00:00:00Z/{y}-08-23T23:59:59Z','limit':500},timeout=90); r.raise_for_status(); bd=defaultdict(list)
               for it in r.json().get('features',[]):
                   d=(it.get('properties',{}).get('datetime') or '')[:10]
                   if d: bd[d].append(it)
               return bd
-
-          def cloud(items):
-              v=[float(x.get('properties',{}).get('eo:cloud_cover')) for x in items if x.get('properties',{}).get('eo:cloud_cover') is not None]
-              return float(np.mean(v)) if v else 100.0
-
-          def choose(bd,year):
-              e=sorted([d for d in bd if f'{year}-07-24'<=d<=f'{year}-08-07'],key=lambda d:(cloud(bd[d]),d))[:2]
-              l=sorted([d for d in bd if f'{year}-08-14'<=d<=f'{year}-08-23'],key=lambda d:(cloud(bd[d]),d))[:2]
+          def cloud(xs):
+              v=[float(x.get('properties',{}).get('eo:cloud_cover')) for x in xs if x.get('properties',{}).get('eo:cloud_cover') is not None]; return float(np.mean(v)) if v else 100
+          def choose(bd,y):
+              e=sorted([d for d in bd if f'{y}-07-24'<=d<=f'{y}-08-07'],key=lambda d:(cloud(bd[d]),d))[:2]
+              l=sorted([d for d in bd if f'{y}-08-14'<=d<=f'{y}-08-23'],key=lambda d:(cloud(bd[d]),d))[:2]
               return e,l
-
           def scene(day,items):
               red=np.zeros((H,W),np.float32); blue=np.zeros_like(red); nir=np.zeros_like(red); s16=np.zeros_like(red); s22=np.zeros_like(red); scl=np.zeros((H,W),np.uint8); ids=[]
               for it in items:
@@ -80,60 +70,48 @@ jobs:
                   try:
                       rr=rp(a['red']['href']); bb=rp(a['blue']['href']); nn=rp(a['nir08']['href']); x16=rp(a['swir16']['href']); x22=rp(a['swir22']['href']); cc=rp(a['scl']['href'],'uint8',Resampling.nearest,0)
                   except Exception: continue
-                  m=(rr>0)&(bb>0)&(nn>0)&(x16>0)&(x22>0)
-                  red[m]=rr[m]; blue[m]=bb[m]; nir[m]=nn[m]; s16[m]=x16[m]; s22[m]=x22[m]; scl[m]=cc[m]; ids.append(it.get('id'))
+                  m=(rr>0)&(bb>0)&(nn>0)&(x16>0)&(x22>0); red[m]=rr[m]; blue[m]=bb[m]; nir[m]=nn[m]; s16[m]=x16[m]; s22[m]=x22[m]; scl[m]=cc[m]; ids.append(it.get('id'))
               clear=(red>0)&(blue>0)&(nir>0)&(s16>0)&(s22>0)&np.isin(scl,[2,4,5,6,7])
               def ix(num,den):
                   o=np.full((H,W),np.nan,np.float32); o[clear]=num[clear]/(den[clear]+1e-6); return o
               return {'date':day,'ids':ids,'clear':clear,'ndvi':ix(nir-red,nir+red),'nbr':ix(nir-s22,nir+s22),'bsi':ix((s16+red)-(nir+blue),(s16+red)+(nir+blue))}
-
           def comp(ss,key):
-              st=np.stack([s[key] for s in ss]); c=np.isfinite(st).sum(0); o=np.nanmedian(st,axis=0); o[c<2]=np.nan; return o
-
+              st=np.stack([s[key] for s in ss]); cnt=np.isfinite(st).sum(0); out=np.nanmedian(st,axis=0); out[cnt<1]=np.nan; return out,cnt
           years={}
           for y in YEARS:
-              bd=inventory(y); ed,ld=choose(bd,y); es=[]; ls=[]
-              for d in ed:
-                  s=scene(d,bd[d]);
-                  if s['ids'] and s['clear'].mean()>=0.20: es.append(s)
-              for d in ld:
-                  s=scene(d,bd[d]);
-                  if s['ids'] and s['clear'].mean()>=0.20: ls.append(s)
-              if len(es)<2 or len(ls)<2:
-                  years[str(y)]={'status':'INSUFFICIENT_CLEAR_DATES','early_dates':[x['date'] for x in es],'late_dates':[x['date'] for x in ls]}; continue
-              e={k:comp(es,k) for k in ['ndvi','nbr','bsi']}; l={k:comp(ls,k) for k in ['ndvi','nbr','bsi']}
+              bd=inv(y); ed,ld=choose(bd,y); es=[scene(d,bd[d]) for d in ed]; ls=[scene(d,bd[d]) for d in ld]; es=[s for s in es if s['ids']]; ls=[s for s in ls if s['ids']]
+              if not es or not ls:
+                  years[str(y)]={'status':'INSUFFICIENT_SCENES','early_dates':[s['date'] for s in es],'late_dates':[s['date'] for s in ls]}; continue
+              e={}; l={}; ec=None; lc2=None
+              for k in ['ndvi','nbr','bsi']:
+                  e[k],c1=comp(es,k); l[k],c2=comp(ls,k); ec=c1 if ec is None else np.minimum(ec,c1); lc2=c2 if lc2 is None else np.minimum(lc2,c2)
               valid=np.isfinite(e['ndvi'])&np.isfinite(e['nbr'])&np.isfinite(e['bsi'])&np.isfinite(l['ndvi'])&np.isfinite(l['nbr'])&np.isfinite(l['bsi'])
               sig=valid&((l['ndvi']-e['ndvi'])<=-0.08)&((l['nbr']-e['nbr'])<=-0.08)&((l['bsi']-e['bsi'])>=0.08)
               cells={}
               for rr in range(4):
                   for cc in range(4):
-                      sec=f"{'ABCD'[cc]}{rr+1}"; ys=slice(rr*H//4,(rr+1)*H//4); xs=slice(cc*W//4,(cc+1)*W//4); sm=sig[ys,xs]
-                      nm=noncrop[ys,xs]&valid[ys,xs]; cm=crop[ys,xs]&valid[ys,xs]
-                      cells[sec]={'noncrop_ground_change_percent':round(float((sm&noncrop[ys,xs]).sum()/nm.sum()*100),3) if nm.sum()>50 else None,
-                                  'crop_ground_change_percent':round(float((sm&crop[ys,xs]).sum()/cm.sum()*100),3) if cm.sum()>50 else None}
+                      sec=f"{'ABCD'[cc]}{rr+1}"; ys=slice(rr*H//4,(rr+1)*H//4); xs=slice(cc*W//4,(cc+1)*W//4); sm=sig[ys,xs]; vv=valid[ys,xs]
+                      nm=noncrop[ys,xs]&vv; cm=crop[ys,xs]&vv; land=((lc[ys,xs]>0)&(lc[ys,xs]!=10)); cov=float(vv[land].mean()*100) if land.sum()>50 else 0
+                      cells[sec]={'valid_pair_coverage_percent':round(cov,1),'noncrop_ground_change_percent':round(float((sm&noncrop[ys,xs]).sum()/nm.sum()*100),3) if nm.sum()>30 and cov>=10 else None,'crop_ground_change_percent':round(float((sm&crop[ys,xs]).sum()/cm.sum()*100),3) if cm.sum()>30 and cov>=10 else None}
               years[str(y)]={'status':'MEASURED','early_dates':[s['date'] for s in es],'late_dates':[s['date'] for s in ls],'product_ids':{s['date']:s['ids'] for s in es+ls},'cells':cells}
-
           summary=[]
           for rr in range(4):
               for cc in range(4):
-                  sec=f"{'ABCD'[cc]}{rr+1}"; hist=[]; hyears=[]
+                  sec=f"{'ABCD'[cc]}{rr+1}"; hist=[]; hyears=[]; hcov=[]
                   for y in ['2023','2024','2025']:
-                      v=((years.get(y) or {}).get('cells') or {}).get(sec,{}).get('noncrop_ground_change_percent')
-                      if v is not None: hist.append(float(v)); hyears.append(y)
-                  v26=((years.get('2026') or {}).get('cells') or {}).get(sec,{}).get('noncrop_ground_change_percent')
-                  r={'sector':sec,'history_years':hyears,'history_values_percent':hist,'value_2026_percent':v26}
+                      c=((years.get(y) or {}).get('cells') or {}).get(sec,{}) ; v=c.get('noncrop_ground_change_percent')
+                      if v is not None: hist.append(float(v)); hyears.append(y); hcov.append(c.get('valid_pair_coverage_percent'))
+                  c26=((years.get('2026') or {}).get('cells') or {}).get(sec,{}); v26=c26.get('noncrop_ground_change_percent')
+                  r={'sector':sec,'history_years':hyears,'history_values_percent':hist,'history_coverage_percent':hcov,'value_2026_percent':v26,'coverage_2026_percent':c26.get('valid_pair_coverage_percent')}
                   if v26 is None or len(hist)<2: r['classification']='INSUFFICIENT_HISTORY'
                   else:
-                      med=float(np.median(hist)); mx=float(np.max(hist)); delta=float(v26-med); ratio=float((v26+0.1)/(med+0.1))
-                      r.update({'history_median_percent':round(med,3),'history_max_percent':round(mx,3),'delta_vs_history_median_pp':round(delta,3),'ratio_vs_history_median':round(ratio,2)})
+                      med=float(np.median(hist)); mx=float(np.max(hist)); delta=float(v26-med); ratio=float((v26+0.1)/(med+0.1)); r.update({'history_median_percent':round(med,3),'history_max_percent':round(mx,3),'delta_vs_history_median_pp':round(delta,3),'ratio_vs_history_median':round(ratio,2)})
                       if v26>max(mx*1.5+0.25,med+0.75) and v26>=1: r['classification']='ELEVATED_2026'
                       elif v26>max(mx*1.2+0.15,med+0.4) and v26>=0.75: r['classification']='MILDLY_ELEVATED_2026'
                       else: r['classification']='WITHIN_SEASONAL_RANGE'
                   summary.append(r)
           summary.sort(key=lambda r:(0 if r.get('classification')=='ELEVATED_2026' else 1 if r.get('classification')=='MILDLY_ELEVATED_2026' else 2,-(r.get('delta_vs_history_median_pp') or -999)))
-          out={'status':'MEASURED','generated_utc':datetime.now(timezone.utc).isoformat(),'scope':'AI-39 broad 4x4 historical seasonality control only; deliberately non-targetable',
-               'years':years,'sector_summary':summary,'landcover_items':lc_ids,'method':{'comparison':'two clearest early plus two clearest late dates per year, 2023-2026','NBR':'(NIR-SWIR2)/(NIR+SWIR2)','BSI':'separate','signal':'dNDVI<=-0.08, dNBR<=-0.08, dBSI>=+0.08 in fixed 2023 bare/rangeland prior'},
-               'interpretation_rules':['Historical repetition favors seasonal/land-cover explanation.','2026 elevation is triage only, not proof of human activity.','Fixed 2023 land cover is a comparison prior, not current truth.']}
+          out={'status':'MEASURED','generated_utc':datetime.now(timezone.utc).isoformat(),'scope':'AI-39 broad 4x4 sectorwise historical seasonality control only; deliberately non-targetable','years':years,'sector_summary':summary,'landcover_items':lc_ids,'method':{'comparison':'two clearest early plus two clearest late dates/year; per-pixel clear support rather than whole-corridor cloud gating','NBR':'(NIR-SWIR2)/(NIR+SWIR2)','BSI':'separate','signal':'dNDVI<=-0.08, dNBR<=-0.08, dBSI>=+0.08 in fixed 2023 bare/rangeland prior'},'interpretation_rules':['Historical repetition favors seasonal/land-cover explanation.','Low per-sector clear coverage weakens the comparison.','2026 elevation is triage only, not proof of human activity.']}
           json.dump(out,open('out/analysis.json','w'),indent=2); print(json.dumps({'year_status':{y:v['status'] for y,v in years.items()},'summary':summary},indent=2))
           PY
       - uses: actions/upload-artifact@v4
