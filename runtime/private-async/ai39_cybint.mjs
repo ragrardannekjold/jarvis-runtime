@@ -4,6 +4,7 @@ const PROVIDER_TIMEOUT_MS = 45000;
 const ROUTING_HISTORY_START = "2026-01-01T00:00:00Z";
 const ROUTING_HISTORY_END = "2026-04-01T00:00:00Z";
 const SHODAN_FACET_DEPTH = 100;
+const INTEREST_NEIGHBOURS = [201776, 206810, 39089];
 
 function assertFiniteNonNegativeNumber(value, name) {
   if (value === undefined || value === null) return;
@@ -127,6 +128,37 @@ function summarizeRoutingHistory(body) {
   };
 }
 
+function normalizeAsn(value) {
+  if (typeof value === "number" && Number.isInteger(value)) return value;
+  if (typeof value === "string") {
+    const parsed = Number.parseInt(value.replace(/^AS/i, ""), 10);
+    return Number.isInteger(parsed) ? parsed : null;
+  }
+  return null;
+}
+
+function summarizeNeighbourHistory(body) {
+  const neighbours = body?.data?.neighbours;
+  if (!Array.isArray(neighbours)) return null;
+  const rows = new Map();
+  for (const item of neighbours) {
+    const asn = normalizeAsn(item?.neighbour ?? item?.asn);
+    if (asn === null) continue;
+    rows.set(asn, {
+      asn,
+      timeline_segments: Array.isArray(item?.timelines) ? item.timelines.length : 0,
+    });
+  }
+  return {
+    total_neighbours_seen_count: rows.size,
+    interest_neighbours: INTEREST_NEIGHBOURS.map((asn) => ({
+      asn,
+      seen_in_window: rows.has(asn),
+      timeline_segments: rows.get(asn)?.timeline_segments ?? 0,
+    })),
+  };
+}
+
 export async function runAi39CybintRefresh(
   payload = {},
   { fetchImpl = globalThis.fetch, shodanKey = process.env.SHODAN_API_KEY || "" } = {},
@@ -161,6 +193,19 @@ export async function runAi39CybintRefresh(
       timeline_segments: null,
       prefixes_with_multiple_segments: null,
       exact_prefixes_retained: false,
+    },
+    neighbour_history: {
+      provider: "RIPEstat asn-neighbours-history",
+      status: "UNKNOWN",
+      start_utc: ROUTING_HISTORY_START,
+      end_utc: ROUTING_HISTORY_END,
+      total_neighbours_seen_count: null,
+      interest_neighbours: INTEREST_NEIGHBOURS.map((asn) => ({
+        asn,
+        seen_in_window: null,
+        timeline_segments: null,
+      })),
+      exact_paths_retained: false,
     },
     shodan: {
       provider: "Shodan host/count",
@@ -208,6 +253,21 @@ export async function runAi39CybintRefresh(
     result.routing_history.status = providerStatus(history);
   }
 
+  const neighbourUrl = new URL("https://stat.ripe.net/data/asn-neighbours-history/data.json");
+  neighbourUrl.searchParams.set("resource", config.asn);
+  neighbourUrl.searchParams.set("starttime", ROUTING_HISTORY_START);
+  neighbourUrl.searchParams.set("endtime", ROUTING_HISTORY_END);
+  neighbourUrl.searchParams.set("max_rows", "100");
+  neighbourUrl.searchParams.set("sourceapp", "AI39Investigation");
+  const neighbourHistory = await getJson(neighbourUrl, fetchImpl);
+  const neighbourSummary = summarizeNeighbourHistory(neighbourHistory.body);
+  if (neighbourSummary) {
+    result.neighbour_history.status = "OK";
+    Object.assign(result.neighbour_history, neighbourSummary);
+  } else {
+    result.neighbour_history.status = providerStatus(neighbourHistory);
+  }
+
   if (shodanKey) {
     const shodanUrl = new URL("https://api.shodan.io/shodan/host/count");
     shodanUrl.searchParams.set("key", shodanKey);
@@ -244,8 +304,12 @@ export async function runAi39CybintRefresh(
     };
   }
 
-  const useful = [result.routing.status, result.routing_history.status, result.shodan.status]
-    .some((status) => status === "OK");
+  const useful = [
+    result.routing.status,
+    result.routing_history.status,
+    result.neighbour_history.status,
+    result.shodan.status,
+  ].some((status) => status === "OK");
   result.evidence_status = useful ? "PARTIAL_EVIDENCE" : "INSUFFICIENT_DATA";
 
   return result;
@@ -258,4 +322,5 @@ export {
   ROUTING_HISTORY_START,
   ROUTING_HISTORY_END,
   SHODAN_FACET_DEPTH,
+  INTEREST_NEIGHBOURS,
 };
