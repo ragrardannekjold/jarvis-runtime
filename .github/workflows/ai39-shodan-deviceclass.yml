@@ -30,14 +30,17 @@ jobs:
 
           key=os.environ.get('SHODAN_API_KEY','').strip()
           base='asn:AS202279'
+          primary_org="STATE UNITARY ENTERPRISE OF THE DONETSK PEOPLE'S REPUBLIC REPUBLICAN TELECOMMUNICATIONS OPERATOR"
+          secondary_org='Timer, LLC'
           out={
             'generated_utc':datetime.now(timezone.utc).isoformat(),
-            'scope':'Aggregate-only passive device/service-family characterization for one public ASN anchor. No hosts, IPs, banners, versions, vulnerabilities, screenshots, credentials, or exact locations retained.',
+            'scope':'Aggregate-only passive device/service-family characterization and related-ASN expansion. No hosts, IPs, banners, versions, vulnerabilities, screenshots, credentials, or exact locations retained.',
             'asn':'AS202279',
             'status':'UNKNOWN',
             'base_total':None,
             'facets':{},
             'service_family_counts':{},
+            'related_asns_by_org':{},
             'credits_before':None,
             'credits_after':None,
             'credits_delta':None,
@@ -82,6 +85,18 @@ jobs:
                           out['service_family_counts'][name]=int(count(base+' '+flt).get('total') or 0)
                       except Exception as e:
                           out['service_family_counts'][name]={'status':'ERROR','error_class':type(e).__name__}
+
+                  # Expand the telecom graph without guessing ASN IDs: ask Shodan which ASNs carry the already-observed organizations.
+                  for label,org in [('primary_operator',primary_org),('secondary_operator',secondary_org)]:
+                      try:
+                          q='org:"'+org.replace('"','')+'"'
+                          j=count(q,'asn:50')
+                          out['related_asns_by_org'][label]={
+                            'total_indexed_services':j.get('total'),
+                            'asn_facets':(j.get('facets') or {}).get('asn',[])
+                          }
+                      except Exception as e:
+                          out['related_asns_by_org'][label]={'status':'ERROR','error_class':type(e).__name__}
 
                   try:
                       dj=count(base,'device:50')
