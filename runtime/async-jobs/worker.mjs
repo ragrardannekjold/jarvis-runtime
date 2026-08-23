@@ -76,11 +76,15 @@ async function runHeartbeatProbe(context) {
 
 async function runUtilitySearchSelfTest(context) {
   await postStatus(context, "RUNNING", "1/3 install utility-search dependencies");
-  await execFileAsync("npm", ["ci", "--ignore-scripts"], {
-    cwd: "plugin/utility-search",
-    timeout: 180000,
-    maxBuffer: 1024 * 1024,
-  });
+  await execFileAsync(
+    "npm",
+    ["install", "--ignore-scripts", "--no-audit", "--no-fund"],
+    {
+      cwd: "plugin/utility-search",
+      timeout: 180000,
+      maxBuffer: 1024 * 1024,
+    },
+  );
   await postStatus(context, "RUNNING", "2/3 execute utility-search tests");
   const { stdout } = await execFileAsync("npm", ["test"], {
     cwd: "plugin/utility-search",
