@@ -53,8 +53,10 @@ test("AI-39 CYBINT refresh uses one aggregate Shodan count request and retains n
   assert.equal(result.shodan.current_total, 15);
   assert.equal(result.shodan.query_count, 1);
   assert.equal(result.exposure_change_vs_reference.percent_change, -96.93);
+  assert.equal(result.evidence_status, "PARTIAL_EVIDENCE");
   assert.equal(result.active_scan_performed, false);
   assert.equal(result.exact_hosts_retained, false);
+  assert.equal(result.provider_failures_isolated, true);
   assert.equal(calls.filter((url) => url.includes("api.shodan.io/shodan/host/count")).length, 1);
   assert.equal(JSON.stringify(result).includes("test-secret"), false);
 });
@@ -75,4 +77,52 @@ test("Shodan backpressure degrades only Shodan while preserving RIPE evidence", 
   assert.equal(result.routing.announced_prefix_count, 3);
   assert.equal(result.shodan.status, "BACKPRESSURE");
   assert.equal(result.shodan.query_count, 1);
+  assert.equal(result.evidence_status, "PARTIAL_EVIDENCE");
+});
+
+test("Shodan network exception does not fail the job when RIPE succeeds", async () => {
+  const fetchImpl = async (url) => {
+    if (String(url).includes("stat.ripe.net")) {
+      return response(200, { data: { prefixes: [{}, {}] } });
+    }
+    throw new TypeError("simulated transport failure with provider URL");
+  };
+  const result = await runAi39CybintRefresh(
+    { historical_reference_total: 488 },
+    { fetchImpl, shodanKey: "secret-that-must-not-leak" },
+  );
+  assert.equal(result.routing.status, "OK");
+  assert.equal(result.routing.announced_prefix_count, 2);
+  assert.equal(result.shodan.status, "NETWORK_ERROR");
+  assert.equal(result.evidence_status, "PARTIAL_EVIDENCE");
+  assert.equal(JSON.stringify(result).includes("secret-that-must-not-leak"), false);
+  assert.equal(JSON.stringify(result).includes("provider URL"), false);
+});
+
+test("RIPE transport failure does not block independent Shodan aggregate evidence", async () => {
+  const fetchImpl = async (url) => {
+    if (String(url).includes("stat.ripe.net")) {
+      throw new TypeError("simulated RIPE transport failure");
+    }
+    return response(200, { total: 14, facets: { org: [], port: [], product: [], device: [] } });
+  };
+  const result = await runAi39CybintRefresh(
+    { historical_reference_total: 488 },
+    { fetchImpl, shodanKey: "test-secret" },
+  );
+  assert.equal(result.routing.status, "NETWORK_ERROR");
+  assert.equal(result.shodan.status, "OK");
+  assert.equal(result.shodan.current_total, 14);
+  assert.equal(result.evidence_status, "PARTIAL_EVIDENCE");
+});
+
+test("both provider transport failures return insufficient data rather than execution failure", async () => {
+  const fetchImpl = async () => { throw new TypeError("offline"); };
+  const result = await runAi39CybintRefresh(
+    { historical_reference_total: 488 },
+    { fetchImpl, shodanKey: "test-secret" },
+  );
+  assert.equal(result.routing.status, "NETWORK_ERROR");
+  assert.equal(result.shodan.status, "NETWORK_ERROR");
+  assert.equal(result.evidence_status, "INSUFFICIENT_DATA");
 });
