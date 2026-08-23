@@ -7,6 +7,7 @@ on:
   pull_request:
     branches:
       - main
+      - ci-ai49-base
   workflow_dispatch:
 
 permissions:
