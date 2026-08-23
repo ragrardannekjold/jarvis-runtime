@@ -33,6 +33,21 @@ function routingHistoryFixture() {
   };
 }
 
+function neighbourHistoryFixture() {
+  return {
+    data: {
+      neighbours: [
+        { neighbour: 201776, timelines: [{ starttime: "2026-01-01", endtime: "2026-04-01" }] },
+        { neighbour: "AS206810", timelines: [
+          { starttime: "2026-01-01", endtime: "2026-02-15" },
+          { starttime: "2026-02-20", endtime: "2026-04-01" },
+        ] },
+        { neighbour: 64500, timelines: [{ starttime: "2026-01-01", endtime: "2026-04-01" }] },
+      ],
+    },
+  };
+}
+
 test("AI-39 CYBINT payload is fixed to the allowlisted ASN", () => {
   assert.equal(validateAi39CybintPayload({}).asn, "AS202279");
   assert.throws(
@@ -45,10 +60,11 @@ test("AI-39 CYBINT payload is fixed to the allowlisted ASN", () => {
   );
 });
 
-test("AI-39 CYBINT uses one Shodan request, deep facets and aggregate routing history", async () => {
+test("AI-39 CYBINT uses one Shodan request plus aggregate routing and neighbour history", async () => {
   const calls = [];
   const fetchImpl = async (url) => {
     calls.push(String(url));
+    if (String(url).includes("asn-neighbours-history")) return response(200, neighbourHistoryFixture());
     if (String(url).includes("routing-history")) return response(200, routingHistoryFixture());
     if (String(url).includes("announced-prefixes")) return response(200, announcedPrefixes(9));
     if (String(url).includes("api.shodan.io/shodan/host/count")) {
@@ -77,6 +93,14 @@ test("AI-39 CYBINT uses one Shodan request, deep facets and aggregate routing hi
   assert.equal(result.routing_history.timeline_segments, 3);
   assert.equal(result.routing_history.prefixes_with_multiple_segments, 1);
   assert.equal(result.routing_history.exact_prefixes_retained, false);
+  assert.equal(result.neighbour_history.status, "OK");
+  assert.equal(result.neighbour_history.total_neighbours_seen_count, 3);
+  assert.deepEqual(result.neighbour_history.interest_neighbours, [
+    { asn: 201776, seen_in_window: true, timeline_segments: 1 },
+    { asn: 206810, seen_in_window: true, timeline_segments: 2 },
+    { asn: 39089, seen_in_window: false, timeline_segments: 0 },
+  ]);
+  assert.equal(result.neighbour_history.exact_paths_retained, false);
   assert.equal(result.shodan.current_total, 15);
   assert.equal(result.shodan.query_count, 1);
   assert.equal(result.shodan.facet_depth_requested, 100);
@@ -88,12 +112,14 @@ test("AI-39 CYBINT uses one Shodan request, deep facets and aggregate routing hi
   const shodanCalls = calls.filter((url) => url.includes("api.shodan.io/shodan/host/count"));
   assert.equal(shodanCalls.length, 1);
   assert.equal(decodeURIComponent(shodanCalls[0]).includes("product:100"), true);
+  assert.equal(calls.filter((url) => url.includes("asn-neighbours-history")).length, 1);
   assert.equal(JSON.stringify(result).includes("198.51.100.0/24"), false);
   assert.equal(JSON.stringify(result).includes("test-secret"), false);
 });
 
 test("Shodan backpressure degrades only Shodan while preserving RIPE evidence", async () => {
   const fetchImpl = async (url) => {
+    if (String(url).includes("asn-neighbours-history")) return response(200, neighbourHistoryFixture());
     if (String(url).includes("routing-history")) return response(200, routingHistoryFixture());
     if (String(url).includes("announced-prefixes")) return response(200, announcedPrefixes(3));
     return response(429, {});
@@ -106,6 +132,7 @@ test("Shodan backpressure degrades only Shodan while preserving RIPE evidence", 
   assert.equal(result.routing.status, "OK");
   assert.equal(result.routing.announced_prefix_count, 3);
   assert.equal(result.routing_history.status, "OK");
+  assert.equal(result.neighbour_history.status, "OK");
   assert.equal(result.shodan.status, "BACKPRESSURE");
   assert.equal(result.shodan.query_count, 1);
   assert.equal(result.evidence_status, "PARTIAL_EVIDENCE");
@@ -113,6 +140,7 @@ test("Shodan backpressure degrades only Shodan while preserving RIPE evidence", 
 
 test("Shodan network exception does not fail the job when RIPE succeeds", async () => {
   const fetchImpl = async (url) => {
+    if (String(url).includes("asn-neighbours-history")) return response(200, neighbourHistoryFixture());
     if (String(url).includes("routing-history")) return response(200, routingHistoryFixture());
     if (String(url).includes("announced-prefixes")) return response(200, announcedPrefixes(2));
     throw new TypeError("simulated transport failure with provider URL");
@@ -124,6 +152,7 @@ test("Shodan network exception does not fail the job when RIPE succeeds", async 
   assert.equal(result.routing.status, "OK");
   assert.equal(result.routing.announced_prefix_count, 2);
   assert.equal(result.routing_history.status, "OK");
+  assert.equal(result.neighbour_history.status, "OK");
   assert.equal(result.shodan.status, "NETWORK_ERROR");
   assert.equal(result.evidence_status, "PARTIAL_EVIDENCE");
   assert.equal(JSON.stringify(result).includes("secret-that-must-not-leak"), false);
@@ -143,6 +172,7 @@ test("RIPE transport failure does not block independent Shodan aggregate evidenc
   );
   assert.equal(result.routing.status, "NETWORK_ERROR");
   assert.equal(result.routing_history.status, "NETWORK_ERROR");
+  assert.equal(result.neighbour_history.status, "NETWORK_ERROR");
   assert.equal(result.shodan.status, "OK");
   assert.equal(result.shodan.current_total, 14);
   assert.equal(result.evidence_status, "PARTIAL_EVIDENCE");
@@ -156,6 +186,7 @@ test("all provider transport failures return insufficient data rather than execu
   );
   assert.equal(result.routing.status, "NETWORK_ERROR");
   assert.equal(result.routing_history.status, "NETWORK_ERROR");
+  assert.equal(result.neighbour_history.status, "NETWORK_ERROR");
   assert.equal(result.shodan.status, "NETWORK_ERROR");
   assert.equal(result.evidence_status, "INSUFFICIENT_DATA");
 });
