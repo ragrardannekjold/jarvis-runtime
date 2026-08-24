@@ -114,6 +114,17 @@ function digest(value) {
   return crypto.createHash("sha256").update(JSON.stringify(value)).digest("hex");
 }
 
+function normalizeCommandFailure(error, command) {
+  const stdout = typeof error?.stdout === "string" ? error.stdout : "";
+  const stderr = typeof error?.stderr === "string" ? error.stderr : "";
+  return {
+    command,
+    status: "FAILED",
+    exit_code: Number.isInteger(error?.code) ? error.code : null,
+    output_sha256: digest({ stdout, stderr }),
+  };
+}
+
 async function runCommandCenterValidation() {
   const commands = [
     ["scripts/validate_recovery_floor.py"],
@@ -121,15 +132,23 @@ async function runCommandCenterValidation() {
   ];
   const receipts = [];
   for (const args of commands) {
-    const { stdout = "", stderr = "" } = await execFileAsync("python", args, {
-      cwd: "command-center",
-      timeout: 180000,
-      maxBuffer: 1024 * 1024,
-    });
-    receipts.push({
-      command: args[0],
-      output_sha256: digest({ stdout, stderr }),
-    });
+    try {
+      const { stdout = "", stderr = "" } = await execFileAsync("python", args, {
+        cwd: "command-center",
+        timeout: 180000,
+        maxBuffer: 1024 * 1024,
+      });
+      receipts.push({
+        command: args[0],
+        status: "PASSED",
+        output_sha256: digest({ stdout, stderr }),
+      });
+    } catch (error) {
+      const wrapped = new Error("command_center_validator_failed");
+      wrapped.diagnostic = normalizeCommandFailure(error, args[0]);
+      wrapped.completedReceipts = receipts;
+      throw wrapped;
+    }
   }
   return { validation_receipts: receipts };
 }
@@ -251,12 +270,21 @@ async function main() {
     await putPrivateJson(resultPath, terminal, privateToken, { sha: resultSha });
     await postPublicStatus(context, "SUCCEEDED", "private terminal readback persisted");
     await closePublicIssue(context);
-  } catch {
+  } catch (error) {
+    const output = {
+      error_code: "PRIVATE_EXECUTION_FAILED",
+      ...(error?.diagnostic
+        ? {
+            failed_validator: error.diagnostic,
+            completed_validation_receipts: error.completedReceipts ?? [],
+          }
+        : {}),
+    };
     const terminal = {
       ...claim,
       status: "FAILED",
       finished_at: new Date().toISOString(),
-      output: { error_code: "PRIVATE_EXECUTION_FAILED" },
+      output,
     };
     await putPrivateJson(resultPath, terminal, privateToken, { sha: resultSha });
     await postPublicStatus(context, "FAILED", "private terminal failure persisted");
