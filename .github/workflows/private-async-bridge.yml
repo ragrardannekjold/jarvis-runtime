@@ -1,59 +1,14 @@
-name: Private Async Reference Bridge
+name: Private Async Reference Bridge (Disabled)
 
 on:
-  issues:
-    types: [opened]
+  workflow_dispatch:
 
-permissions:
-  contents: read
-  issues: write
-
-concurrency:
-  group: private-async-issue-${{ github.event.issue.number }}
-  cancel-in-progress: false
+permissions: {}
 
 jobs:
-  private-async:
-    if: github.event.issue.user.login == 'ragrardannekjold' && startsWith(github.event.issue.title, '[ASYNC-PRIVATE]')
+  legacy-private-bridge-disabled:
+    if: ${{ false }}
     runs-on: ubuntu-latest
-    timeout-minutes: 10
-
     steps:
-      - name: Checkout public runtime
-        uses: actions/checkout@v7
-        with:
-          persist-credentials: false
-
-      - name: Require private bridge token
-        shell: bash
-        env:
-          COMMAND_CENTER_TOKEN: ${{ secrets.COMMAND_CENTER_TOKEN }}
-        run: |
-          set -euo pipefail
-          test -n "$COMMAND_CENTER_TOKEN" || { echo "private bridge token unavailable"; exit 2; }
-
-      - name: Checkout private command center ephemerally
-        uses: actions/checkout@v7
-        with:
-          repository: ragrardannekjold/jarvis-command-center
-          token: ${{ secrets.COMMAND_CENTER_TOKEN }}
-          ref: main
-          path: command-center
-          fetch-depth: 1
-          persist-credentials: false
-
-      - name: Set up Node
-        uses: actions/setup-node@v7
-        with:
-          node-version: '24'
-
-      - name: Execute opaque-reference private job
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
-          COMMAND_CENTER_TOKEN: ${{ secrets.COMMAND_CENTER_TOKEN }}
-          SHODAN_API_KEY: ${{ secrets.SHODAN_API_KEY }}
-        run: node runtime/private-async/worker.mjs
-
-      - name: Public-safe terminal summary
-        if: always()
-        run: echo "Private async bridge finished; private payload and private result are intentionally not printed."
+      - name: Legacy bridge is quarantined
+        run: echo "Legacy V1 private bridge is disabled; use no private route until the signed v2 gate is activated."
