@@ -1,0 +1,204 @@
+name: AI39 single-scene contextual anomaly canary v2
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  contextual_v2:
+    runs-on: ubuntu-latest
+    timeout-minutes: 28
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install geospatial stack
+        run: python -m pip install --disable-pip-version-check numpy scipy rasterio pystac-client planetary-computer requests
+      - name: Run hardened contextual anomaly test
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          python - <<'PY'
+          import json, warnings
+          from datetime import datetime, timezone
+          from pathlib import Path
+          import numpy as np
+          import requests, rasterio
+          from scipy import ndimage
+          from scipy.stats import rankdata
+          from rasterio.enums import Resampling
+          from rasterio.transform import from_bounds
+          from rasterio.warp import reproject
+          from pystac_client import Client
+          import planetary_computer
+
+          warnings.filterwarnings('ignore')
+          BBOX=[37.65,48.45,38.25,48.90]
+          W,H=800,600
+          TR=from_bounds(*BBOX,W,H)
+          STAC='https://earth-search.aws.element84.com/v1/search'
+          CURRENT_DAY='2026-08-20'
+          HIST_YEARS=[2023,2024,2025]
+          CLEAR_CLASSES=[2,4,5,6,7]
+          FEATURE_NAMES=['ndvi','nbr','bsi','ndbi']
+
+          def rp(href,dtype='float32',resampling=Resampling.bilinear,nodata=0):
+              out=np.full((H,W),nodata,dtype=dtype)
+              with rasterio.Env(AWS_NO_SIGN_REQUEST='YES',GDAL_DISABLE_READDIR_ON_OPEN='EMPTY_DIR'):
+                  with rasterio.open(href) as ds:
+                      reproject(source=rasterio.band(ds,1),destination=out,
+                                src_transform=ds.transform,src_crs=ds.crs,src_nodata=ds.nodata,
+                                dst_transform=TR,dst_crs='EPSG:4326',dst_nodata=nodata,resampling=resampling)
+              return out
+
+          def search_range(start,end):
+              r=requests.post(STAC,json={'collections':['sentinel-2-c1-l2a'],'bbox':BBOX,
+                                        'datetime':start+'T00:00:00Z/'+end+'T23:59:59Z','limit':100},timeout=90)
+              r.raise_for_status(); return r.json().get('features',[])
+
+          def scene(day):
+              red=np.zeros((H,W),np.float32); blue=np.zeros_like(red); nir=np.zeros_like(red)
+              s16=np.zeros_like(red); s22=np.zeros_like(red); scl=np.zeros((H,W),np.uint8); ids=[]
+              for it in search_range(day,day):
+                  a=it.get('assets',{}); keys=['red','blue','nir08','swir16','swir22','scl']
+                  if not all((a.get(k) or {}).get('href') for k in keys): continue
+                  try:
+                      rr=rp(a['red']['href']); bb=rp(a['blue']['href']); nn=rp(a['nir08']['href'])
+                      x16=rp(a['swir16']['href']); x22=rp(a['swir22']['href']); cc=rp(a['scl']['href'],'uint8',Resampling.nearest,0)
+                  except Exception: continue
+                  m=(rr>0)&(bb>0)&(nn>0)&(x16>0)&(x22>0)&(cc>0)
+                  red[m]=rr[m];blue[m]=bb[m];nir[m]=nn[m];s16[m]=x16[m];s22[m]=x22[m];scl[m]=cc[m];ids.append(it.get('id'))
+              valid=(red>0)&(blue>0)&(nir>0)&(s16>0)&(s22>0)
+              clear=valid&np.isin(scl,CLEAR_CLASSES)
+              def idx(num,den):
+                  o=np.full((H,W),np.nan,np.float32); o[clear]=num[clear]/(den[clear]+1e-6); return o
+              feats={'ndvi':idx(nir-red,nir+red),'nbr':idx(nir-s22,nir+s22),
+                     'bsi':idx((s16+red)-(nir+blue),(s16+red)+(nir+blue)),
+                     'ndbi':idx(s16-nir,s16+nir)}
+              return {'day':day,'ids':sorted(set(ids)),'valid':valid,'clear':clear,'features':feats,
+                      'coverage':float(valid.mean()),'clear_fraction':float(clear.sum()/max(valid.sum(),1))}
+
+          def best_hist_scene(year):
+              feats=search_range(f'{year}-08-17',f'{year}-08-23')
+              days=sorted({(it.get('properties',{}).get('datetime') or '')[:10] for it in feats if (it.get('properties',{}).get('datetime') or '')[:10]})
+              scored=[]
+              for day in days:
+                  sc=scene(day)
+                  if sc['coverage']>=0.70: scored.append(sc)
+              if not scored: return None
+              return max(scored,key=lambda s:(s['clear_fraction'],s['coverage']))
+
+          cur=scene(CURRENT_DAY)
+          if cur['coverage']<0.70: raise RuntimeError('current coverage insufficient')
+          hist=[x for x in (best_hist_scene(y) for y in HIST_YEARS) if x is not None]
+          if len(hist)<2: raise RuntimeError('historical coverage insufficient')
+
+          # Load annual GIS priors separately and keep only pixels whose class is stable across 2021 and 2022.
+          pc=Client.open('https://planetarycomputer.microsoft.com/api/stac/v1',modifier=planetary_computer.sign_inplace)
+          def load_lc(year):
+              items=list(pc.search(collections=['io-lulc-9-class'],bbox=BBOX,datetime=f'{year}-01-01/{year}-12-31').items())
+              arr=np.zeros((H,W),np.uint8); ids=[]
+              for it in items:
+                  a=it.assets.get('data') or it.assets.get('map') or next((x for x in it.assets.values() if x.href.lower().endswith(('.tif','.tiff'))),None)
+                  if not a: continue
+                  try: t=rp(a.href,'uint8',Resampling.nearest,0)
+                  except Exception: continue
+                  m=t>0;arr[m]=t[m];ids.append(it.id)
+              return arr,ids
+          lc21,ids21=load_lc(2021);lc22,ids22=load_lc(2022)
+          stable=(lc21>0)&(lc22>0)&(lc21==lc22)
+          lc=lc22
+          if stable.mean()<0.50: raise RuntimeError('stable landcover coverage insufficient')
+
+          # Erode class interiors to reduce GIS boundary bleed and mixed pixels.
+          interior=np.zeros((H,W),bool)
+          for cls in [int(x) for x in np.unique(lc) if x>0]:
+              m=stable&(lc==cls)
+              interior |= ndimage.binary_erosion(m,structure=np.ones((3,3),bool),iterations=1,border_value=0)
+
+          # Current contextual robust z within stable class interiors only.
+          ctx_z=np.full((H,W),np.nan,np.float32)
+          for cls in [int(x) for x in np.unique(lc) if x>0]:
+              m=cur['clear']&interior&(lc==cls)
+              if m.sum()<600: continue
+              zmax=np.zeros((H,W),np.float32)
+              for name in FEATURE_NAMES:
+                  x=cur['features'][name][m]; med=float(np.nanmedian(x)); mad=float(np.nanmedian(np.abs(x-med)))
+                  scale=max(1.4826*mad,0.02)
+                  z=np.abs(cur['features'][name]-med)/scale
+                  zmax=np.maximum(zmax,np.nan_to_num(z,nan=0,posinf=0,neginf=0))
+              ctx_z[m]=zmax[m]
+
+          # Historical same-season robust z.
+          hist_z_feats=[]
+          for name in FEATURE_NAMES:
+              st=np.stack([s['features'][name] for s in hist]); count=np.isfinite(st).sum(0)
+              med=np.nanmedian(st,axis=0);mad=np.nanmedian(np.abs(st-med),axis=0);scale=np.maximum(1.4826*mad,0.03)
+              z=np.abs(cur['features'][name]-med)/scale;z[count<2]=np.nan;hist_z_feats.append(z)
+          hist_z=np.nanmax(np.stack(hist_z_feats),axis=0);hist_z[~cur['clear']]=np.nan
+
+          # Hardened primary lead: stable GIS interior, non-crop, and agreement of current-context + historical-context.
+          primary=cur['clear']&interior&(lc>0)&(lc!=5)
+          lead=primary&np.isfinite(ctx_z)&np.isfinite(hist_z)&(ctx_z>=5.0)&(hist_z>=4.0)
+
+          cells=[]
+          for rr in range(4):
+              for cc in range(4):
+                  sec=f"{'ABCD'[cc]}{rr+1}";ys=slice(rr*H//4,(rr+1)*H//4);xs=slice(cc*W//4,(cc+1)*W//4)
+                  p=primary[ys,xs];m=lead[ys,xs]
+                  lab,n=ndimage.label(m,structure=np.ones((3,3),int));sizes=np.bincount(lab.ravel())[1:] if n else np.array([],int)
+                  robust=sizes[sizes>=4]
+                  hz=hist_z[ys,xs][p];cz=ctx_z[ys,xs][p]
+                  cells.append({'sector':sec,'stable_noncrop_px':int(p.sum()),
+                                'lead_pct':round(float(m.sum()/max(p.sum(),1)*100),4),
+                                'components_ge4px':int((sizes>=4).sum()) if sizes.size else 0,
+                                'largest_component_px':int(robust.max()) if robust.size else 0,
+                                'ctx_p99':round(float(np.nanpercentile(cz,99)),3) if cz.size else None,
+                                'hist_p99':round(float(np.nanpercentile(hz,99)),3) if hz.size else None})
+
+          for metric in ['lead_pct','components_ge4px','largest_component_px']:
+              vals=np.array([c[metric] for c in cells],float);ranks=rankdata(vals,method='average')
+              for c,r in zip(cells,ranks):c[metric+'_percentile']=round(float((r-1)/(len(vals)-1)*100),1)
+          for c in cells:
+              c['rank_score']=round(0.60*c['lead_pct_percentile']+0.25*c['components_ge4px_percentile']+0.15*c['largest_component_px_percentile'],2)
+          cells.sort(key=lambda c:c['rank_score'],reverse=True)
+          for i,c in enumerate(cells,1):c['rank']=i
+
+          known_signal={'A4','D1','C2'};controls={'A1','A2','A3','D4'};rankmap={c['sector']:c['rank'] for c in cells}
+          signal_ranks=[rankmap[s] for s in known_signal];control_ranks=[rankmap[s] for s in controls]
+          top4={c['sector'] for c in cells[:4]};top8={c['sector'] for c in cells[:8]}
+          eval_={'known_signal_ranks':{s:rankmap[s] for s in sorted(known_signal)},
+                 'control_ranks':{s:rankmap[s] for s in sorted(controls)},
+                 'signal_mean_rank':round(float(np.mean(signal_ranks)),2),'control_mean_rank':round(float(np.mean(control_ranks)),2),
+                 'signal_recall_top8':round(sum(s in top8 for s in known_signal)/3,3),
+                 'signal_recall_top4':round(sum(s in top4 for s in known_signal)/3,3),
+                 'control_hits_top4':sum(s in top4 for s in controls),
+                 'rank_separation':round(float(np.mean(control_ranks)-np.mean(signal_ranks)),2)}
+          # Stricter gate than v1: useful only with material separation and <=1 seasonal control in top4.
+          useful=(eval_['rank_separation']>=2.0 and eval_['signal_recall_top8']>=0.667 and eval_['control_hits_top4']<=1)
+          eval_['utility_state']='PROMISING' if useful else 'NOT_YET_USEFUL'
+
+          out={'status':'MEASURED_CANARY_V2','generated_utc':datetime.now(timezone.utc).isoformat(),
+               'method':'single current scene + stable 2021/2022 GIS class interiors + multi-year same-season history; no same-year near-date pair',
+               'current':{'day':CURRENT_DAY,'clear_fraction':round(cur['clear_fraction'],4),'scene_ids':cur['ids']},
+               'historical':[{'day':s['day'],'clear_fraction':round(s['clear_fraction'],4),'scene_ids':s['ids']} for s in hist],
+               'landcover_ids':sorted(set(ids21+ids22)),'thresholds':{'ctx_z':5.0,'hist_z':4.0,'component_min_px':4},
+               'sector_ranking':cells,'evaluation':eval_,
+               'limits':['Lead means contextual surface anomaly requiring independent corroboration, not cause/actor/intent/current presence.',
+                         'Crops are excluded from primary promotion in this hardened test.',
+                         'Stable-class erosion intentionally sacrifices recall to reduce boundary/mixed-pixel false positives.']}
+          Path('out/result_v2.json').write_text(json.dumps(out,indent=2),encoding='utf-8')
+          print(json.dumps({'evaluation':eval_,'top8':[(c['sector'],c['rank_score'],c['lead_pct']) for c in cells[:8]]},indent=2))
+          PY
+      - name: Validate outputs
+        run: python -c "import json; m=json.load(open('out/result_v2.json')); assert len(m['sector_ranking'])==16; print(m['evaluation'])"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ai39-single-scene-context-canary-v2
+          path: out/result_v2.json
+          if-no-files-found: error
+          retention-days: 2
