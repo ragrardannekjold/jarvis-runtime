@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { parseJobBody, buildStatus } from "./contract.mjs";
+import { parseJobBody, buildStatus, extractCanonicalIds } from "./contract.mjs";
 
 const execFileAsync = promisify(execFile);
 
@@ -38,9 +38,13 @@ function renderStatus(status) {
     "<!-- jarvis-async-status -->",
     "**ASYNC JOB STATUS**",
     `- job_id: \`${status.job_id}\``,
+    status.mission_id ? `- mission_id: \`${status.mission_id}\`` : null,
+    status.route_id ? `- route_id: \`${status.route_id}\`` : null,
+    status.cell_id ? `- cell_id: \`${status.cell_id}\`` : null,
     `- state: **${status.state}**`,
     `- step: ${status.step}`,
     `- heartbeat_utc: ${status.heartbeat_utc}`,
+    `- checkpoint_ref: ${status.checkpoint_ref}`,
     `- execution_surface: ${status.execution_surface}`,
     `- chat_blocking: ${status.chat_blocking}`,
     `- policy_target: foreground <= ${status.policy_target.foreground_control_plane_max_pct}% / reserve >= ${status.policy_target.reserve_min_pct}%`,
@@ -56,12 +60,14 @@ async function postStatus(context, state, step, detail = null) {
     state,
     step,
     detail,
+    canonical: context.canonical,
   });
   await githubRequest(`/repos/${context.repository}/issues/${context.issueNumber}/comments`, {
     method: "POST",
     body: { body: renderStatus(status) },
   });
   console.log(JSON.stringify(status));
+  return status;
 }
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -95,6 +101,46 @@ async function runUtilitySearchSelfTest(context) {
   return "utility-search tests passed on external GitHub runner";
 }
 
+async function runIntentionalFailureProbe(context) {
+  await postStatus(context, "RUNNING", "1/1 intentional failure armed", "safe canary failure; no external side effect");
+  throw new Error("intentional_canary_failure");
+}
+
+function latestFailedCheckpoint(comments) {
+  return [...comments].reverse().find((comment) => {
+    const body = comment?.body || "";
+    return body.includes("<!-- jarvis-async-status -->") &&
+      /- state: \*\*(FAILED|REJECTED)\*\*/.test(body);
+  });
+}
+
+function missionFromStatus(body) {
+  return body.match(/- mission_id: `([^`]+)`/)?.[1] ?? null;
+}
+
+async function runCheckpointRecoveryProbe(context, job) {
+  const recoveredIssue = Number(job.payload.recovered_from_issue);
+  if (!Number.isInteger(recoveredIssue) || recoveredIssue <= 0) {
+    throw new Error("invalid_recovered_from_issue");
+  }
+  if (!context.canonical.mission_id) throw new Error("recovery_requires_canonical_ids");
+
+  await postStatus(context, "RUNNING", "1/3 load prior checkpoint", `source_issue=${recoveredIssue}`);
+  const comments = await githubRequest(`/repos/${context.repository}/issues/${recoveredIssue}/comments?per_page=100`);
+  const checkpoint = latestFailedCheckpoint(comments || []);
+  if (!checkpoint) throw new Error("failed_checkpoint_not_found");
+
+  const priorMission = missionFromStatus(checkpoint.body || "");
+  if (priorMission !== context.canonical.mission_id) {
+    throw new Error("checkpoint_mission_mismatch");
+  }
+
+  await postStatus(context, "RUNNING", "2/3 failed checkpoint verified", `source_issue=${recoveredIssue}`);
+  await sleep(500);
+  await postStatus(context, "RUNNING", "3/3 resume path confirmed", `source_issue=${recoveredIssue}`);
+  return `checkpoint recovery verified from issue #${recoveredIssue}`;
+}
+
 async function closeIssue(context) {
   await githubRequest(`/repos/${context.repository}/issues/${context.issueNumber}`, {
     method: "PATCH",
@@ -111,10 +157,17 @@ async function main() {
   const runId = process.env.GITHUB_RUN_ID;
   if (!repository || !runId) throw new Error("missing_github_runtime_identity");
 
-  const context = { repository, runId, issueNumber: issue.number };
+  const rawBody = issue.body || "";
+  const context = {
+    repository,
+    runId,
+    issueNumber: issue.number,
+    canonical: extractCanonicalIds(rawBody),
+  };
   let job;
   try {
-    job = parseJobBody(issue.body || "");
+    job = parseJobBody(rawBody);
+    context.canonical = job.canonical;
   } catch (error) {
     await postStatus(context, "REJECTED", "contract gate", error.message);
     process.exitCode = 2;
@@ -126,6 +179,8 @@ async function main() {
     let result;
     if (job.job_type === "heartbeat_probe") result = await runHeartbeatProbe(context);
     else if (job.job_type === "utility_search_self_test") result = await runUtilitySearchSelfTest(context);
+    else if (job.job_type === "intentional_failure_probe") result = await runIntentionalFailureProbe(context);
+    else if (job.job_type === "checkpoint_recovery_probe") result = await runCheckpointRecoveryProbe(context, job);
     else throw new Error("unreachable_job_type");
 
     await postStatus(context, "SUCCEEDED", "complete", result);
