@@ -1,0 +1,224 @@
+name: AI39 digital twin baseline canary
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  baseline:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install geospatial stack
+        run: python -m pip install --disable-pip-version-check numpy rasterio pystac-client planetary-computer requests pillow matplotlib
+      - name: Build measured baseline package
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          python - <<'PY'
+          import json, math, warnings
+          from datetime import datetime, timezone
+          from pathlib import Path
+
+          import numpy as np
+          import rasterio
+          from rasterio.enums import Resampling
+          from rasterio.transform import from_origin
+          from rasterio.warp import reproject, transform_bounds
+          from pystac_client import Client
+          import planetary_computer
+          import requests
+          from PIL import Image, ImageOps
+          import matplotlib
+          matplotlib.use('Agg')
+          import matplotlib.cm as cm
+
+          warnings.filterwarnings('ignore')
+
+          AOI_WGS84=[37.65,48.45,38.25,48.90]
+          CRS='EPSG:32637'
+          GRID_BBOX=[400170,5367190,445040,5416620]
+          DEM_RES=30
+          OPT_RES=20
+          DATES=['2026-07-28','2026-07-31','2026-08-05','2026-08-15','2026-08-17','2026-08-20']
+          LATEST=datetime.fromisoformat('2026-08-20T00:00:00+00:00')
+
+          def grid(res):
+              minx,miny,maxx,maxy=GRID_BBOX
+              width=math.ceil((maxx-minx)/res)
+              height=math.ceil((maxy-miny)/res)
+              transform=from_origin(minx,maxy,res,res)
+              return width,height,transform
+
+          def reproject_band(href, dst, transform, crs, *, resampling, nodata, src_band=1):
+              with rasterio.Env(AWS_NO_SIGN_REQUEST='YES', GDAL_DISABLE_READDIR_ON_OPEN='EMPTY_DIR'):
+                  with rasterio.open(href) as ds:
+                      reproject(
+                          source=rasterio.band(ds,src_band), destination=dst,
+                          src_transform=ds.transform, src_crs=ds.crs, src_nodata=ds.nodata,
+                          dst_transform=transform, dst_crs=crs, dst_nodata=nodata,
+                          resampling=resampling
+                      )
+
+          # ---- DEM / geometry truth ----
+          dw,dh,dtr=grid(DEM_RES)
+          dem=np.full((dh,dw),np.nan,np.float32)
+          pc=Client.open('https://planetarycomputer.microsoft.com/api/stac/v1',modifier=planetary_computer.sign_inplace)
+          dem_items=list(pc.search(collections=['cop-dem-glo-30'],bbox=AOI_WGS84).items())
+          dem_ids=[]
+          for item in dem_items:
+              asset=item.assets.get('data') or next((a for a in item.assets.values() if a.href.lower().endswith(('.tif','.tiff'))),None)
+              if not asset: continue
+              tile=np.full((dh,dw),np.nan,np.float32)
+              try:
+                  reproject_band(asset.href,tile,dtr,CRS,resampling=Resampling.bilinear,nodata=np.nan)
+              except Exception:
+                  continue
+              m=np.isfinite(tile)
+              dem[m]=tile[m]
+              dem_ids.append(item.id)
+          if np.isfinite(dem).mean()<0.95:
+              raise RuntimeError('DEM coverage below 95%')
+
+          valid=np.isfinite(dem)
+          fill=float(np.nanmedian(dem[valid]))
+          surf=np.where(valid,dem,fill)
+          gy,gx=np.gradient(surf,DEM_RES,DEM_RES)
+          slope=np.hypot(gx,gy)
+          az=math.radians(315); alt=math.radians(45)
+          aspect=np.arctan2(-gx,gy)
+          hs=np.sin(alt)*np.cos(np.arctan(slope)) + np.cos(alt)*np.sin(np.arctan(slope))*np.cos(az-aspect)
+          hs=np.clip((hs-hs.min())/(hs.max()-hs.min()+1e-6),0,1)
+          elev_lo,elev_hi=np.nanpercentile(dem,[1,99])
+          en=np.clip((surf-elev_lo)/(elev_hi-elev_lo+1e-6),0,1)
+          tint=(cm.terrain(en)[...,:3]*255).astype(np.uint8)
+          shade=(70+185*hs)[...,None]
+          terrain_rgb=np.clip(tint*0.42 + shade*0.58,0,255).astype(np.uint8)
+          Image.fromarray(terrain_rgb).save('out/terrain_hillshade_elevation.png')
+          Image.fromarray((hs*255).astype(np.uint8)).save('out/hillshade.png')
+
+          dem_profile={'driver':'GTiff','height':dh,'width':dw,'count':1,'dtype':'float32','crs':CRS,'transform':dtr,'compress':'deflate','tiled':True,'nodata':-9999.0}
+          with rasterio.open('out/dem_30m.tif','w',**dem_profile) as ds:
+              ds.write(np.where(valid,dem,-9999).astype(np.float32),1)
+
+          # ---- Optical freshest-clear mosaic ----
+          ow,oh,otr=grid(OPT_RES)
+          rgb=np.zeros((oh,ow,3),np.float32)
+          filled=np.zeros((oh,ow),bool)
+          pixel_age=np.full((oh,ow),65535,np.uint16)
+          provenance=np.zeros((oh,ow),np.uint16)
+          latest_cloud=np.ones((oh,ow),np.uint8)
+          provenance_map={}
+          scene_records=[]
+          prov_code=1
+          STAC='https://earth-search.aws.element84.com/v1/search'
+
+          def search_day(day):
+              r=requests.post(STAC,json={'collections':['sentinel-2-c1-l2a'],'bbox':AOI_WGS84,'datetime':day+'T00:00:00Z/'+day+'T23:59:59Z','limit':100},timeout=90)
+              r.raise_for_status(); return r.json().get('features',[])
+
+          for day in reversed(DATES):
+              day_dt=datetime.fromisoformat(day+'T00:00:00+00:00')
+              age=(LATEST-day_dt).days
+              items=search_day(day)
+              day_ids=[]
+              for item in items:
+                  assets=item.get('assets',{})
+                  if not all((assets.get(k) or {}).get('href') for k in ['red','green','blue','scl']):
+                      continue
+                  rr=np.zeros((oh,ow),np.float32); gg=np.zeros_like(rr); bb=np.zeros_like(rr); scl=np.zeros((oh,ow),np.uint8)
+                  try:
+                      reproject_band(assets['red']['href'],rr,otr,CRS,resampling=Resampling.bilinear,nodata=0)
+                      reproject_band(assets['green']['href'],gg,otr,CRS,resampling=Resampling.bilinear,nodata=0)
+                      reproject_band(assets['blue']['href'],bb,otr,CRS,resampling=Resampling.bilinear,nodata=0)
+                      reproject_band(assets['scl']['href'],scl,otr,CRS,resampling=Resampling.nearest,nodata=0)
+                  except Exception:
+                      continue
+                  valid=(rr>0)&(gg>0)&(bb>0)
+                  clear=valid & np.isin(scl,[2,4,5,6,7])
+                  if day==DATES[-1]:
+                      latest_cloud[valid]=(~clear[valid]).astype(np.uint8)
+                  take=clear & (~filled)
+                  if not take.any():
+                      continue
+                  # Sentinel-2 reflectance scale -> display stretch later
+                  rgb[take,0]=rr[take]; rgb[take,1]=gg[take]; rgb[take,2]=bb[take]
+                  pixel_age[take]=age
+                  provenance[take]=prov_code
+                  item_id=item.get('id') or f'unknown-{day}-{prov_code}'
+                  provenance_map[str(prov_code)]={'scene_id':item_id,'date':day}
+                  day_ids.append(item_id)
+                  prov_code+=1
+                  filled[take]=True
+              scene_records.append({'date':day,'scene_ids':sorted(set(day_ids))})
+
+          if filled.mean()<0.75:
+              raise RuntimeError(f'freshest-clear optical coverage too low: {filled.mean():.3f}')
+
+          vals=rgb[filled]
+          lo=np.percentile(vals,2,axis=0); hi=np.percentile(vals,98,axis=0)
+          disp=np.clip((rgb-lo)/(hi-lo+1e-6),0,1)
+          disp=(disp*255).astype(np.uint8)
+          disp[~filled]=0
+          Image.fromarray(disp).save('out/freshest_clear_optical.png')
+
+          age_vis=np.where(pixel_age==65535,255,np.clip(pixel_age*18,0,220)).astype(np.uint8)
+          Image.fromarray(age_vis).save('out/pixel_age.png')
+          Image.fromarray((latest_cloud*255).astype(np.uint8)).save('out/latest_cloud_mask.png')
+
+          mask_profile={'driver':'GTiff','height':oh,'width':ow,'count':1,'crs':CRS,'transform':otr,'compress':'deflate','tiled':True}
+          with rasterio.open('out/pixel_age_days.tif','w',dtype='uint16',nodata=65535,**mask_profile) as ds: ds.write(pixel_age,1)
+          with rasterio.open('out/provenance_code.tif','w',dtype='uint16',nodata=0,**mask_profile) as ds: ds.write(provenance,1)
+          with rasterio.open('out/latest_cloud_mask.tif','w',dtype='uint8',nodata=255,**mask_profile) as ds: ds.write(latest_cloud,1)
+
+          manifest={
+            'status':'MEASURED_CANARY',
+            'generated_utc':datetime.now(timezone.utc).isoformat(),
+            'aoi_wgs84_bbox':AOI_WGS84,
+            'analysis_crs':CRS,
+            'analysis_bbox_utm37':GRID_BBOX,
+            'dem':{
+              'resolution_m':DEM_RES,
+              'item_ids':dem_ids,
+              'coverage_fraction':round(float(valid.mean()),5),
+              'elevation_p01_m':round(float(elev_lo),2),
+              'elevation_p99_m':round(float(elev_hi),2)
+            },
+            'optical':{
+              'resolution_m':OPT_RES,
+              'dates':DATES,
+              'scene_records':list(reversed(scene_records)),
+              'clear_mosaic_coverage_fraction':round(float(filled.mean()),5),
+              'pixel_age_max_days_observed':int(pixel_age[pixel_age!=65535].max()),
+              'provenance_code_map':provenance_map
+            },
+            'truth_rules':[
+              'Freshest-clear uses only real observed clear pixels.',
+              'Cloud-obscured locations fall back to older observed clear pixels and retain pixel age.',
+              'No generative inpainting is used.',
+              'Upsampling does not increase evidence resolution.',
+              'Current tactical interpretation is not produced by this canary.'
+            ]
+          }
+          Path('out/baseline_manifest.json').write_text(json.dumps(manifest,indent=2),encoding='utf-8')
+          print(json.dumps({'dem_ids':dem_ids,'optical_coverage':manifest['optical']['clear_mosaic_coverage_fraction'],'scene_count':sum(len(x['scene_ids']) for x in manifest['optical']['scene_records'])},indent=2))
+          PY
+      - name: List outputs
+        run: ls -lh out && python - <<'PY'
+          import json
+          m=json.load(open('out/baseline_manifest.json'))
+          print(json.dumps({'status':m['status'],'dem':m['dem'],'optical_coverage':m['optical']['clear_mosaic_coverage_fraction'],'scene_records':m['optical']['scene_records']},indent=2))
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ai39-digital-twin-baseline-canary
+          path: out/
+          if-no-files-found: error
+          retention-days: 2
