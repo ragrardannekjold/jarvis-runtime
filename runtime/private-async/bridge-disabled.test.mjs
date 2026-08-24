@@ -7,7 +7,10 @@ const workflowUrl = new URL("../../.github/workflows/private-async-bridge.yml", 
 test("legacy V1 bridge workflow is an inert manual stub", async () => {
   const workflow = await readFile(workflowUrl, "utf8");
 
-  assert.match(workflow, /workflow_dispatch:/);
+  const topLevelOnKeys = workflow.match(/^on:\s*$/gm) ?? [];
+  assert.equal(topLevelOnKeys.length, 1);
+  assert.doesNotMatch(workflow, /^on:[ \t]+\S/m);
+  assert.match(workflow, /^on:\s*\n  workflow_dispatch:\s*\n\npermissions:\s*\{\}/m);
   assert.match(workflow, /if:\s*\$\{\{ false \}\}/);
   assert.match(workflow, /permissions:\s*\{\}/);
   assert.doesNotMatch(workflow, /issues:/);
