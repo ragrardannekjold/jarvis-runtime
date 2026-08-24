@@ -31,11 +31,11 @@ jobs:
           import rasterio
           from rasterio.enums import Resampling
           from rasterio.transform import from_origin
-          from rasterio.warp import reproject, transform_bounds
+          from rasterio.warp import reproject
           from pystac_client import Client
           import planetary_computer
           import requests
-          from PIL import Image, ImageOps
+          from PIL import Image
           import matplotlib
           matplotlib.use('Agg')
           import matplotlib.cm as cm
@@ -67,7 +67,7 @@ jobs:
                           resampling=resampling
                       )
 
-          # ---- DEM / geometry truth ----
+          # DEM / geometry truth
           dw,dh,dtr=grid(DEM_RES)
           dem=np.full((dh,dw),np.nan,np.float32)
           pc=Client.open('https://planetarycomputer.microsoft.com/api/stac/v1',modifier=planetary_computer.sign_inplace)
@@ -108,7 +108,7 @@ jobs:
           with rasterio.open('out/dem_30m.tif','w',**dem_profile) as ds:
               ds.write(np.where(valid,dem,-9999).astype(np.float32),1)
 
-          # ---- Optical freshest-clear mosaic ----
+          # Optical freshest-clear mosaic
           ow,oh,otr=grid(OPT_RES)
           rgb=np.zeros((oh,ow,3),np.float32)
           filled=np.zeros((oh,ow),bool)
@@ -141,14 +141,13 @@ jobs:
                       reproject_band(assets['scl']['href'],scl,otr,CRS,resampling=Resampling.nearest,nodata=0)
                   except Exception:
                       continue
-                  valid=(rr>0)&(gg>0)&(bb>0)
-                  clear=valid & np.isin(scl,[2,4,5,6,7])
+                  valid_opt=(rr>0)&(gg>0)&(bb>0)
+                  clear=valid_opt & np.isin(scl,[2,4,5,6,7])
                   if day==DATES[-1]:
-                      latest_cloud[valid]=(~clear[valid]).astype(np.uint8)
+                      latest_cloud[valid_opt]=(~clear[valid_opt]).astype(np.uint8)
                   take=clear & (~filled)
                   if not take.any():
                       continue
-                  # Sentinel-2 reflectance scale -> display stretch later
                   rgb[take,0]=rr[take]; rgb[take,1]=gg[take]; rgb[take,2]=bb[take]
                   pixel_age[take]=age
                   provenance[take]=prov_code
@@ -211,11 +210,9 @@ jobs:
           print(json.dumps({'dem_ids':dem_ids,'optical_coverage':manifest['optical']['clear_mosaic_coverage_fraction'],'scene_count':sum(len(x['scene_ids']) for x in manifest['optical']['scene_records'])},indent=2))
           PY
       - name: List outputs
-        run: ls -lh out && python - <<'PY'
-          import json
-          m=json.load(open('out/baseline_manifest.json'))
-          print(json.dumps({'status':m['status'],'dem':m['dem'],'optical_coverage':m['optical']['clear_mosaic_coverage_fraction'],'scene_records':m['optical']['scene_records']},indent=2))
-          PY
+        run: |
+          ls -lh out
+          python -c "import json; m=json.load(open('out/baseline_manifest.json')); print(json.dumps({'status':m['status'],'dem':m['dem'],'optical_coverage':m['optical']['clear_mosaic_coverage_fraction'],'scene_records':m['optical']['scene_records']}, indent=2))"
       - uses: actions/upload-artifact@v4
         with:
           name: ai39-digital-twin-baseline-canary
