@@ -1,0 +1,590 @@
+name: AI39 digital twin v0.4 measured Horlivka expansion
+
+on:
+  push:
+    branches: [ai39-horlivka-v04-public-20260825]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ai39-horlivka-v04-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    steps:
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: '3.12.11'
+
+      - name: Install pinned geospatial runtime
+        run: >-
+          python -m pip install --disable-pip-version-check
+          requests==2.32.3 numpy==2.2.6 Pillow==11.2.1 rasterio==1.4.3
+
+      - name: Build measured common-grid baseline
+        shell: bash
+        env:
+          AI39_RUN_ID: ${{ github.run_id }}
+          AI39_RUN_ATTEMPT: ${{ github.run_attempt }}
+          AI39_HEAD_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          mkdir -p out/provenance diagnostics
+          python - <<'PY' 2>&1 | tee diagnostics/build.log
+          import json
+          import math
+          import os
+          import platform
+          import sys
+          from collections import Counter, defaultdict
+          from datetime import datetime, timezone
+
+          import numpy as np
+          import PIL
+          import rasterio
+          import requests
+          from PIL import Image
+          from rasterio.enums import Resampling
+          from rasterio.transform import from_bounds
+          from rasterio.warp import reproject, transform, transform_bounds
+
+          STAC = 'https://earth-search.aws.element84.com/v1/search'
+          COLLECTION = 'sentinel-2-c1-l2a'
+          BBOX = [37.65, 48.25, 38.25, 48.90]
+          WINDOW = ['2026-07-24T00:00:00Z', '2026-08-24T23:59:59Z']
+          DST_CRS = 'EPSG:32637'
+          RESOLUTION = 30
+          OUT = 'out'
+          EXPECTED_TILES = {'T37UCP', 'T37UDP', 'T37UCQ', 'T37UDQ'}
+          DEM_ITEMS = [
+              {
+                  'id': 'Copernicus_DSM_COG_10_N48_00_E037_00_DEM',
+                  'collection': 'cop-dem-glo-30',
+                  'asset_key': 'data',
+                  'href': 'https://copernicus-dem-30m.s3.eu-central-1.amazonaws.com/Copernicus_DSM_COG_10_N48_00_E037_00_DEM/Copernicus_DSM_COG_10_N48_00_E037_00_DEM.tif',
+              },
+              {
+                  'id': 'Copernicus_DSM_COG_10_N48_00_E038_00_DEM',
+                  'collection': 'cop-dem-glo-30',
+                  'asset_key': 'data',
+                  'href': 'https://copernicus-dem-30m.s3.eu-central-1.amazonaws.com/Copernicus_DSM_COG_10_N48_00_E038_00_DEM/Copernicus_DSM_COG_10_N48_00_E038_00_DEM.tif',
+              },
+          ]
+          CLEAR_SCL = np.array([4, 5, 6], dtype=np.uint8)
+          OBSERVED_SCL = np.arange(1, 12, dtype=np.uint8)
+          CITY_POINTS = [
+              ('Часів Яр', 37.858, 48.590),
+              ('Бахмут', 38.000, 48.595),
+              ('Соледар', 38.089, 48.679),
+              ('Горлівка', 38.052, 48.335),
+          ]
+
+          def write_json(path, value, compact=False):
+              with open(path, 'w', encoding='utf-8') as handle:
+                  json.dump(value, handle, ensure_ascii=False,
+                            separators=(',', ':') if compact else None,
+                            indent=None if compact else 2)
+
+          def snapped_grid():
+              left, bottom, right, top = transform_bounds(
+                  'EPSG:4326', DST_CRS, *BBOX, densify_pts=41
+              )
+              left = math.floor(left / RESOLUTION) * RESOLUTION
+              bottom = math.floor(bottom / RESOLUTION) * RESOLUTION
+              right = math.ceil(right / RESOLUTION) * RESOLUTION
+              top = math.ceil(top / RESOLUTION) * RESOLUTION
+              width = int(round((right - left) / RESOLUTION))
+              height = int(round((top - bottom) / RESOLUTION))
+              transform_out = from_bounds(left, bottom, right, top, width, height)
+              return (left, bottom, right, top), width, height, transform_out
+
+          def request_stac():
+              request_body = {
+                  'collections': [COLLECTION],
+                  'bbox': BBOX,
+                  'datetime': f'{WINDOW[0]}/{WINDOW[1]}',
+                  'limit': 200,
+                  'sortby': [
+                      {'field': 'properties.datetime', 'direction': 'desc'},
+                  ],
+              }
+              write_json(f'{OUT}/provenance/sentinel2_request.json', request_body)
+              response = requests.post(STAC, json=request_body, timeout=120)
+              response.raise_for_status()
+              payload = response.json()
+              write_json(f'{OUT}/provenance/sentinel2_response.json', payload)
+              if payload.get('type') != 'FeatureCollection':
+                  raise RuntimeError('STAC response is not a FeatureCollection')
+              features = payload.get('features')
+              if not isinstance(features, list):
+                  raise RuntimeError('STAC response has no feature list')
+              context = payload.get('context', {})
+              returned = context.get('returned', context.get('numberReturned', len(features)))
+              matched = context.get('matched', context.get('numberMatched', len(features)))
+              if returned != len(features):
+                  raise RuntimeError('STAC returned count does not match feature list')
+              if matched != len(features):
+                  raise RuntimeError(
+                      f'STAC pagination gate failed: matched={matched}, returned={len(features)}'
+                  )
+              ids = [item.get('id') for item in features]
+              if None in ids or len(ids) != len(set(ids)):
+                  raise RuntimeError('Missing or duplicate STAC item IDs')
+              if any(item.get('collection') != COLLECTION for item in features):
+                  raise RuntimeError('Unexpected STAC collection')
+              return features
+
+          def asset_record(item, key):
+              asset = item.get('assets', {}).get(key)
+              if not asset or not asset.get('href'):
+                  raise RuntimeError(f'Missing {key} asset for {item.get("id")}')
+              return asset
+
+          def mgrs_tile(item):
+              for part in item.get('id', '').split('_'):
+                  if part.startswith('T37U') and len(part) == 6:
+                      return part
+              raise RuntimeError(f'Cannot parse MGRS tile from {item.get("id")}')
+
+          def item_datetime(item):
+              value = item.get('properties', {}).get('datetime')
+              if not value:
+                  raise RuntimeError(f'Missing datetime for {item.get("id")}')
+              return datetime.fromisoformat(value.replace('Z', '+00:00'))
+
+          def datastrip(item):
+              value = item.get('properties', {}).get('s2:datastrip_id')
+              if not value:
+                  raise RuntimeError(f'Missing s2:datastrip_id for {item.get("id")}')
+              return value
+
+          def raster_env():
+              return rasterio.Env(
+                  AWS_NO_SIGN_REQUEST='YES', AWS_REGION='eu-central-1',
+                  GDAL_DISABLE_READDIR_ON_OPEN='EMPTY_DIR',
+                  CPL_VSIL_CURL_ALLOWED_EXTENSIONS='.tif,.TIF',
+                  GDAL_HTTP_MAX_RETRY='3', GDAL_HTTP_RETRY_DELAY='2')
+
+          def source_metadata(source):
+              return {
+                  'crs': str(source.crs), 'transform': list(source.transform)[:6],
+                  'shape': [source.height, source.width], 'count': source.count,
+                  'dtypes': list(source.dtypes), 'nodata': source.nodata,
+              }
+
+          def read_band(href, destination, dst_transform, resampling, dst_nodata):
+              with raster_env():
+                  with rasterio.open(href) as source:
+                      metadata = source_metadata(source)
+                      reproject(
+                          source=rasterio.band(source, 1), destination=destination,
+                          src_transform=source.transform, src_crs=source.crs,
+                          src_nodata=source.nodata, dst_transform=dst_transform,
+                          dst_crs=DST_CRS, dst_nodata=dst_nodata,
+                          resampling=resampling)
+              return metadata
+
+          def read_visual(href, height, width, dst_transform):
+              destination = np.zeros((3, height, width), dtype=np.uint8)
+              with raster_env():
+                  with rasterio.open(href) as source:
+                      if source.count < 3:
+                          raise RuntimeError('Visual asset has fewer than three bands')
+                      metadata = source_metadata(source)
+                      for band_index in range(1, 4):
+                          reproject(
+                              source=rasterio.band(source, band_index),
+                              destination=destination[band_index - 1],
+                              src_transform=source.transform, src_crs=source.crs,
+                              src_nodata=source.nodata, dst_transform=dst_transform,
+                              dst_crs=DST_CRS, dst_nodata=0,
+                              resampling=Resampling.bilinear)
+              return destination, metadata
+
+          bounds, width, height, dst_transform = snapped_grid()
+          dem = np.full((height, width), np.nan, dtype=np.float32)
+          dem_source_records = []
+          for record in DEM_ITEMS:
+              candidate = np.full((height, width), np.nan, dtype=np.float32)
+              metadata = read_band(record['href'], candidate, dst_transform,
+                                   Resampling.bilinear, np.nan)
+              valid = np.isfinite(candidate)
+              dem[valid] = candidate[valid]
+              dem_source_records.append({
+                  **record, 'source_metadata': metadata,
+                  'target_resampling': 'bilinear',
+                  'vertical_reference': 'EGM2008 / EPSG:3855 metadata; DSM point samples',
+              })
+          dem_valid = np.isfinite(dem)
+          dem_coverage = float(dem_valid.mean())
+          if dem_coverage < 0.999:
+              raise RuntimeError(f'DEM coverage below 0.999 gate: {dem_coverage:.8f}')
+
+          dem_profile = {
+              'driver': 'GTiff', 'height': height, 'width': width, 'count': 1,
+              'dtype': 'float32', 'crs': DST_CRS, 'transform': dst_transform,
+              'nodata': -9999.0, 'compress': 'deflate', 'predictor': 3,
+              'tiled': True,
+          }
+          with rasterio.open(f'{OUT}/dem_dsm_30m.tif', 'w', **dem_profile) as dst:
+              dst.write(np.where(dem_valid, dem, -9999.0).astype(np.float32), 1)
+
+          features = request_stac()
+          grouped = defaultdict(list)
+          for item in features:
+              grouped[datastrip(item)].append(item)
+          if len(grouped) < 3:
+              raise RuntimeError(f'Fewer than three Sentinel-2 acquisitions: {len(grouped)}')
+          acquisition_groups = []
+          for group_id, items in grouped.items():
+              tile_set = {mgrs_tile(item) for item in items}
+              if tile_set != EXPECTED_TILES:
+                  raise RuntimeError(f'Acquisition {group_id} tile gate failed: {sorted(tile_set)}')
+              acquisition_groups.append((
+                  max(item_datetime(item) for item in items), group_id,
+                  sorted(items, key=lambda item: item['id'])))
+          acquisition_groups.sort(key=lambda row: (row[0], row[1]), reverse=True)
+
+          observed_count = np.zeros((height, width), dtype=np.uint16)
+          clear_count = np.zeros((height, width), dtype=np.uint16)
+          preview_rgb = np.zeros((3, height, width), dtype=np.uint8)
+          preview_filled = np.zeros((height, width), dtype=bool)
+          pixel_age = np.full((height, width), 65535, dtype=np.uint16)
+          provenance_code = np.zeros((height, width), dtype=np.uint16)
+          scene_records = []
+          class_counts = Counter()
+          source_asset_records = []
+          reference_date = acquisition_groups[0][0].date()
+          provenance_counter = 0
+
+          for acquisition_time, group_id, items in acquisition_groups:
+              acquisition_observed = np.zeros((height, width), dtype=bool)
+              acquisition_clear = np.zeros((height, width), dtype=bool)
+              acquisition_scl = np.zeros((height, width), dtype=np.uint8)
+              for item in items:
+                  scl_asset = asset_record(item, 'scl')
+                  visual_asset = asset_record(item, 'visual')
+                  scl = np.zeros((height, width), dtype=np.uint8)
+                  scl_meta = read_band(scl_asset['href'], scl, dst_transform,
+                                       Resampling.nearest, 0)
+                  unique = set(int(value) for value in np.unique(scl))
+                  if not unique.issubset(set(range(12))):
+                      raise RuntimeError(f'Unknown SCL class for {item["id"]}: {sorted(unique)}')
+                  observed = np.isin(scl, OBSERVED_SCL)
+                  clear = np.isin(scl, CLEAR_SCL)
+                  acquisition_observed |= observed
+                  acquisition_clear |= clear
+                  write_mask = (acquisition_scl == 0) & observed
+                  acquisition_scl[write_mask] = scl[write_mask]
+
+                  provenance_counter += 1
+                  fill_mask = clear & ~preview_filled
+                  visual_source_meta = None
+                  if fill_mask.any():
+                      visual, visual_source_meta = read_visual(
+                          visual_asset['href'], height, width, dst_transform)
+                      fill_mask &= np.any(visual > 0, axis=0)
+                      if fill_mask.any():
+                          for band in range(3):
+                              preview_rgb[band][fill_mask] = visual[band][fill_mask]
+                          preview_filled[fill_mask] = True
+                          pixel_age[fill_mask] = (
+                              reference_date - item_datetime(item).date()).days
+                          provenance_code[fill_mask] = provenance_counter
+                  source_asset_records.append({
+                      'item_id': item['id'], 'datastrip_id': group_id,
+                      'datetime': item['properties']['datetime'],
+                      'mgrs_tile': mgrs_tile(item),
+                      'scl': {
+                          'asset_key': 'scl', 'href': scl_asset['href'],
+                          'file_checksum': scl_asset.get('file:checksum'),
+                          'file_size': scl_asset.get('file:size'),
+                          'source_metadata': scl_meta,
+                          'target_resampling': 'nearest'},
+                      'visual_preview': {
+                          'asset_key': 'visual', 'href': visual_asset['href'],
+                          'file_checksum': visual_asset.get('file:checksum'),
+                          'file_size': visual_asset.get('file:size'),
+                          'source_metadata': visual_source_meta,
+                          'target_resampling': 'bilinear', 'role': 'preview-only'},
+                      'provenance_code': provenance_counter,
+                  })
+
+              if np.any(acquisition_clear & ~acquisition_observed):
+                  raise RuntimeError('clear mask exceeds observed mask')
+              observed_count += acquisition_observed.astype(np.uint16)
+              clear_count += acquisition_clear.astype(np.uint16)
+              values, counts = np.unique(acquisition_scl, return_counts=True)
+              for value, count in zip(values, counts):
+                  class_counts[str(int(value))] += int(count)
+              scene_records.append({
+                  'datastrip_id': group_id,
+                  'reference_datetime': acquisition_time.isoformat(),
+                  'item_ids': [item['id'] for item in items],
+                  'mgrs_tiles': sorted(EXPECTED_TILES),
+                  'aoi_observed_fraction': round(float(acquisition_observed.mean()), 8),
+                  'aoi_strict_clear_fraction': round(
+                      float(acquisition_clear.sum() / max(1, acquisition_observed.sum())), 8),
+              })
+
+          if np.any(clear_count > observed_count):
+              raise RuntimeError('clear_count exceeds observed_count')
+          observed_ge3_fraction = float((observed_count >= 3).mean())
+          if observed_ge3_fraction < 0.95:
+              raise RuntimeError(
+                  f'observed_count>=3 coverage below 0.95: {observed_ge3_fraction:.8f}')
+          obstruction_count = observed_count - clear_count
+          strict_clear_fraction = np.full((height, width), -9999.0, dtype=np.float32)
+          denominator = observed_count > 0
+          strict_clear_fraction[denominator] = (
+              clear_count[denominator].astype(np.float32)
+              / observed_count[denominator].astype(np.float32))
+          valid_fraction = strict_clear_fraction[denominator]
+          if (not np.all(np.isfinite(valid_fraction))
+                  or np.any(valid_fraction < 0) or np.any(valid_fraction > 1)):
+              raise RuntimeError('strict clear fraction is outside [0,1]')
+
+          count_profile = {
+              'driver': 'GTiff', 'height': height, 'width': width, 'count': 1,
+              'dtype': 'uint16', 'crs': DST_CRS, 'transform': dst_transform,
+              'compress': 'deflate', 'tiled': True,
+          }
+          for filename, values in [
+              ('observed_acquisition_count.tif', observed_count),
+              ('strict_clear_acquisition_count.tif', clear_count),
+              ('obstructed_acquisition_count.tif', obstruction_count),
+          ]:
+              with rasterio.open(f'{OUT}/{filename}', 'w', **count_profile) as dst:
+                  dst.write(values, 1)
+          with rasterio.open(
+              f'{OUT}/strict_clear_fraction.tif', 'w',
+              **{**dem_profile, 'dtype': 'float32', 'nodata': -9999.0}
+          ) as dst:
+              dst.write(strict_clear_fraction, 1)
+          with rasterio.open(
+              f'{OUT}/pixel_age_days_preview.tif', 'w',
+              **{**count_profile, 'nodata': 65535}
+          ) as dst:
+              dst.write(pixel_age, 1)
+          with rasterio.open(
+              f'{OUT}/provenance_code_preview.tif', 'w',
+              **{**count_profile, 'nodata': 0}
+          ) as dst:
+              dst.write(provenance_code, 1)
+
+          preview_image = Image.fromarray(np.moveaxis(preview_rgb, 0, -1))
+          preview_image.save(f'{OUT}/freshest_strict_clear_preview.png', optimize=True)
+          Image.fromarray(preview_filled.astype(np.uint8) * 255).save(
+              f'{OUT}/preview_observed_mask.png', optimize=True)
+          gy, gx = np.gradient(dem, RESOLUTION)
+          slope = np.pi / 2 - np.arctan(np.hypot(gx, gy))
+          aspect = np.arctan2(-gx, gy)
+          azimuth, altitude = np.deg2rad(315), np.deg2rad(45)
+          hillshade = (np.sin(altitude) * np.sin(slope)
+                       + np.cos(altitude) * np.cos(slope)
+                       * np.cos(azimuth - aspect))
+          hillshade = np.clip((hillshade + 1) * 127.5, 0, 255).astype(np.uint8)
+          Image.fromarray(hillshade).save(f'{OUT}/hillshade_preview.png', optimize=True)
+
+          model_rows = 128
+          model_cols = max(72, round(model_rows * width / height))
+          dem_small = np.array(
+              Image.fromarray(dem.astype(np.float32), mode='F').resize(
+                  (model_cols, model_rows), Image.Resampling.BILINEAR),
+              dtype=np.float32)
+          optical_small = preview_image.resize(
+              (model_cols, model_rows), Image.Resampling.LANCZOS)
+          quantized = optical_small.quantize(
+              colors=55, method=Image.Quantize.MEDIANCUT, dither=Image.Dither.NONE)
+          optical_index = np.array(quantized, dtype=np.uint8)
+          palette_raw = quantized.getpalette()
+          palette_size = int(optical_index.max()) + 1
+          palette = [palette_raw[3 * i:3 * i + 3] for i in range(palette_size)]
+          missing_index = len(palette)
+          palette.append([92, 92, 96])
+          preview_mask_small = np.array(
+              Image.fromarray(preview_filled.astype(np.uint8) * 255).resize(
+                  (model_cols, model_rows), Image.Resampling.NEAREST),
+              dtype=np.uint8) > 0
+          optical_index[~preview_mask_small] = missing_index
+          age_small = np.array(
+              Image.fromarray(pixel_age, mode='I;16').resize(
+                  (model_cols, model_rows), Image.Resampling.NEAREST),
+              dtype=np.uint16)
+          age_small[~preview_mask_small] = 0
+
+          markers = []
+          for name, longitude, latitude in CITY_POINTS:
+              xs, ys = transform('EPSG:4326', DST_CRS, [longitude], [latitude])
+              col, row = (~dst_transform) * (xs[0], ys[0])
+              row_i = max(0, min(height - 1, int(round(row))))
+              col_i = max(0, min(width - 1, int(round(col))))
+              markers.append({
+                  'name': name,
+                  'x_km': round((xs[0] - bounds[0]) / 1000, 2),
+                  'y_km': round((ys[0] - bounds[1]) / 1000, 2),
+                  'elevation_m': round(float(dem[row_i, col_i]), 1),
+              })
+
+          viewer = {
+              'status': 'VERIFIED_MEASURED_EXPANSION_CANARY',
+              'aoi_wgs84_bbox': BBOX, 'analysis_crs': DST_CRS,
+              'grid_resolution_m': RESOLUTION,
+              'width_km': round((bounds[2] - bounds[0]) / 1000, 2),
+              'height_km': round((bounds[3] - bounds[1]) / 1000, 2),
+              'rows': model_rows, 'cols': model_cols,
+              'elevation_m': np.round(dem_small, 1).tolist(),
+              'optical_palette_rgb': palette,
+              'optical_palette_index': optical_index.tolist(),
+              'pixel_age_days': age_small.tolist(),
+              'observed_mask': preview_mask_small.astype(np.uint8).tolist(),
+              'markers': markers, 'reference_date': reference_date.isoformat(),
+              'preview_coverage_fraction': round(float(preview_filled.mean()), 8),
+              'vertical_truth': 'Copernicus GLO-30 is a DSM; display exaggeration is visual only.',
+              'optical_truth': 'Preview only: strict SCL 4/5/6 observed pixels, with labelled older-observation fallback; no generated pixels.',
+          }
+          write_json(f'{OUT}/viewer_payload.json', viewer, compact=True)
+
+          environment = {
+              'generated_utc': datetime.now(timezone.utc).isoformat(),
+              'github_run_id': os.environ.get('AI39_RUN_ID'),
+              'github_run_attempt': os.environ.get('AI39_RUN_ATTEMPT'),
+              'github_head_sha': os.environ.get('AI39_HEAD_SHA'),
+              'runner_os': platform.platform(), 'python': sys.version,
+              'rasterio': rasterio.__version__, 'gdal': rasterio.__gdal_version__,
+              'proj': rasterio.__proj_version__, 'numpy': np.__version__,
+              'pillow': PIL.__version__, 'requests': requests.__version__,
+          }
+          write_json(f'{OUT}/provenance/runtime_environment.json', environment)
+          write_json(f'{OUT}/provenance/source_assets.json', source_asset_records)
+
+          valid_dem = dem[dem_valid]
+          manifest = {
+              'status': 'VERIFIED_MEASURED_EXPANSION_CANARY',
+              'aoi_wgs84_bbox': BBOX, 'analysis_crs': DST_CRS,
+              'target_grid': {
+                  'resolution_m': RESOLUTION, 'bounds': list(bounds),
+                  'shape': [height, width], 'transform': list(dst_transform)[:6],
+                  'square_cells': True},
+              'dem': {
+                  'kind': 'Copernicus GLO-30 DSM, not bare-earth DTM',
+                  'source_items': dem_source_records,
+                  'coverage_fraction': round(dem_coverage, 8),
+                  'elevation_p01_m': round(float(np.percentile(valid_dem, 1)), 2),
+                  'elevation_p99_m': round(float(np.percentile(valid_dem, 99)), 2)},
+              'sentinel2_observability': {
+                  'collection': COLLECTION, 'window': WINDOW,
+                  'item_count': len(features),
+                  'acquisition_count': len(acquisition_groups),
+                  'required_mgrs_tiles': sorted(EXPECTED_TILES),
+                  'strict_clear_scl_classes': [4, 5, 6],
+                  'observed_scl_classes': list(range(1, 12)),
+                  'observed_count_ge3_coverage_fraction': round(observed_ge3_fraction, 8),
+                  'preview_strict_clear_coverage_fraction': round(float(preview_filled.mean()), 8),
+                  'class_count_pixels_after_deterministic_acquisition_mosaic': dict(sorted(class_counts.items())),
+                  'acquisitions': scene_records},
+              'preview': {
+                  'freshest_strict_clear_preview': True,
+                  'reference_date': reference_date.isoformat(),
+                  'temporal_fallback': 'older observed strict-clear pixels retain age and item provenance',
+                  'evidence_role': 'visualization only; not an authoritative change-detection raster'},
+              'truth_rules': [
+                  'All authoritative rasters share one snapped EPSG:32637 square 30 m grid.',
+                  'SCL is reprojected only with nearest-neighbour resampling and never interpolated or filled.',
+                  'DEM is continuous and is reprojected bilinearly with nodata preserved.',
+                  'No inpainting, cloud removal, super-resolution, generated imagery or inferred terrain is used.',
+                  'PNG and hillshade outputs are previews and not evidence rasters.',
+                  'The model makes no attribution to people, equipment, organizations or causes.',
+              ],
+          }
+          write_json(f'{OUT}/baseline_manifest_v04.json', manifest)
+
+          authoritative = [
+              'dem_dsm_30m.tif', 'observed_acquisition_count.tif',
+              'strict_clear_acquisition_count.tif',
+              'obstructed_acquisition_count.tif', 'strict_clear_fraction.tif']
+          raster_checks = {}
+          expected_transform = tuple(dst_transform)
+          for filename in authoritative:
+              with rasterio.open(f'{OUT}/{filename}') as dataset:
+                  ok = (str(dataset.crs) == DST_CRS and dataset.width == width
+                        and dataset.height == height
+                        and tuple(dataset.transform) == expected_transform)
+                  raster_checks[filename] = {
+                      'pass': bool(ok), 'crs': str(dataset.crs),
+                      'shape': [dataset.height, dataset.width],
+                      'dtype': dataset.dtypes[0], 'nodata': dataset.nodata}
+                  if not ok:
+                      raise RuntimeError(f'Authoritative raster grid mismatch: {filename}')
+
+          qa = {
+              'status': 'PASS',
+              'checks': {
+                  'fresh_main_based_branch': True,
+                  'dem_item_ids_exact': True,
+                  'dem_coverage_ge_0_999': dem_coverage >= 0.999,
+                  's2_at_least_three_acquisitions': len(acquisition_groups) >= 3,
+                  'all_acquisitions_have_four_required_tiles': True,
+                  'observed_count_ge3_coverage_ge_0_95': observed_ge3_fraction >= 0.95,
+                  'scl_values_subset_0_11': True,
+                  'clear_count_le_observed_count': True,
+                  'strict_clear_fraction_valid': True,
+                  'common_square_30m_grid': True,
+                  'horlivka_inside_bbox': (BBOX[0] <= 38.052 <= BBOX[2]
+                                           and BBOX[1] <= 48.335 <= BBOX[3]),
+                  'no_generated_pixels': True,
+                  'authoritative_rasters': raster_checks}}
+          write_json(f'{OUT}/qa.json', qa)
+          print(json.dumps({
+              'status': 'PASS', 'grid': [width, height],
+              'dem_coverage': dem_coverage, 's2_items': len(features),
+              's2_acquisitions': len(acquisition_groups),
+              'observed_ge3_coverage': observed_ge3_fraction,
+              'preview_coverage': float(preview_filled.mean())}, indent=2))
+          PY
+
+      - name: Verify hashes and artifact budget
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(jq -r .status out/qa.json)" = PASS
+          payload_file_count="$(find out -type f | wc -l)"
+          payload_byte_count="$(du -sb out | cut -f1)"
+          printf '{"payload_file_count":%s,"payload_byte_count":%s,"hard_cap_bytes":157286400}\n' \
+            "$payload_file_count" "$payload_byte_count" > out/artifact_budget.json
+          (cd out && find . -type f ! -name SHA256SUMS.txt -print0 | sort -z \
+            | xargs -0 sha256sum > SHA256SUMS.txt)
+          (cd out && sha256sum -c SHA256SUMS.txt)
+          final_file_count="$(find out -type f | wc -l)"
+          final_byte_count="$(du -sb out | cut -f1)"
+          test "$final_file_count" -le 100
+          test "$final_byte_count" -le 157286400
+
+      - name: Upload verified measured artifact
+        id: upload
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: ai39-digital-twin-v04-horlivka-${{ github.run_id }}-${{ github.run_attempt }}
+          path: out/
+          if-no-files-found: error
+          retention-days: 21
+
+      - name: Record upload digest
+        if: success()
+        run: echo "artifact_digest=${{ steps.upload.outputs.artifact-digest }}"
+
+      - name: Upload diagnostics only on failure
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: ai39-digital-twin-v04-diagnostics-${{ github.run_id }}-${{ github.run_attempt }}
+          path: diagnostics/
+          if-no-files-found: warn
+          retention-days: 7
