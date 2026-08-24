@@ -1,0 +1,290 @@
+name: AI39 single-scene contextual anomaly canary
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  contextual:
+    runs-on: ubuntu-latest
+    timeout-minutes: 28
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install geospatial stack
+        run: python -m pip install --disable-pip-version-check numpy scipy rasterio pystac-client planetary-computer requests pillow
+      - name: Run single-scene contextual anomaly test
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          python - <<'PY'
+          import json, warnings
+          from datetime import datetime, timezone
+          from pathlib import Path
+          import numpy as np
+          import requests, rasterio
+          from scipy.stats import rankdata
+          from rasterio.enums import Resampling
+          from rasterio.transform import from_bounds
+          from rasterio.warp import reproject
+          from pystac_client import Client
+          import planetary_computer
+          from PIL import Image, ImageDraw
+
+          warnings.filterwarnings('ignore')
+          BBOX=[37.65,48.45,38.25,48.90]
+          W,H=800,600
+          TR=from_bounds(*BBOX,W,H)
+          STAC='https://earth-search.aws.element84.com/v1/search'
+          CURRENT_DAY='2026-08-20'
+          HIST_YEARS=[2023,2024,2025]
+          CLEAR_CLASSES=[2,4,5,6,7]
+          FEATURE_NAMES=['ndvi','nbr','bsi','ndbi']
+
+          def rp(href,dtype='float32',resampling=Resampling.bilinear,nodata=0):
+              out=np.full((H,W),nodata,dtype=dtype)
+              with rasterio.Env(AWS_NO_SIGN_REQUEST='YES',GDAL_DISABLE_READDIR_ON_OPEN='EMPTY_DIR'):
+                  with rasterio.open(href) as ds:
+                      reproject(source=rasterio.band(ds,1),destination=out,
+                                src_transform=ds.transform,src_crs=ds.crs,src_nodata=ds.nodata,
+                                dst_transform=TR,dst_crs='EPSG:4326',dst_nodata=nodata,
+                                resampling=resampling)
+              return out
+
+          def search_range(start,end):
+              r=requests.post(STAC,json={'collections':['sentinel-2-c1-l2a'],'bbox':BBOX,
+                                        'datetime':start+'T00:00:00Z/'+end+'T23:59:59Z','limit':100},timeout=90)
+              r.raise_for_status(); return r.json().get('features',[])
+
+          def items_for_day(day):
+              return search_range(day,day)
+
+          def mosaic_scl(day):
+              scl=np.zeros((H,W),np.uint8); ids=[]
+              for it in items_for_day(day):
+                  a=it.get('assets',{})
+                  href=(a.get('scl') or {}).get('href')
+                  if not href: continue
+                  try: cc=rp(href,'uint8',Resampling.nearest,0)
+                  except Exception: continue
+                  m=cc>0; scl[m]=cc[m]; ids.append(it.get('id'))
+              valid=scl>0
+              clear=valid & np.isin(scl,CLEAR_CLASSES)
+              cov=float(valid.mean())
+              clr=float(clear.sum()/max(valid.sum(),1))
+              return {'scl':scl,'valid':valid,'clear':clear,'coverage':cov,'clear_fraction':clr,'ids':ids}
+
+          def scene(day):
+              red=np.zeros((H,W),np.float32); blue=np.zeros_like(red); green=np.zeros_like(red)
+              nir=np.zeros_like(red); s16=np.zeros_like(red); s22=np.zeros_like(red); scl=np.zeros((H,W),np.uint8)
+              ids=[]
+              for it in items_for_day(day):
+                  a=it.get('assets',{})
+                  keys=['red','blue','green','nir08','swir16','swir22','scl']
+                  if not all((a.get(k) or {}).get('href') for k in keys): continue
+                  try:
+                      rr=rp(a['red']['href']); bb=rp(a['blue']['href']); gg=rp(a['green']['href'])
+                      nn=rp(a['nir08']['href']); x16=rp(a['swir16']['href']); x22=rp(a['swir22']['href'])
+                      cc=rp(a['scl']['href'],'uint8',Resampling.nearest,0)
+                  except Exception: continue
+                  m=(rr>0)&(bb>0)&(gg>0)&(nn>0)&(x16>0)&(x22>0)&(cc>0)
+                  red[m]=rr[m];blue[m]=bb[m];green[m]=gg[m];nir[m]=nn[m];s16[m]=x16[m];s22[m]=x22[m];scl[m]=cc[m]
+                  ids.append(it.get('id'))
+              valid=(red>0)&(blue>0)&(green>0)&(nir>0)&(s16>0)&(s22>0)
+              clear=valid & np.isin(scl,CLEAR_CLASSES)
+              def idx(num,den):
+                  o=np.full((H,W),np.nan,np.float32); o[clear]=num[clear]/(den[clear]+1e-6); return o
+              feats={
+                'ndvi':idx(nir-red,nir+red),
+                'nbr':idx(nir-s22,nir+s22),
+                'bsi':idx((s16+red)-(nir+blue),(s16+red)+(nir+blue)),
+                'ndbi':idx(s16-nir,s16+nir),
+              }
+              return {'day':day,'ids':sorted(set(ids)),'valid':valid,'clear':clear,'features':feats,
+                      'clear_fraction':float(clear.sum()/max(valid.sum(),1)),'coverage':float(valid.mean())}
+
+          # Current single scene only. No same-year near-date pair is used in scoring.
+          cur=scene(CURRENT_DAY)
+          if cur['coverage']<0.70 or cur['clear'].sum()<10000:
+              raise RuntimeError('current scene coverage insufficient')
+
+          # GIS context: stable land-cover prior.
+          pc=Client.open('https://planetarycomputer.microsoft.com/api/stac/v1',modifier=planetary_computer.sign_inplace)
+          lc_items=list(pc.search(collections=['io-lulc-9-class'],bbox=BBOX,datetime='2022-01-01/2023-12-31').items())
+          lc=np.zeros((H,W),np.uint8); lc_ids=[]
+          for it in lc_items:
+              a=it.assets.get('data') or it.assets.get('map') or next((x for x in it.assets.values() if x.href.lower().endswith(('.tif','.tiff'))),None)
+              if not a: continue
+              try: t=rp(a.href,'uint8',Resampling.nearest,0)
+              except Exception: continue
+              m=t>0; lc[m]=t[m]; lc_ids.append(it.id)
+          if (lc>0).mean()<0.70: raise RuntimeError('land-cover coverage insufficient')
+
+          # Choose the clearest historical same-season observation independently for each year.
+          hist=[]; hist_selection=[]
+          for year in HIST_YEARS:
+              start=f'{year}-08-17'; end=f'{year}-08-23'
+              feats=search_range(start,end)
+              days=sorted({(it.get('properties',{}).get('datetime') or '')[:10] for it in feats if (it.get('properties',{}).get('datetime') or '')[:10]})
+              candidates=[]
+              for day in days:
+                  s=mosaic_scl(day)
+                  candidates.append({'day':day,'coverage':s['coverage'],'clear_fraction':s['clear_fraction']})
+              candidates=[c for c in candidates if c['coverage']>=0.70]
+              if not candidates: continue
+              best=max(candidates,key=lambda c:(c['clear_fraction'],c['coverage']))
+              sc=scene(best['day'])
+              hist.append(sc)
+              hist_selection.append({'year':year,'day':best['day'],'clear_fraction':round(sc['clear_fraction'],4),'scene_ids':sc['ids']})
+          if len(hist)<2: raise RuntimeError('need at least two historical same-season observations')
+
+          # Current-only contextual outlier: robust deviation from peers of the same GIS land-cover class.
+          ctx_z=np.full((H,W),np.nan,np.float32)
+          class_stats={}
+          for cls in sorted(int(x) for x in np.unique(lc) if x>0):
+              m=cur['clear']&(lc==cls)
+              if m.sum()<1000: continue
+              zmax=np.zeros((H,W),np.float32)
+              stats={}
+              for name in FEATURE_NAMES:
+                  x=cur['features'][name][m]
+                  med=float(np.nanmedian(x)); mad=float(np.nanmedian(np.abs(x-med)))
+                  scale=max(1.4826*mad,0.02)
+                  z=np.abs(cur['features'][name]-med)/scale
+                  zmax=np.maximum(zmax,np.nan_to_num(z,nan=0,posinf=0,neginf=0))
+                  stats[name]={'median':round(med,4),'mad':round(mad,4),'scale_floor_applied':scale<=0.02001}
+              ctx_z[m]=zmax[m]; class_stats[str(cls)]=stats
+
+          # Historical contextual outlier: current observation vs multi-year same-season per-pixel baseline.
+          hist_z=np.full((H,W),np.nan,np.float32)
+          hist_valid_count=np.zeros((H,W),np.uint8)
+          z_features=[]
+          for name in FEATURE_NAMES:
+              stack=np.stack([s['features'][name] for s in hist])
+              count=np.isfinite(stack).sum(0)
+              med=np.nanmedian(stack,axis=0)
+              mad=np.nanmedian(np.abs(stack-med),axis=0)
+              scale=np.maximum(1.4826*mad,0.03)
+              z=np.abs(cur['features'][name]-med)/scale
+              z[count<2]=np.nan
+              z_features.append(z)
+              hist_valid_count=np.maximum(hist_valid_count,count.astype(np.uint8))
+          hist_z=np.nanmax(np.stack(z_features),axis=0)
+          hist_z[~cur['clear']]=np.nan
+
+          # Primary contextual evaluation excludes crops from promotion, but crop behavior is preserved as QA.
+          noncrop=cur['clear']&(lc>0)&(lc!=5)
+          crop=cur['clear']&(lc==5)
+          ctx_candidate=noncrop&np.isfinite(ctx_z)&(ctx_z>=6.0)
+          hist_candidate=noncrop&np.isfinite(hist_z)&(hist_z>=4.0)
+          agree=noncrop&np.isfinite(ctx_z)&np.isfinite(hist_z)&(ctx_z>=4.0)&(hist_z>=4.0)
+          hist_all=cur['clear']&np.isfinite(hist_z)&(hist_z>=4.0)
+
+          cells=[]
+          for rr in range(4):
+              for cc in range(4):
+                  sec=f"{'ABCD'[cc]}{rr+1}"; ys=slice(rr*H//4,(rr+1)*H//4); xs=slice(cc*W//4,(cc+1)*W//4)
+                  nc=noncrop[ys,xs]; cr=crop[ys,xs]
+                  cctx=ctx_candidate[ys,xs]; chit=hist_candidate[ys,xs]; agr=agree[ys,xs]; hall=hist_all[ys,xs]
+                  cz=ctx_z[ys,xs][nc]; hz=hist_z[ys,xs][nc]
+                  cells.append({
+                    'sector':sec,
+                    'noncrop_valid_px':int(nc.sum()),
+                    'crop_valid_px':int(cr.sum()),
+                    'current_context_ge6_noncrop_pct':round(float(cctx.sum()/max(nc.sum(),1)*100),4),
+                    'historical_outlier_ge4_noncrop_pct':round(float(chit.sum()/max(nc.sum(),1)*100),4),
+                    'context_history_agreement_pct':round(float(agr.sum()/max(nc.sum(),1)*100),4),
+                    'crop_share_of_all_historical_outliers_pct':round(float((hall&crop[ys,xs]).sum()/max(hall.sum(),1)*100),2),
+                    'current_context_p99':round(float(np.nanpercentile(cz,99)),3) if cz.size else None,
+                    'historical_outlier_p99':round(float(np.nanpercentile(hz,99)),3) if hz.size else None,
+                  })
+
+          # AOI-relative ranking only; not an absolute probability/confidence score.
+          for metric in ['current_context_ge6_noncrop_pct','historical_outlier_ge4_noncrop_pct','context_history_agreement_pct']:
+              vals=np.array([c[metric] for c in cells],float)
+              ranks=rankdata(vals,method='average')
+              for c,r in zip(cells,ranks): c[metric+'_percentile']=round(float((r-1)/(len(vals)-1)*100),1)
+          for c in cells:
+              c['contextual_rank_score']=round((
+                  0.30*c['current_context_ge6_noncrop_pct_percentile']+
+                  0.45*c['historical_outlier_ge4_noncrop_pct_percentile']+
+                  0.25*c['context_history_agreement_pct_percentile']
+              ),2)
+          cells.sort(key=lambda c:c['contextual_rank_score'],reverse=True)
+          for i,c in enumerate(cells,1): c['rank']=i
+
+          # Evaluation labels are applied only AFTER scoring; they never affect feature weights/ranks.
+          known_signal={'A4','D1','C2'}
+          seasonal_controls={'A1','A2','A3','D4'}
+          rankmap={c['sector']:c['rank'] for c in cells}
+          signal_ranks=[rankmap[s] for s in known_signal]
+          control_ranks=[rankmap[s] for s in seasonal_controls]
+          top4={c['sector'] for c in cells[:4]}; top8={c['sector'] for c in cells[:8]}
+          evaluation={
+            'known_signal_sectors':sorted(known_signal),
+            'seasonal_control_sectors':sorted(seasonal_controls),
+            'known_signal_ranks':{s:rankmap[s] for s in sorted(known_signal)},
+            'seasonal_control_ranks':{s:rankmap[s] for s in sorted(seasonal_controls)},
+            'signal_mean_rank':round(float(np.mean(signal_ranks)),2),
+            'control_mean_rank':round(float(np.mean(control_ranks)),2),
+            'signal_recall_top8':round(sum(s in top8 for s in known_signal)/len(known_signal),3),
+            'signal_recall_top4':round(sum(s in top4 for s in known_signal)/len(known_signal),3),
+            'control_hits_top4':sum(s in top4 for s in seasonal_controls),
+            'rank_separation_positive_if_signal_better':round(float(np.mean(control_ranks)-np.mean(signal_ranks)),2),
+          }
+
+          # Conservative utility gate for this canary. Passing means "worth further use", not "production proven".
+          useful=(evaluation['rank_separation_positive_if_signal_better']>0 and
+                  evaluation['signal_recall_top8']>=0.667 and
+                  evaluation['control_hits_top4']<=2)
+          evaluation['canary_utility_state']='PROMISING' if useful else 'NOT_YET_USEFUL'
+
+          out={
+            'status':'MEASURED_CANARY',
+            'generated_utc':datetime.now(timezone.utc).isoformat(),
+            'scope':'AI-39 broad 4x4 sectors only; no object coordinates, routes, target-level output or human/unit attribution',
+            'method':'single current Sentinel-2 scene + GIS land-cover context + multi-year same-season historical baseline; no same-year near-date pair used for scoring',
+            'current':{'day':CURRENT_DAY,'clear_fraction':round(cur['clear_fraction'],4),'scene_ids':cur['ids']},
+            'historical_selection':hist_selection,
+            'landcover_ids':lc_ids,
+            'thresholds':{'current_context_robust_z':6.0,'historical_same-season_robust_z':4.0,'historical_min_years':2},
+            'sector_ranking':cells,
+            'evaluation':evaluation,
+            'interpretation_limits':[
+              'A high contextual rank means the current surface is unusual relative to GIS peers and/or same-season history.',
+              'It does not establish when the feature appeared, its cause, actor, intent, military use or current organized presence.',
+              'Crops are preserved for QA but excluded from primary contextual promotion.',
+              'A PROMISING canary is a routing signal for independent corroboration, not a production confidence claim.'
+            ]
+          }
+          Path('out/result.json').write_text(json.dumps(out,indent=2),encoding='utf-8')
+
+          # Broad 4x4 QA heatmap only.
+          scores={c['sector']:c['contextual_rank_score'] for c in cells}
+          img=Image.new('RGB',(800,800),(20,22,25)); d=ImageDraw.Draw(img)
+          for rr in range(4):
+              for cc in range(4):
+                  sec=f"{'ABCD'[cc]}{rr+1}"; score=scores[sec]
+                  v=int(45+score/100*180)
+                  x0=cc*200;y0=rr*200
+                  d.rectangle([x0,y0,x0+199,y0+199],fill=(v,v,v),outline=(120,120,120),width=2)
+                  d.text((x0+15,y0+15),f'{sec}  {score:.1f}',fill=(15,15,15) if v>145 else (240,240,240))
+          img.save('out/contextual_rank_4x4.png')
+          print(json.dumps({'utility':evaluation,'top8':[(c['sector'],c['contextual_rank_score']) for c in cells[:8]],'historical':hist_selection},indent=2))
+          PY
+      - name: Validate outputs
+        run: |
+          test -s out/result.json
+          test -s out/contextual_rank_4x4.png
+          python -c "import json; m=json.load(open('out/result.json')); assert len(m['sector_ranking'])==16; print(m['evaluation'])"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ai39-single-scene-context-canary
+          path: out/
+          if-no-files-found: error
+          retention-days: 2
