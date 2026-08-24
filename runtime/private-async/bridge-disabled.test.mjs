@@ -4,30 +4,38 @@ import { readFile } from "node:fs/promises";
 
 const workflowUrl = new URL("../../.github/workflows/private-async-bridge.yml", import.meta.url);
 
-function topLevelTriggers(workflow) {
+function topLevelChildren(workflow, key) {
   const lines = workflow.split(/\r?\n/);
-  const onKeys = [];
+  const keyPattern = new RegExp(`^(?:${key}|"${key}"|'${key}')\\s*:`);
+  const exactKeyPattern = new RegExp(`^(?:${key}|"${key}"|'${key}')\\s*:\\s*$`);
+  const keyLines = [];
   for (let index = 0; index < lines.length; index += 1) {
-    if (/^(?:on|"on"|'on')\s*:/.test(lines[index])) onKeys.push(index);
+    if (keyPattern.test(lines[index])) keyLines.push(index);
   }
-  assert.equal(onKeys.length, 1);
-  const start = onKeys[0];
-  assert.match(lines[start], /^(?:on|"on"|'on')\s*:\s*$/);
-  const triggers = [];
+  assert.equal(keyLines.length, 1);
+  const start = keyLines[0];
+  assert.match(lines[start], exactKeyPattern);
+  const children = [];
   for (let index = start + 1; index < lines.length; index += 1) {
     const line = lines[index];
     if (line && !/^[ \t]/.test(line) && !/^\s*#/.test(line)) break;
-    const match = line.match(/^[ \t]{2}([^:#]+)\s*:/);
-    if (match) triggers.push(match[1].trim().replace(/^["']|["']$/g, ""));
+    const match = line.match(/^[ \t]{2}([^ \t:#][^:#]*)\s*:/);
+    if (match) children.push(match[1].trim().replace(/^["']|["']$/g, ""));
   }
-  return triggers;
+  return children;
 }
 
 test("legacy V1 bridge workflow is an inert manual stub", async () => {
   const workflow = await readFile(workflowUrl, "utf8");
 
-  assert.deepEqual(topLevelTriggers(workflow), ["workflow_dispatch"]);
-  assert.match(workflow, /if:\s*\$\{\{ false \}\}/);
+  assert.deepEqual(topLevelChildren(workflow, "on"), ["workflow_dispatch"]);
+  assert.deepEqual(topLevelChildren(workflow, "jobs"), [
+    "legacy-private-bridge-disabled",
+  ]);
+  assert.match(
+    workflow,
+    /^  legacy-private-bridge-disabled:\s*\n    if:\s*\$\{\{ false \}\}/m,
+  );
   assert.match(workflow, /permissions:\s*\{\}/);
   assert.doesNotMatch(workflow, /issues:/);
   assert.doesNotMatch(workflow, /pull_request_target:/);
