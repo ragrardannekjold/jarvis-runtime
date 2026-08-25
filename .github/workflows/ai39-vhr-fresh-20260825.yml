@@ -1,0 +1,124 @@
+name: AI39 fresh VHR inventory 25 Aug
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  inventory:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install --disable-pip-version-check requests
+      - name: Query public Airbus archive metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          python - <<'PY'
+          import json, datetime, requests
+
+          ROOT='https://portal.intelligence-airbusds.com/arcgis/rest/services/OneAtlas/OADConstellationArchive/MapServer'
+          SENSORS={4:'Pleiades Neo 30cm',9:'Pleiades 50cm',14:'SPOT 1.5m'}
+          BBOX=[37.65,48.45,38.25,48.90]
+          START=datetime.datetime(2026,8,20,tzinfo=datetime.timezone.utc)
+          END=datetime.datetime(2026,8,26,tzinfo=datetime.timezone.utc)
+          sess=requests.Session(); sess.headers.update({'User-Agent':'AI39-public-vhr-inventory/2026-08-25'})
+
+          def parse_dt(v):
+              if v is None: return None
+              if isinstance(v,(int,float)):
+                  try:
+                      return datetime.datetime.fromtimestamp(v/1000 if v>1e11 else v,tz=datetime.timezone.utc)
+                  except Exception: return None
+              if isinstance(v,str):
+                  s=v.strip().replace('Z','+00:00')
+                  for t in (s,s[:19],s[:10]):
+                      try:
+                          d=datetime.datetime.fromisoformat(t)
+                          if d.tzinfo is None: d=d.replace(tzinfo=datetime.timezone.utc)
+                          return d
+                      except Exception: pass
+              return None
+
+          def acquisition(attrs):
+              preferred=['acquisitiondate','acquisitionDate','acquisition_date','startDate','startdate','date']
+              for k in preferred:
+                  if k in attrs:
+                      d=parse_dt(attrs[k])
+                      if d: return d,k
+              for k,v in attrs.items():
+                  lk=k.lower()
+                  if 'acq' in lk or ('date' in lk and 'update' not in lk and 'create' not in lk):
+                      d=parse_dt(v)
+                      if d: return d,k
+              return None,None
+
+          def sector_bbox(col,row):
+              xmin,ymin,xmax,ymax=BBOX
+              dx=(xmax-xmin)/4; dy=(ymax-ymin)/4
+              # rows 0..3 are north->south; ArcGIS bbox uses ymin/ymax
+              sx0=xmin+col*dx; sx1=xmin+(col+1)*dx
+              sy1=ymax-row*dy; sy0=ymax-(row+1)*dy
+              return [sx0,sy0,sx1,sy1]
+
+          scenes={}
+          errors=[]
+          for layer,name in SENSORS.items():
+              qurl=f'{ROOT}/{layer}/query'
+              for row in range(4):
+                  for col in range(4):
+                      sb=sector_bbox(col,row); sec=f"{'ABCD'[col]}{row+1}"
+                      params={
+                        'f':'json','where':'1=1','geometry':','.join(str(x) for x in sb),
+                        'geometryType':'esriGeometryEnvelope','inSR':'4326','spatialRel':'esriSpatialRelIntersects',
+                        'outFields':'*','returnGeometry':'false','resultRecordCount':1000
+                      }
+                      try:
+                          r=sess.get(qurl,params=params,timeout=60); r.raise_for_status(); data=r.json()
+                          if data.get('error'):
+                              errors.append({'sensor':name,'sector':sec,'error':data['error']}); continue
+                          for f in data.get('features',[]):
+                              a=f.get('attributes') or {}; dt,dtfield=acquisition(a)
+                              if not dt or not (START <= dt < END): continue
+                              pid=a.get('parentidentifier') or a.get('parentIdentifier') or a.get('identifier') or a.get('OBJECTID')
+                              key=f'{layer}:{pid}:{dt.isoformat()}'
+                              rec=scenes.setdefault(key,{
+                                'sensor_class':name,'acquisition_utc':dt.isoformat(),'id':pid,
+                                'cloudcover':a.get('cloudcover') if 'cloudcover' in a else a.get('cloudCover'),
+                                'incidenceangle':a.get('incidenceangle') if 'incidenceangle' in a else a.get('incidenceAngle'),
+                                'processinglevel':a.get('processinglevel') if 'processinglevel' in a else a.get('processingLevel'),
+                                'date_field':dtfield,'broad_sectors':[]
+                              })
+                              if sec not in rec['broad_sectors']: rec['broad_sectors'].append(sec)
+                      except Exception as e:
+                          errors.append({'sensor':name,'sector':sec,'error':str(e)[:240]})
+
+          rows=list(scenes.values())
+          for r in rows: r['broad_sectors']=sorted(r['broad_sectors'])
+          rows.sort(key=lambda x:(x['acquisition_utc'],x['sensor_class']))
+          by_sensor={name:[r for r in rows if r['sensor_class']==name] for name in SENSORS.values()}
+          out={
+            'generated_utc':datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            'window_utc':['2026-08-20T00:00:00Z','2026-08-25T23:59:59Z'],
+            'scope':'Broad AI-39 corridor; public Airbus archive metadata only',
+            'by_sensor':{k:{'count':len(v),'rows':v} for k,v in by_sensor.items()},
+            'all_rows':rows,
+            'errors':errors,
+            'safety':'No exact footprint geometry or tactical coordinates retained; only coarse 4x4 sector coverage.'
+          }
+          json.dump(out,open('out/ai39_vhr_inventory_20260825.json','w'),indent=2,default=str)
+          print(json.dumps(out,indent=2,default=str))
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ai39-vhr-fresh-20260825
+          path: out/ai39_vhr_inventory_20260825.json
+          if-no-files-found: error
+          retention-days: 2
