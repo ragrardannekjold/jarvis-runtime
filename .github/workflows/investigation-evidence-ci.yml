@@ -1,0 +1,32 @@
+name: Investigation Evidence Workers CI
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - 'runtime/investigation-evidence/**'
+      - '.github/workflows/investigation-evidence-ci.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'runtime/investigation-evidence/**'
+      - '.github/workflows/investigation-evidence-ci.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Syntax check harvester
+        run: node --check runtime/investigation-evidence/harvester.mjs
+      - name: Syntax check entity resolver
+        run: node --check runtime/investigation-evidence/entity-resolver.mjs
+      - name: Run investigation evidence tests
+        run: node --test runtime/investigation-evidence/*.test.mjs
