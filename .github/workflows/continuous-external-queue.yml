@@ -8,6 +8,7 @@ on:
     - cron: '*/5 * * * *'
 
 permissions:
+  actions: write
   contents: read
   issues: write
 

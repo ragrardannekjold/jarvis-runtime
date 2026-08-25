@@ -11,6 +11,7 @@ const ALLOWED_JOB_TYPES = new Set([
   "async_contract_self_test",
   "runtime_syntax_self_test",
   "utility_search_self_test",
+  "sustained_rhythm_verification",
 ]);
 const CANONICAL_ID_RE = /^[A-Za-z0-9._:/#-]{1,128}$/;
 const MAX_PAYLOAD_BYTES = 2048;
@@ -289,11 +290,28 @@ async function runUtilitySearchSelfTest(job) {
   return stdout.trim().slice(-500);
 }
 
+async function runSustainedRhythmVerification(job) {
+  const probe = job.payload?.probe;
+  const holdMs = job.payload?.hold_ms ?? 100000;
+  if (!Number.isInteger(holdMs) || holdMs < 90000 || holdMs > 120000) {
+    throw new Error("invalid_sustained_rhythm_hold_ms");
+  }
+  if (!["runtime_syntax", "async_contract", "utility_search"].includes(probe)) {
+    throw new Error("invalid_sustained_rhythm_probe");
+  }
+  await postStatus(job, "RUNNING", `sustained rhythm hold ${holdMs}ms before ${probe}`);
+  await sleep(holdMs);
+  if (probe === "runtime_syntax") return runRuntimeSyntaxSelfTest(job);
+  if (probe === "async_contract") return runAsyncContractSelfTest(job);
+  return runUtilitySearchSelfTest(job);
+}
+
 async function execute(job) {
   if (job.job_type === "heartbeat_probe") return runHeartbeat(job);
   if (job.job_type === "async_contract_self_test") return runAsyncContractSelfTest(job);
   if (job.job_type === "runtime_syntax_self_test") return runRuntimeSyntaxSelfTest(job);
   if (job.job_type === "utility_search_self_test") return runUtilitySearchSelfTest(job);
+  if (job.job_type === "sustained_rhythm_verification") return runSustainedRhythmVerification(job);
   throw new Error("unreachable_job_type");
 }
 
@@ -577,6 +595,20 @@ async function main() {
         ? "PLAN_PENDING_REFILL_OR_DRAIN"
         : "WARM_STANDBY_NO_DEMAND";
 
+  let continuationDispatched = false;
+  let continuationError = null;
+  if (bounded && (queueRemaining > 0 || plansRemaining > 0)) {
+    try {
+      await githubRequest(
+        `/repos/${repository}/actions/workflows/continuous-external-queue.yml/dispatches`,
+        { method: "POST", body: { ref: "main" } },
+      );
+      continuationDispatched = true;
+    } catch (error) {
+      continuationError = String(error.message || error).slice(0, 300);
+    }
+  }
+
   console.log(JSON.stringify({
     queue_run_id: runId,
     processed,
@@ -588,9 +620,12 @@ async function main() {
     queue_remaining: queueRemaining,
     plans_remaining: plansRemaining,
     next_state: nextState,
+    continuation_dispatched: continuationDispatched,
+    continuation_error: continuationError,
     chat_blocking: false,
     reserve_min_pct: 60,
   }));
+  if (continuationError) throw new Error(`continuation_dispatch_failed:${continuationError}`);
 }
 
 await main();
