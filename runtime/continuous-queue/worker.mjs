@@ -19,6 +19,8 @@ const MAX_RUNTIME_MS = 8 * 60 * 1000;
 const DEFAULT_QUEUE_DEPTH = 2;
 const MAX_QUEUE_DEPTH = 4;
 const MAX_PLAN_TASKS = 32;
+const ISSUE_PAGE_SIZE = 100;
+const MAX_ISSUE_HISTORY_PAGES = 100;
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -271,8 +273,22 @@ async function execute(job) {
   throw new Error("unreachable_job_type");
 }
 
+async function listIssuesPage(state = "open", page = 1) {
+  if (!Number.isInteger(page) || page < 1) throw new Error("invalid_issue_page");
+  return githubRequest(
+    `/repos/${repository}/issues?state=${state}&sort=created&direction=asc&per_page=${ISSUE_PAGE_SIZE}&page=${page}`,
+  );
+}
+
 async function listIssues(state = "open") {
-  return githubRequest(`/repos/${repository}/issues?state=${state}&sort=created&direction=asc&per_page=100`);
+  const allIssues = [];
+  for (let page = 1; page <= MAX_ISSUE_HISTORY_PAGES; page += 1) {
+    const pageIssues = await listIssuesPage(state, page);
+    if (!Array.isArray(pageIssues)) throw new Error("invalid_issue_history_response");
+    allIssues.push(...pageIssues);
+    if (pageIssues.length < ISSUE_PAGE_SIZE) return allIssues;
+  }
+  throw new Error("issue_history_completeness_unproven");
 }
 
 async function listQueueIssues() {
