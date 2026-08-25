@@ -19,7 +19,9 @@ jobs:
   drain-queue:
     if: >-
       github.event_name != 'issues' ||
-      (github.actor == github.repository_owner && startsWith(github.event.issue.title, '[QUEUE-JOB]'))
+      (github.actor == github.repository_owner &&
+      (startsWith(github.event.issue.title, '[QUEUE-JOB]') ||
+       startsWith(github.event.issue.title, '[QUEUE-PLAN]')))
     runs-on: ubuntu-latest
     timeout-minutes: 10
 
@@ -35,7 +37,7 @@ jobs:
       - name: Validate queue worker syntax
         run: node --check runtime/continuous-queue/worker.mjs
 
-      - name: Drain bounded public queue
+      - name: Drain and refill bounded public queue
         env:
           GITHUB_TOKEN: ${{ github.token }}
           REPOSITORY_OWNER: ${{ github.repository_owner }}
