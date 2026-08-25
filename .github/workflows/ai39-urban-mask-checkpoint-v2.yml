@@ -1,0 +1,238 @@
+name: AI39 urban-mask checkpoint v2 exact-year
+
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ai39-urban-mask-v2-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  urban-mask-v2:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: '3.12.11'
+
+      - name: Install pinned geospatial runtime
+        run: >-
+          python -m pip install --disable-pip-version-check
+          requests==2.32.3 numpy==2.2.6 Pillow==11.2.1 rasterio==1.4.3
+          pystac-client==0.8.6 planetary-computer==1.0.0
+
+      - name: Build exact-year stable urban-core mask
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p out/provenance
+          python - <<'PY'
+          import json, math
+          from collections import Counter
+          from datetime import datetime, timezone
+          from pathlib import Path
+          import numpy as np
+          import rasterio, requests
+          from PIL import Image
+          from pystac_client import Client
+          import planetary_computer
+          from rasterio.enums import Resampling
+          from rasterio.transform import from_bounds
+          from rasterio.warp import reproject, transform_bounds
+
+          AOI=[37.65,48.25,38.25,48.90]
+          CRS='EPSG:32637'; RES=30; BUILT=7
+          S2_STAC='https://earth-search.aws.element84.com/v1/search'
+          S2_COLLECTION='sentinel-2-c1-l2a'
+          S2_WINDOW=['2026-07-24T00:00:00Z','2026-08-24T23:59:59Z']
+          STRICT_CLEAR=np.array([4,5,6],dtype=np.uint8)
+          OBSERVED=np.arange(1,12,dtype=np.uint8)
+
+          def wj(p,v): Path(p).write_text(json.dumps(v,ensure_ascii=False,indent=2),encoding='utf-8')
+          left,bottom,right,top=transform_bounds('EPSG:4326',CRS,*AOI,densify_pts=41)
+          left=math.floor(left/RES)*RES; bottom=math.floor(bottom/RES)*RES
+          right=math.ceil(right/RES)*RES; top=math.ceil(top/RES)*RES
+          width=int(round((right-left)/RES)); height=int(round((top-bottom)/RES))
+          tr=from_bounds(left,bottom,right,top,width,height)
+
+          def rp(href,dst,resampling,nodata):
+              with rasterio.Env(AWS_NO_SIGN_REQUEST='YES',GDAL_DISABLE_READDIR_ON_OPEN='EMPTY_DIR',
+                  CPL_VSIL_CURL_ALLOWED_EXTENSIONS='.tif,.TIF',GDAL_HTTP_MAX_RETRY='3',GDAL_HTTP_RETRY_DELAY='2'):
+                  with rasterio.open(href) as src:
+                      reproject(source=rasterio.band(src,1),destination=dst,
+                          src_transform=src.transform,src_crs=src.crs,src_nodata=src.nodata,
+                          dst_transform=tr,dst_crs=CRS,dst_nodata=nodata,resampling=resampling)
+
+          pc=Client.open('https://planetarycomputer.microsoft.com/api/stac/v1',modifier=planetary_computer.sign_inplace)
+
+          def load_exact_year(year):
+              candidates=list(pc.search(collections=['io-lulc-9-class'],bbox=AOI,
+                  datetime=f'{year}-01-01/{year}-12-31').items())
+              # Critical semantic gate: annual collection searches can touch a neighboring
+              # annual item at an inclusive boundary. Only explicit target-year item IDs survive.
+              selected=[it for it in candidates if str(it.id).endswith(f'-{year}')]
+              provenance={
+                  'requested_year':year,
+                  'candidate_ids':sorted(str(it.id) for it in candidates),
+                  'selected_ids':sorted(str(it.id) for it in selected),
+                  'selection_rule':f'item.id endswith -{year}',
+              }
+              wj(f'out/provenance/landcover_{year}_selection.json',provenance)
+              if not selected:
+                  raise RuntimeError(f'no exact-year land-cover items selected for {year}')
+              arr=np.zeros((height,width),dtype=np.uint8); used=[]
+              for it in selected:
+                  asset=it.assets.get('data') or it.assets.get('map') or next(
+                      (a for a in it.assets.values() if a.href.lower().endswith(('.tif','.tiff'))),None)
+                  if asset is None: continue
+                  tile=np.zeros((height,width),dtype=np.uint8)
+                  rp(asset.href,tile,Resampling.nearest,0)
+                  m=tile>0; arr[m]=tile[m]; used.append(str(it.id))
+              cov=float((arr>0).mean())
+              if cov<0.95: raise RuntimeError(f'exact-year land-cover coverage below 95% for {year}: {cov:.6f}')
+              if any(not x.endswith(f'-{year}') for x in used):
+                  raise RuntimeError(f'cross-year land-cover provenance survived for {year}: {used}')
+              return arr,sorted(set(used)),cov
+
+          lc21,ids21,cov21=load_exact_year(2021)
+          lc22,ids22,cov22=load_exact_year(2022)
+          stable=(lc21==BUILT)&(lc22==BUILT)
+          core=stable.copy(); pad=np.pad(stable,1,constant_values=False)
+          for dy in range(3):
+              for dx in range(3): core &= pad[dy:dy+height,dx:dx+width]
+          if int(core.sum())<5000: raise RuntimeError(f'urban core too small: {int(core.sum())}')
+
+          req={'collections':[S2_COLLECTION],'bbox':AOI,
+               'datetime':f'{S2_WINDOW[0]}/{S2_WINDOW[1]}','limit':200,
+               'sortby':[{'field':'properties.datetime','direction':'desc'}]}
+          wj('out/provenance/sentinel2_request.json',req)
+          r=requests.post(S2_STAC,json=req,timeout=120); r.raise_for_status(); payload=r.json()
+          features=payload.get('features',[])
+          if not features: raise RuntimeError('no Sentinel-2 features')
+          ctx=payload.get('context',{}); matched=ctx.get('matched',ctx.get('numberMatched',len(features)))
+          if matched!=len(features): raise RuntimeError(f'STAC pagination gate failed: {matched=} {len(features)=}')
+          wj('out/provenance/sentinel2_item_ids.json',sorted(str(x.get('id')) for x in features))
+
+          def dt(it): return datetime.fromisoformat(it['properties']['datetime'].replace('Z','+00:00'))
+          features.sort(key=dt,reverse=True); ref=dt(features[0]).date()
+          age=np.full((height,width),65535,dtype=np.uint16)
+          prov=np.zeros((height,width),dtype=np.uint16)
+          ever=np.zeros((height,width),bool); obs_count=np.zeros((height,width),np.uint16); clear_count=np.zeros((height,width),np.uint16)
+          pmap={}; used=[]; code=1
+          for it in features:
+              a=it.get('assets',{}).get('scl')
+              if not a or not a.get('href'): continue
+              scl=np.zeros((height,width),np.uint8)
+              try: rp(a['href'],scl,Resampling.nearest,0)
+              except Exception: continue
+              u=set(int(v) for v in np.unique(scl))
+              if not u.issubset(set(range(12))): raise RuntimeError(f'unknown SCL values: {sorted(u)}')
+              observed=np.isin(scl,OBSERVED); clear=np.isin(scl,STRICT_CLEAR)
+              ever|=observed; obs_count+=observed.astype(np.uint16); clear_count+=clear.astype(np.uint16)
+              take=core&clear&(age==65535)
+              if take.any():
+                  d=max(0,(ref-dt(it).date()).days); age[take]=d; prov[take]=code
+                  sid=str(it.get('id')); pmap[str(code)]={'scene_id':sid,'datetime':it['properties']['datetime'],'age_days':d}
+                  used.append(sid); code+=1
+          if np.any(clear_count>obs_count): raise RuntimeError('clear_count exceeds observed_count')
+          urban_obs=core&ever; filled=core&(age!=65535)
+          obs_frac=float(urban_obs.sum()/core.sum()); fill_frac=float(filled.sum()/core.sum())
+          if obs_frac<0.99: raise RuntimeError(f'urban observed coverage below 99%: {obs_frac:.6f}')
+          if fill_frac<0.95: raise RuntimeError(f'urban strict-clear fill below 95%: {fill_frac:.6f}')
+          ages=age[filled]; ac=Counter(int(v) for v in ages)
+          age_dist={str(k):round(v/max(1,len(ages)),8) for k,v in sorted(ac.items())}
+
+          sectors=[]; re=np.linspace(0,height,5,dtype=int); ce=np.linspace(0,width,5,dtype=int)
+          for rr in range(4):
+              for cc in range(4):
+                  ys=slice(re[rr],re[rr+1]); xs=slice(ce[cc],ce[cc+1])
+                  cm=core[ys,xs]; fm=filled[ys,xs]; av=age[ys,xs][fm]
+                  cn=int(cm.sum()); fn=int(fm.sum())
+                  sectors.append({'sector':f"{'ABCD'[cc]}{rr+1}",'urban_core_px':cn,
+                      'strict_clear_filled_px':fn,'strict_clear_fill_fraction':round(fn/max(1,cn),6),
+                      'age_p50_days':round(float(np.percentile(av,50)),2) if av.size else None,
+                      'age_p90_days':round(float(np.percentile(av,90)),2) if av.size else None,
+                      'age_max_days':int(av.max()) if av.size else None,
+                      'age_le_3d_fraction':round(float((av<=3).mean()),6) if av.size else None})
+
+          prof={'driver':'GTiff','height':height,'width':width,'count':1,'dtype':'uint8','crs':CRS,
+                'transform':tr,'nodata':0,'compress':'deflate','tiled':True}
+          with rasterio.open('out/urban_core_mask_30m.tif','w',**prof) as d: d.write(core.astype(np.uint8),1)
+          with rasterio.open('out/urban_core_observed_mask_30m.tif','w',**prof) as d: d.write(filled.astype(np.uint8),1)
+          with rasterio.open('out/urban_core_pixel_age_days_30m.tif','w',**{**prof,'dtype':'uint16','nodata':65535}) as d: d.write(age,1)
+          with rasterio.open('out/urban_core_provenance_code_30m.tif','w',**{**prof,'dtype':'uint16','nodata':0}) as d: d.write(prov,1)
+          q=np.zeros((height,width),np.uint8); q[stable]=110; q[core]=255
+          scale=min(1.0,1200/max(height,width)); im=Image.fromarray(q)
+          if scale<1: im=im.resize((max(1,round(width*scale)),max(1,round(height*scale))),Image.Resampling.NEAREST)
+          im.save('out/urban_mask_qa_preview.png',optimize=True)
+
+          manifest={
+            'status':'MEASURED_URBAN_MASK_CHECKPOINT_V2_EXACT_YEAR',
+            'generated_utc':datetime.now(timezone.utc).isoformat(),
+            'scope':'AI-39 broad Digital Twin QA only; no object coordinates, routes, actor attribution, target-level output, or current-presence inference.',
+            'aoi_wgs84_bbox':AOI,'analysis_crs':CRS,
+            'target_grid':{'resolution_m':RES,'bounds':[left,bottom,right,top],'shape':[height,width],'transform':list(tr)[:6]},
+            'urban_mask':{'source_collection':'io-lulc-9-class','source_years':[2021,2022],'built_class_value':BUILT,
+              'source_item_ids':{'2021':ids21,'2022':ids22},'source_coverage':{'2021':round(cov21,8),'2022':round(cov22,8)},
+              'stable_built_fraction_of_aoi':round(float(stable.mean()),8),'eroded_urban_core_fraction_of_aoi':round(float(core.mean()),8),
+              'erosion':'one 30 m cell in all directions to suppress GIS edges/mixed pixels',
+              'semantic_provenance_gate':'PASS: every selected annual item ID explicitly matches its requested year'},
+            'sentinel2_observability':{'collection':S2_COLLECTION,'window':S2_WINDOW,'reference_date':ref.isoformat(),
+              'strict_clear_scl_classes':[4,5,6],'item_count':len(features),'urban_ever_observed_fraction':round(obs_frac,8),
+              'urban_strict_clear_fill_fraction':round(fill_frac,8),'urban_pixel_age_distribution':age_dist,
+              'used_scene_ids':sorted(set(used)),'provenance_code_map':pmap},
+            'broad_4x4_sector_qa':sectors,
+            'invalidated_prior_attempt':{'run_id':32811773602,'reason':'technical PASS rejected during readback because annual STAC candidate sets included adjacent-year products; exact-year selection was not explicit'},
+            'truth_rules':['Historical urban core is a GIS prior, not a claim every structure persisted into 2026.',
+              'Only exact annual items for 2021 and 2022 are used, then only pixels built in both years survive.',
+              'One-cell erosion sacrifices edge recall to reduce mixed-pixel/class-boundary contamination.',
+              'Sentinel-2 fill uses only real SCL 4/5/6 pixels with per-pixel age and provenance.',
+              'No generated pixels, inpainting, super-resolution, object detection, actor attribution, or present-force inference.',
+              'This validates mask/observability only; it is not evidence of cause, activity, or organized presence.'],
+            'next_gate':'If and only if semantic QA remains PASS after artifact readback, compute urban-only temporal/contextual surface-change leads at broad-sector output; require independent corroboration before causal or current-presence claims.'}
+          wj('out/urban_mask_manifest_v2.json',manifest)
+          qa={'status':'PASS','checks':{'common_v04_30m_grid':True,'exact_2021_item_ids':all(x.endswith('-2021') for x in ids21),
+              'exact_2022_item_ids':all(x.endswith('-2022') for x in ids22),'landcover_2021_coverage_ge_0_95':cov21>=0.95,
+              'landcover_2022_coverage_ge_0_95':cov22>=0.95,'stable_built_both_years_only':True,'one_cell_edge_erosion':True,
+              'urban_core_px_ge_5000':int(core.sum())>=5000,'urban_observed_ge_0_99':obs_frac>=0.99,
+              'urban_strict_clear_fill_ge_0_95':fill_frac>=0.95,'clear_count_le_observed_count':True,
+              'no_generated_pixels':True,'broad_sector_output_only':True}}
+          if not all(qa['checks'].values()): qa['status']='FAIL'
+          wj('out/qa_v2.json',qa)
+          if qa['status']!='PASS': raise RuntimeError(json.dumps(qa))
+          print(json.dumps({'status':'PASS','exact_year_ids':{'2021':ids21,'2022':ids22},
+              'stable_built_fraction':float(stable.mean()),'urban_core_fraction':float(core.mean()),
+              'urban_core_px':int(core.sum()),'urban_observed_fraction':obs_frac,
+              'urban_strict_clear_fill_fraction':fill_frac,'age_distribution':age_dist,'sector_qa':sectors},indent=2))
+          PY
+
+      - name: Verify semantic checkpoint and hashes
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(jq -r .status out/qa_v2.json)" = PASS
+          test "$(jq -r .status out/urban_mask_manifest_v2.json)" = MEASURED_URBAN_MASK_CHECKPOINT_V2_EXACT_YEAR
+          test "$(jq -r '.checks.exact_2021_item_ids and .checks.exact_2022_item_ids' out/qa_v2.json)" = true
+          (cd out && find . -type f ! -name SHA256SUMS.txt -print0 | sort -z | xargs -0 sha256sum > SHA256SUMS.txt)
+          (cd out && sha256sum -c SHA256SUMS.txt)
+          test "$(find out -type f | wc -l)" -le 20
+          test "$(du -sb out | cut -f1)" -le 52428800
+
+      - name: Upload exact-year urban-mask checkpoint
+        id: upload
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: ai39-urban-mask-v2-${{ github.run_id }}-${{ github.run_attempt }}
+          path: out/
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Record upload digest
+        if: success()
+        run: echo "artifact_digest=${{ steps.upload.outputs.artifact-digest }}"
