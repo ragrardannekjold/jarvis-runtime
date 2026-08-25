@@ -1,4 +1,4 @@
-name: AI39 archival urban same-platform variability envelope
+name: AI39 archival urban pair discovery and variability envelope v2
 
 on:
   pull_request:
@@ -13,9 +13,9 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  variability-envelope:
+  pair-discovery-envelope:
     runs-on: ubuntu-latest
-    timeout-minutes: 22
+    timeout-minutes: 28
     steps:
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
         with:
@@ -27,14 +27,15 @@ jobs:
           requests==2.32.3 numpy==2.2.6 rasterio==1.4.3
           pystac-client==0.8.6 planetary-computer==1.0.0
 
-      - name: Measure archived three-day same-platform variability
+      - name: Discover valid pair from SCL, then measure envelope
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p out/provenance
           python - <<'PY'
           import json, math
-          from datetime import datetime, timezone
+          from collections import defaultdict
+          from datetime import date, datetime, timezone
           from pathlib import Path
 
           import numpy as np
@@ -47,12 +48,15 @@ jobs:
 
           AOI=[37.65,48.25,38.25,48.90]
           CRS='EPSG:32637'; RES=30; BUILT=7
-          PLATFORM='S2B'
-          DAY_A='2024-08-20'; DAY_B='2024-08-23'
+          YEARS=[2023,2024,2025]
+          WINDOW_START='07-24'; WINDOW_END='08-24'
           STAC='https://earth-search.aws.element84.com/v1/search'
           COLL='sentinel-2-c1-l2a'
           CLEAR=np.array([4,5,6],np.uint8)
           FEATURES=['ndvi','nbr','bsi','ndbi']
+          DAY_CLEAR_MIN=0.50
+          COMMON_CLEAR_MIN=0.50
+          SEP_MIN=2; SEP_MAX=12
 
           def wj(path,value):
               Path(path).write_text(json.dumps(value,ensure_ascii=False,indent=2),encoding='utf-8')
@@ -81,7 +85,7 @@ jobs:
               'https://planetarycomputer.microsoft.com/api/stac/v1',
               modifier=planetary_computer.sign_inplace)
 
-          def load_landcover(year):
+          def landcover(year):
               candidates=list(pc.search(
                   collections=['io-lulc-9-class'],bbox=AOI,
                   datetime=f'{year}-01-01/{year}-12-31').items())
@@ -99,11 +103,11 @@ jobs:
                   m=tile>0; arr[m]=tile[m]; ids.append(str(item.id))
               coverage=float((arr>0).mean())
               if coverage<0.95 or any(not x.endswith(f'-{year}') for x in ids):
-                  raise RuntimeError(f'land-cover provenance gate failed {year}')
+                  raise RuntimeError(f'land-cover provenance failed {year}')
               return arr,sorted(ids),coverage
 
-          lc21,ids21,cov21=load_landcover(2021)
-          lc22,ids22,cov22=load_landcover(2022)
+          lc21,ids21,cov21=landcover(2021)
+          lc22,ids22,cov22=landcover(2022)
           stable=(lc21==BUILT)&(lc22==BUILT)
           core=stable.copy(); padded=np.pad(stable,1,constant_values=False)
           for dy in range(3):
@@ -113,190 +117,249 @@ jobs:
           if core_n<5000:
               raise RuntimeError(f'urban core too small {core_n}')
 
-          def search_day(day):
-              body={'collections':[COLL],'bbox':AOI,
-                    'datetime':f'{day}T00:00:00Z/{day}T23:59:59Z','limit':100}
+          groups={}
+          window_provenance={}
+          for year in YEARS:
+              body={
+                  'collections':[COLL],'bbox':AOI,
+                  'datetime':f'{year}-{WINDOW_START}T00:00:00Z/{year}-{WINDOW_END}T23:59:59Z',
+                  'limit':200}
               response=requests.post(STAC,json=body,timeout=120)
               response.raise_for_status()
               features=response.json().get('features',[])
-              selected=[item for item in features
-                        if str(item.get('id') or '').split('_',1)[0]==PLATFORM]
-              wj(f'out/provenance/{day}.json',{
+              by_key=defaultdict(list)
+              for item in features:
+                  day=(item.get('properties',{}).get('datetime') or '')[:10]
+                  sid=str(item.get('id') or '')
+                  platform=sid.split('_',1)[0]
+                  if day and platform in {'S2A','S2B'}:
+                      by_key[(day,platform)].append(item)
+              window_provenance[str(year)]={
                   'request':body,
-                  'all_scene_ids':sorted(str(item.get('id')) for item in features),
-                  'selected_platform':PLATFORM,
-                  'selected_scene_ids':sorted(str(item.get('id')) for item in selected)})
-              if not selected:
-                  raise RuntimeError(f'no {PLATFORM} scenes on {day}')
-              return selected
+                  'group_scene_ids':{
+                      f'{day}|{platform}':sorted(str(x.get('id')) for x in items)
+                      for (day,platform),items in sorted(by_key.items())}}
+              groups.update(by_key)
+          wj('out/provenance/search_windows.json',window_provenance)
 
-          def load_scene(day):
-              items=search_day(day)
-              required=['red','blue','nir08','swir16','swir22','scl']
-              red=np.full((H,W),np.nan,np.float32); blue=red.copy(); nir=red.copy()
-              swir16=red.copy(); swir22=red.copy(); scl=np.zeros((H,W),np.uint8)
-              ids=[]
+          coverage_rows=[]; clear_masks={}
+          for (day,platform),items in sorted(groups.items()):
+              scl=np.zeros((H,W),np.uint8); used=[]
               for item in items:
-                  assets=item.get('assets',{})
-                  if not all((assets.get(k) or {}).get('href') for k in required):
+                  href=(item.get('assets',{}).get('scl') or {}).get('href')
+                  if not href:
                       continue
                   try:
-                      rr=rp(assets['red']['href']); bb=rp(assets['blue']['href'])
-                      nn=rp(assets['nir08']['href']); s16=rp(assets['swir16']['href'])
-                      s22=rp(assets['swir22']['href'])
-                      cc=rp(assets['scl']['href'],'uint8',Resampling.nearest,0)
+                      tile=rp(href,'uint8',Resampling.nearest,0)
                   except Exception:
                       continue
-                  valid=(np.isfinite(rr)&np.isfinite(bb)&np.isfinite(nn)&
-                         np.isfinite(s16)&np.isfinite(s22)&
-                         (rr>0)&(bb>0)&(nn>0)&(s16>0)&(s22>0)&(cc>0))
-                  red[valid]=rr[valid]; blue[valid]=bb[valid]; nir[valid]=nn[valid]
-                  swir16[valid]=s16[valid]; swir22[valid]=s22[valid]; scl[valid]=cc[valid]
-                  ids.append(str(item.get('id')))
-              observed=(np.isfinite(red)&np.isfinite(blue)&np.isfinite(nir)&
-                        np.isfinite(swir16)&np.isfinite(swir22)&(scl>0))
-              clear=core&observed&np.isin(scl,CLEAR)
-              def index(num,den):
-                  out=np.full((H,W),np.nan,np.float32)
-                  out[clear]=num[clear]/(den[clear]+1e-6)
-                  return out
-              return {
-                  'day':day,'scene_ids':sorted(set(ids)),'clear':clear,
-                  'clear_fraction':float(clear.sum()/core_n),
-                  'features':{
-                      'ndvi':index(nir-red,nir+red),
-                      'nbr':index(nir-swir22,nir+swir22),
-                      'bsi':index((swir16+red)-(nir+blue),(swir16+red)+(nir+blue)),
-                      'ndbi':index(swir16-nir,swir16+nir)}}
+                  m=tile>0; scl[m]=tile[m]; used.append(str(item.get('id')))
+              clear=core&np.isin(scl,CLEAR)
+              frac=float(clear.sum()/core_n)
+              clear_masks[(day,platform)]=clear
+              coverage_rows.append({
+                  'day':day,'platform':platform,
+                  'clear_px':int(clear.sum()),'clear_fraction':round(frac,8),
+                  'scene_ids':sorted(set(used))})
+          wj('out/provenance/day_platform_clear_coverage.json',coverage_rows)
 
-          sceneA=load_scene(DAY_A); sceneB=load_scene(DAY_B)
-          common=sceneA['clear']&sceneB['clear']
-          common_px=int(common.sum()); common_fraction=float(common_px/core_n)
-          if sceneA['clear_fraction']<0.50 or sceneB['clear_fraction']<0.50:
-              raise RuntimeError(
-                  f'day coverage below QA floor A={sceneA["clear_fraction"]:.6f} B={sceneB["clear_fraction"]:.6f}')
-          if common_fraction<0.50:
-              raise RuntimeError(f'common-clear coverage below 50%: {common_fraction:.6f}')
+          pair_rows=[]
+          keys=sorted(clear_masks)
+          for i,(day_a,platform_a) in enumerate(keys):
+              da=date.fromisoformat(day_a)
+              for day_b,platform_b in keys[i+1:]:
+                  if platform_a!=platform_b:
+                      continue
+                  db=date.fromisoformat(day_b)
+                  if da.year!=db.year:
+                      continue
+                  sep=(db-da).days
+                  if sep<SEP_MIN or sep>SEP_MAX:
+                      continue
+                  ma=clear_masks[(day_a,platform_a)]
+                  mb=clear_masks[(day_b,platform_b)]
+                  a_frac=float(ma.sum()/core_n); b_frac=float(mb.sum()/core_n)
+                  common=ma&mb; common_px=int(common.sum()); common_frac=float(common_px/core_n)
+                  pair_rows.append({
+                      'platform':platform_a,'day_a':day_a,'day_b':day_b,
+                      'separation_days':sep,
+                      'day_a_clear_fraction':round(a_frac,8),
+                      'day_b_clear_fraction':round(b_frac,8),
+                      'common_clear_px':common_px,
+                      'common_clear_fraction':round(common_frac,8),
+                      'passes_floor':(
+                          a_frac>=DAY_CLEAR_MIN and b_frac>=DAY_CLEAR_MIN and
+                          common_frac>=COMMON_CLEAR_MIN)})
 
-          quantiles=[50,75,90,95,99,99.5,99.9]
-          global_stats={}; diff_arrays={}
-          thresholds={}
-          for name in FEATURES:
-              diff=np.abs(sceneB['features'][name]-sceneA['features'][name])
-              diff[~common]=np.nan
-              values=diff[common]
-              if values.size<10000:
-                  raise RuntimeError(f'not enough common values for {name}')
-              qs={str(q):round(float(np.nanpercentile(values,q)),8) for q in quantiles}
-              median=float(np.nanmedian(values))
-              mad=float(np.nanmedian(np.abs(values-median)))
-              robust_scale=max(1.4826*mad,1e-4)
-              global_stats[name]={
-                  'median_abs_diff':round(median,8),
-                  'mad_abs_diff':round(mad,8),
-                  'robust_scale':round(robust_scale,8),
-                  'quantiles':qs}
-              thresholds[name]=float(np.nanpercentile(values,99.5))
-              diff_arrays[name]=diff
+          pair_rows.sort(key=lambda row:(
+              row['passes_floor'],row['common_clear_fraction'],
+              min(row['day_a_clear_fraction'],row['day_b_clear_fraction']),
+              -abs(row['separation_days']-5)),reverse=True)
+          for rank,row in enumerate(pair_rows,1):
+              row['rank']=rank
+          wj('out/provenance/pair_candidates.json',pair_rows)
 
-          exceed_count=np.zeros((H,W),np.uint8)
-          for name in FEATURES:
-              exceed_count += (common&(diff_arrays[name]>=thresholds[name])).astype(np.uint8)
-          joint_tail=common&(exceed_count>=2)
-
-          row_edges=np.linspace(0,H,5,dtype=int)
-          col_edges=np.linspace(0,W,5,dtype=int)
-          sectors=[]
-          for rr in range(4):
-              for cc in range(4):
-                  sector=f"{'ABCD'[cc]}{rr+1}"
-                  ys=slice(row_edges[rr],row_edges[rr+1])
-                  xs=slice(col_edges[cc],col_edges[cc+1])
-                  core_px=int(core[ys,xs].sum())
-                  common_mask=common[ys,xs]
-                  common_sector_px=int(common_mask.sum())
-                  row={
-                      'sector':sector,
-                      'urban_core_px':core_px,
-                      'common_clear_px':common_sector_px,
-                      'common_clear_fraction':round(common_sector_px/max(core_px,1),6)}
-                  if common_sector_px<300:
-                      row['state']='INSUFFICIENT_DATA'
-                      row['joint_tail_px']=None
-                      row['joint_tail_fraction_of_common']=None
-                      row['feature_p99_abs_diff']={name:None for name in FEATURES}
-                  else:
-                      row['state']='SUFFICIENT'
-                      row['joint_tail_px']=int(joint_tail[ys,xs].sum())
-                      row['joint_tail_fraction_of_common']=round(
-                          float(joint_tail[ys,xs].sum()/common_sector_px),8)
-                      row['feature_p99_abs_diff']={
-                          name:round(float(np.nanpercentile(diff_arrays[name][ys,xs][common_mask],99)),8)
-                          for name in FEATURES}
-                  sectors.append(row)
+          candidates=[row for row in pair_rows if row['passes_floor']]
+          selected=candidates[0] if candidates else None
 
           result={
-              'status':'MEASURED_ARCHIVAL_SAME_PLATFORM_VARIABILITY_ENVELOPE',
+              'status':'MEASURED_ARCHIVAL_PAIR_DISCOVERY_AND_VARIABILITY_V2',
               'generated_utc':datetime.now(timezone.utc).isoformat(),
-              'purpose':'Measure the empirical three-day same-platform optical variability envelope on the verified urban core before treating small spectral deviations as anomalous.',
-              'scope':'Historical method QA only. The envelope includes acquisition variability plus any real short-interval surface changes; it is not a pure sensor-noise estimate and contains no causal/activity inference.',
-              'pair':{
-                  'platform':PLATFORM,
-                  'day_a':DAY_A,'day_b':DAY_B,
-                  'separation_days':3,
-                  'day_a_clear_fraction':round(sceneA['clear_fraction'],8),
-                  'day_b_clear_fraction':round(sceneB['clear_fraction'],8),
-                  'common_clear_px':common_px,
-                  'common_clear_fraction':round(common_fraction,8),
-                  'day_a_scene_ids':sceneA['scene_ids'],
-                  'day_b_scene_ids':sceneB['scene_ids']},
+              'purpose':'Discover a real same-platform short-interval archival pair from strict-clear urban coverage before measuring an optical variability envelope.',
+              'scope':'Historical method QA only. No current-condition, causal, actor, route, threat, or presence inference.',
+              'invalidated_prior_attempt':{
+                  'run_id':32813704838,
+                  'fixed_pair':['S2B','2024-08-20','2024-08-23'],
+                  'measured_clear_fractions':[0.997122,0.088828],
+                  'reason':'Second date failed the 50% clear-coverage floor; pair selection must be data-driven.'},
               'urban_mask':{
                   'exact_year_ids':{'2021':ids21,'2022':ids22},
                   'coverage':{'2021':cov21,'2022':cov22},
                   'eroded_core_px':core_n},
-              'global_abs_difference_envelope':global_stats,
-              'joint_tail_definition':'Pixel exceeds the global 99.5th percentile absolute-difference threshold in at least two of NDVI/NBR/BSI/NDBI.',
-              'joint_tail_px':int(joint_tail.sum()),
-              'joint_tail_fraction_of_common':round(float(joint_tail.sum()/common_px),8),
-              'broad_sector_diagnostics':sectors,
+              'discovery_window':[f'{year}-{WINDOW_START}/{year}-{WINDOW_END}' for year in YEARS],
+              'pair_floor':{
+                  'per_day_clear_fraction_min':DAY_CLEAR_MIN,
+                  'common_clear_fraction_min':COMMON_CLEAR_MIN,
+                  'separation_days_min':SEP_MIN,
+                  'separation_days_max':SEP_MAX},
+              'candidate_count':len(candidates),
+              'selected_pair':selected,
+              'envelope':None,
               'truth_rules':[
-                  'This pair is historical calibration, not evidence about current conditions.',
-                  'The measured envelope combines sensor/acquisition variability and any real three-day ground changes; do not label it pure noise.',
-                  'Small future optical deviations inside this envelope should not be upgraded merely because they are nonzero.',
-                  'No geometry, object positions, actor attribution, route inference, or current-presence inference is exported.',
-                  'A single historical pair is a canary calibration, not a final universal threshold.'],
-              'next_gate':'Use this canary envelope to test whether the current optical detector threshold is materially above ordinary short-interval variability. If close to the envelope, expand calibration to more archived same-platform pairs before any promotion.'}
-          wj('out/result.json',result)
+                  'Pair selection is based on observed strict-clear coverage, not date intuition.',
+                  'Failure to find a pair is a valid method result and must not be fixed by lowering quality floors.',
+                  'Any measured envelope combines acquisition variability with possible real short-interval ground changes; it is not pure sensor noise.',
+                  'No geometry or object-level output is exported.']}
 
+          if selected is not None:
+              key_a=(selected['day_a'],selected['platform'])
+              key_b=(selected['day_b'],selected['platform'])
+              common=clear_masks[key_a]&clear_masks[key_b]
+
+              def load_features(key):
+                  day,platform=key; items=groups[key]
+                  required=['red','blue','nir08','swir16','swir22','scl']
+                  red=np.full((H,W),np.nan,np.float32); blue=red.copy(); nir=red.copy()
+                  s16=red.copy(); s22=red.copy(); scl=np.zeros((H,W),np.uint8); used=[]
+                  for item in items:
+                      assets=item.get('assets',{})
+                      if not all((assets.get(k) or {}).get('href') for k in required):
+                          continue
+                      try:
+                          rr=rp(assets['red']['href']); bb=rp(assets['blue']['href'])
+                          nn=rp(assets['nir08']['href']); x16=rp(assets['swir16']['href'])
+                          x22=rp(assets['swir22']['href'])
+                          cc=rp(assets['scl']['href'],'uint8',Resampling.nearest,0)
+                      except Exception:
+                          continue
+                      valid=(np.isfinite(rr)&np.isfinite(bb)&np.isfinite(nn)&
+                             np.isfinite(x16)&np.isfinite(x22)&
+                             (rr>0)&(bb>0)&(nn>0)&(x16>0)&(x22>0)&(cc>0))
+                      red[valid]=rr[valid]; blue[valid]=bb[valid]; nir[valid]=nn[valid]
+                      s16[valid]=x16[valid]; s22[valid]=x22[valid]; scl[valid]=cc[valid]
+                      used.append(str(item.get('id')))
+                  actual_clear=core&np.isin(scl,CLEAR)&np.isfinite(red)&np.isfinite(blue)&np.isfinite(nir)&np.isfinite(s16)&np.isfinite(s22)
+                  def idx(num,den):
+                      out=np.full((H,W),np.nan,np.float32)
+                      out[actual_clear]=num[actual_clear]/(den[actual_clear]+1e-6)
+                      return out
+                  return {
+                      'clear':actual_clear,'scene_ids':sorted(set(used)),
+                      'features':{
+                          'ndvi':idx(nir-red,nir+red),
+                          'nbr':idx(nir-s22,nir+s22),
+                          'bsi':idx((s16+red)-(nir+blue),(s16+red)+(nir+blue)),
+                          'ndbi':idx(s16-nir,s16+nir)}}
+
+              scene_a=load_features(key_a); scene_b=load_features(key_b)
+              spectral_common=common&scene_a['clear']&scene_b['clear']
+              spectral_common_px=int(spectral_common.sum())
+              spectral_common_frac=float(spectral_common_px/core_n)
+              if spectral_common_frac<COMMON_CLEAR_MIN:
+                  raise RuntimeError(
+                      f'spectral common-clear fell below floor after full-band read: {spectral_common_frac:.6f}')
+
+              quantiles=[50,75,90,95,99,99.5,99.9]
+              stats={}; diffs={}; thresholds={}
+              for name in FEATURES:
+                  diff=np.abs(scene_b['features'][name]-scene_a['features'][name])
+                  diff[~spectral_common]=np.nan
+                  values=diff[spectral_common]
+                  median=float(np.nanmedian(values))
+                  mad=float(np.nanmedian(np.abs(values-median)))
+                  stats[name]={
+                      'median_abs_diff':round(median,8),
+                      'mad_abs_diff':round(mad,8),
+                      'robust_scale':round(max(1.4826*mad,1e-4),8),
+                      'quantiles':{
+                          str(q):round(float(np.nanpercentile(values,q)),8)
+                          for q in quantiles}}
+                  thresholds[name]=float(np.nanpercentile(values,99.5))
+                  diffs[name]=diff
+
+              exceed=np.zeros((H,W),np.uint8)
+              for name in FEATURES:
+                  exceed += (spectral_common&(diffs[name]>=thresholds[name])).astype(np.uint8)
+              joint=spectral_common&(exceed>=2)
+
+              row_edges=np.linspace(0,H,5,dtype=int)
+              col_edges=np.linspace(0,W,5,dtype=int)
+              sectors=[]
+              for rr in range(4):
+                  for cc in range(4):
+                      sector=f"{'ABCD'[cc]}{rr+1}"
+                      ys=slice(row_edges[rr],row_edges[rr+1]); xs=slice(col_edges[cc],col_edges[cc+1])
+                      cm=spectral_common[ys,xs]
+                      n=int(cm.sum()); core_sector=int(core[ys,xs].sum())
+                      row={
+                          'sector':sector,'urban_core_px':core_sector,
+                          'common_clear_px':n,
+                          'common_clear_fraction':round(n/max(core_sector,1),6)}
+                      if n<300:
+                          row.update({'state':'INSUFFICIENT_DATA','joint_tail_px':None,
+                                      'joint_tail_fraction_of_common':None})
+                      else:
+                          j=int(joint[ys,xs].sum())
+                          row.update({'state':'SUFFICIENT','joint_tail_px':j,
+                                      'joint_tail_fraction_of_common':round(j/n,8)})
+                      sectors.append(row)
+
+              result['selected_pair']={**selected,
+                  'day_a_scene_ids':scene_a['scene_ids'],
+                  'day_b_scene_ids':scene_b['scene_ids'],
+                  'spectral_common_clear_px':spectral_common_px,
+                  'spectral_common_clear_fraction':round(spectral_common_frac,8)}
+              result['envelope']={
+                  'global_abs_difference':stats,
+                  'joint_tail_definition':'At least two of NDVI/NBR/BSI/NDBI exceed their global 99.5th-percentile absolute-difference threshold for the selected pair.',
+                  'joint_tail_px':int(joint.sum()),
+                  'joint_tail_fraction_of_common':round(float(joint.sum()/spectral_common_px),8),
+                  'broad_sector_diagnostics':sectors,
+                  'interpretation':'Canary empirical variability envelope only; not a universal threshold and not pure sensor noise.'}
+              result['next_gate']='Compare detector sensitivity against this empirical envelope. If detector thresholds sit near the envelope tail, expand calibration to additional archived pairs before any optical-method promotion.'
+          else:
+              result['next_gate']='No qualifying archival pair exists in the scanned windows. Do not force same-platform short-interval calibration; use another independent validation axis.'
+
+          wj('out/result.json',result)
           qa={'status':'PASS','checks':{
               'exact_year_landcover':(
                   all(x.endswith('-2021') for x in ids21) and
                   all(x.endswith('-2022') for x in ids22)),
-              'same_platform_both_days':(
-                  all(x.startswith('S2B_') for x in sceneA['scene_ids']) and
-                  all(x.startswith('S2B_') for x in sceneB['scene_ids'])),
-              'day_a_clear_ge_0_50':sceneA['clear_fraction']>=0.50,
-              'day_b_clear_ge_0_50':sceneB['clear_fraction']>=0.50,
-              'common_clear_ge_0_50':common_fraction>=0.50,
               'historical_only':True,
+              'pair_selection_data_driven':True,
+              'no_floor_relaxation':True,
               'no_geometry_export':True,
               'no_generated_pixels':True}}
-          if not all(qa['checks'].values()):
-              qa['status']='FAIL'
           wj('out/qa.json',qa)
-          if qa['status']!='PASS':
-              raise RuntimeError(json.dumps(qa))
-
           print(json.dumps({
               'qa':qa,
-              'pair':result['pair'],
-              'envelope':global_stats,
-              'joint_tail_px':result['joint_tail_px'],
-              'joint_tail_fraction':result['joint_tail_fraction_of_common'],
-              'sector_joint_tail':[
-                  (row['sector'],row['state'],row['common_clear_fraction'],
-                   row['joint_tail_px'],row['joint_tail_fraction_of_common'])
-                  for row in sectors]
+              'candidate_count':result['candidate_count'],
+              'selected_pair':result['selected_pair'],
+              'envelope_summary':None if result['envelope'] is None else {
+                  'joint_tail_px':result['envelope']['joint_tail_px'],
+                  'joint_tail_fraction':result['envelope']['joint_tail_fraction_of_common'],
+                  'global_abs_difference':result['envelope']['global_abs_difference']},
+              'top_candidates':pair_rows[:10]
           },indent=2))
           PY
 
@@ -305,17 +368,17 @@ jobs:
         run: |
           set -euo pipefail
           test "$(jq -r .status out/qa.json)" = PASS
-          test "$(jq -r .status out/result.json)" = MEASURED_ARCHIVAL_SAME_PLATFORM_VARIABILITY_ENVELOPE
+          test "$(jq -r .status out/result.json)" = MEASURED_ARCHIVAL_PAIR_DISCOVERY_AND_VARIABILITY_V2
           test "$(find out -type f \( -name '*.tif' -o -name '*.png' -o -name '*.geojson' \) | wc -l)" -eq 0
           test "$(du -sb out | cut -f1)" -le 5242880
           (cd out && find . -type f ! -name SHA256SUMS.txt -print0 | sort -z | xargs -0 sha256sum > SHA256SUMS.txt)
           (cd out && sha256sum -c SHA256SUMS.txt)
 
-      - name: Upload variability envelope
+      - name: Upload pair discovery and envelope
         id: upload
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: ai39-urban-variability-envelope-${{ github.run_id }}-${{ github.run_attempt }}
+          name: ai39-urban-variability-v2-${{ github.run_id }}-${{ github.run_attempt }}
           path: out/
           if-no-files-found: error
           retention-days: 14
