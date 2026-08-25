@@ -60,16 +60,34 @@ jobs:
                       if d: return d,k
               return None,None
 
+          def safe_identity_meta(attrs):
+              out={}
+              for k,v in attrs.items():
+                  lk=k.lower()
+                  if any(t in lk for t in ('identifier','catalog','source','product','quicklook','browse','thumbnail')):
+                      if not any(t in lk for t in ('geometry','latitude','longitude','coord')):
+                          out[k]=v
+              return out
+
+          def choose_id(attrs):
+              preferred=['sourceidentifier','sourceIdentifier','productidentifier','productIdentifier','parentidentifier','parentIdentifier','identifier','childidentifier','childIdentifier']
+              for k in preferred:
+                  if attrs.get(k) not in (None,''):
+                      return attrs.get(k),k
+              meta=safe_identity_meta(attrs)
+              for k,v in meta.items():
+                  if v not in (None,'') and ('identifier' in k.lower() or k.lower().endswith('id')):
+                      return v,k
+              return None,None
+
           def sector_bbox(col,row):
               xmin,ymin,xmax,ymax=BBOX
               dx=(xmax-xmin)/4; dy=(ymax-ymin)/4
-              # rows 0..3 are north->south; ArcGIS bbox uses ymin/ymax
               sx0=xmin+col*dx; sx1=xmin+(col+1)*dx
               sy1=ymax-row*dy; sy0=ymax-(row+1)*dy
               return [sx0,sy0,sx1,sy1]
 
-          scenes={}
-          errors=[]
+          scenes={}; errors=[]
           for layer,name in SENSORS.items():
               qurl=f'{ROOT}/{layer}/query'
               for row in range(4):
@@ -87,14 +105,14 @@ jobs:
                           for f in data.get('features',[]):
                               a=f.get('attributes') or {}; dt,dtfield=acquisition(a)
                               if not dt or not (START <= dt < END): continue
-                              pid=a.get('parentidentifier') or a.get('parentIdentifier') or a.get('identifier') or a.get('OBJECTID')
+                              pid,pidfield=choose_id(a); imeta=safe_identity_meta(a)
                               key=f'{layer}:{pid}:{dt.isoformat()}'
                               rec=scenes.setdefault(key,{
-                                'sensor_class':name,'acquisition_utc':dt.isoformat(),'id':pid,
+                                'sensor_class':name,'acquisition_utc':dt.isoformat(),'id':pid,'id_field':pidfield,
                                 'cloudcover':a.get('cloudcover') if 'cloudcover' in a else a.get('cloudCover'),
                                 'incidenceangle':a.get('incidenceangle') if 'incidenceangle' in a else a.get('incidenceAngle'),
                                 'processinglevel':a.get('processinglevel') if 'processinglevel' in a else a.get('processingLevel'),
-                                'date_field':dtfield,'broad_sectors':[]
+                                'date_field':dtfield,'identity_preview_meta':imeta,'broad_sectors':[]
                               })
                               if sec not in rec['broad_sectors']: rec['broad_sectors'].append(sec)
                       except Exception as e:
@@ -109,8 +127,7 @@ jobs:
             'window_utc':['2026-08-20T00:00:00Z','2026-08-25T23:59:59Z'],
             'scope':'Broad AI-39 corridor; public Airbus archive metadata only',
             'by_sensor':{k:{'count':len(v),'rows':v} for k,v in by_sensor.items()},
-            'all_rows':rows,
-            'errors':errors,
+            'all_rows':rows,'errors':errors,
             'safety':'No exact footprint geometry or tactical coordinates retained; only coarse 4x4 sector coverage.'
           }
           json.dump(out,open('out/ai39_vhr_inventory_20260825.json','w'),indent=2,default=str)
