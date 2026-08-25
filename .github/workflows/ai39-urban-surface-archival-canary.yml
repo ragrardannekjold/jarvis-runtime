@@ -15,7 +15,7 @@ concurrency:
 jobs:
   urban-surface:
     runs-on: ubuntu-latest
-    timeout-minutes: 32
+    timeout-minutes: 24
     steps:
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
         with:
@@ -27,19 +27,18 @@ jobs:
           requests==2.32.3 numpy==2.2.6 scipy==1.15.3 rasterio==1.4.3
           pystac-client==0.8.6 planetary-computer==1.0.0
 
-      - name: Run broad-sector urban-only archival canary
+      - name: Run metadata-first broad-sector urban canary
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p out/provenance
           python - <<'PY'
           import json, math
+          from collections import defaultdict
           from datetime import datetime, timezone
           from pathlib import Path
-
           import numpy as np
-          import rasterio
-          import requests
+          import rasterio, requests
           from scipy import ndimage
           from scipy.stats import rankdata
           from pystac_client import Client
@@ -50,241 +49,161 @@ jobs:
 
           AOI=[37.65,48.25,38.25,48.90]
           CRS='EPSG:32637'; RES=30; BUILT=7
-          CURRENT_DAY='2026-08-20'
-          HIST_YEARS=[2023,2024,2025]
-          HIST_START_MMDD='08-17'; HIST_END_MMDD='08-23'
-          S2_STAC='https://earth-search.aws.element84.com/v1/search'
-          S2_COLLECTION='sentinel-2-c1-l2a'
-          CLEAR_CLASSES=np.array([4,5,6],dtype=np.uint8)
-          FEATURES=['ndvi','nbr','bsi','ndbi']
-          CTX_Z_MIN=5.0; HIST_Z_MIN=4.0; COMPONENT_MIN_PX=4
+          CURRENT_DAY='2026-08-20'; HIST_YEARS=[2023,2024,2025]
+          S2='https://earth-search.aws.element84.com/v1/search'; COLL='sentinel-2-c1-l2a'
+          CLEAR=np.array([4,5,6],np.uint8); FEATS=['ndvi','nbr','bsi','ndbi']
+          CTX_MIN=5.0; HIST_MIN=4.0; COMP_MIN=4
 
-          def wj(path,value):
-              Path(path).write_text(json.dumps(value,ensure_ascii=False,indent=2),encoding='utf-8')
-
-          left,bottom,right,top=transform_bounds('EPSG:4326',CRS,*AOI,densify_pts=41)
-          left=math.floor(left/RES)*RES; bottom=math.floor(bottom/RES)*RES
-          right=math.ceil(right/RES)*RES; top=math.ceil(top/RES)*RES
-          W=int(round((right-left)/RES)); H=int(round((top-bottom)/RES))
-          TR=from_bounds(left,bottom,right,top,W,H)
+          def wj(p,v): Path(p).write_text(json.dumps(v,ensure_ascii=False,indent=2),encoding='utf-8')
+          l,b,r,t=transform_bounds('EPSG:4326',CRS,*AOI,densify_pts=41)
+          l=math.floor(l/RES)*RES; b=math.floor(b/RES)*RES; r=math.ceil(r/RES)*RES; t=math.ceil(t/RES)*RES
+          W=int(round((r-l)/RES)); H=int(round((t-b)/RES)); TR=from_bounds(l,b,r,t,W,H)
 
           def rp(href,dtype='float32',resampling=Resampling.bilinear,nodata=np.nan):
               out=np.full((H,W),nodata,dtype=dtype)
               with rasterio.Env(AWS_NO_SIGN_REQUEST='YES',GDAL_DISABLE_READDIR_ON_OPEN='EMPTY_DIR',
                   CPL_VSIL_CURL_ALLOWED_EXTENSIONS='.tif,.TIF',GDAL_HTTP_MAX_RETRY='3',GDAL_HTTP_RETRY_DELAY='2'):
                   with rasterio.open(href) as src:
-                      reproject(source=rasterio.band(src,1),destination=out,
-                          src_transform=src.transform,src_crs=src.crs,src_nodata=src.nodata,
-                          dst_transform=TR,dst_crs=CRS,dst_nodata=nodata,resampling=resampling)
+                      reproject(source=rasterio.band(src,1),destination=out,src_transform=src.transform,src_crs=src.crs,
+                          src_nodata=src.nodata,dst_transform=TR,dst_crs=CRS,dst_nodata=nodata,resampling=resampling)
               return out
 
-          # Rebuild the already-validated exact-year stable-built prior independently.
           pc=Client.open('https://planetarycomputer.microsoft.com/api/stac/v1',modifier=planetary_computer.sign_inplace)
-          def lc_exact(year):
-              cand=list(pc.search(collections=['io-lulc-9-class'],bbox=AOI,
-                  datetime=f'{year}-01-01/{year}-12-31').items())
-              sel=[it for it in cand if str(it.id).endswith(f'-{year}')]
-              wj(f'out/provenance/landcover_{year}.json',{
-                  'candidate_ids':sorted(str(x.id) for x in cand),
-                  'selected_ids':sorted(str(x.id) for x in sel),
-                  'rule':f'item.id endswith -{year}'})
-              if not sel: raise RuntimeError(f'no exact annual land-cover item for {year}')
-              arr=np.zeros((H,W),np.uint8); used=[]
+          def lc(year):
+              cand=list(pc.search(collections=['io-lulc-9-class'],bbox=AOI,datetime=f'{year}-01-01/{year}-12-31').items())
+              sel=[x for x in cand if str(x.id).endswith(f'-{year}')]
+              wj(f'out/provenance/landcover_{year}.json',{'candidate_ids':sorted(str(x.id) for x in cand),'selected_ids':sorted(str(x.id) for x in sel),'rule':f'item.id endswith -{year}'})
+              if not sel: raise RuntimeError(f'no exact landcover {year}')
+              arr=np.zeros((H,W),np.uint8); ids=[]
               for it in sel:
-                  a=it.assets.get('data') or it.assets.get('map') or next(
-                      (x for x in it.assets.values() if x.href.lower().endswith(('.tif','.tiff'))),None)
+                  a=it.assets.get('data') or it.assets.get('map') or next((x for x in it.assets.values() if x.href.lower().endswith(('.tif','.tiff'))),None)
                   if a is None: continue
-                  t=rp(a.href,'uint8',Resampling.nearest,0)
-                  m=t>0; arr[m]=t[m]; used.append(str(it.id))
+                  z=rp(a.href,'uint8',Resampling.nearest,0); m=z>0; arr[m]=z[m]; ids.append(str(it.id))
               cov=float((arr>0).mean())
-              if cov<0.95: raise RuntimeError(f'landcover {year} coverage {cov:.6f}')
-              if any(not x.endswith(f'-{year}') for x in used): raise RuntimeError('cross-year provenance')
-              return arr,sorted(set(used)),cov
+              if cov<0.95 or any(not x.endswith(f'-{year}') for x in ids): raise RuntimeError(f'landcover gate failed {year}')
+              return arr,sorted(set(ids)),cov
 
-          lc21,lc21_ids,lc21_cov=lc_exact(2021)
-          lc22,lc22_ids,lc22_cov=lc_exact(2022)
-          stable=(lc21==BUILT)&(lc22==BUILT)
-          core=stable.copy(); pad=np.pad(stable,1,constant_values=False)
+          lc21,ids21,cov21=lc(2021); lc22,ids22,cov22=lc(2022)
+          stable=(lc21==BUILT)&(lc22==BUILT); core=stable.copy(); pad=np.pad(stable,1,constant_values=False)
           for dy in range(3):
               for dx in range(3): core &= pad[dy:dy+H,dx:dx+W]
           core_n=int(core.sum())
-          if core_n<5000: raise RuntimeError(f'urban core too small {core_n}')
+          if core_n<5000: raise RuntimeError('urban core too small')
 
-          def search_range(start,end):
-              body={'collections':[S2_COLLECTION],'bbox':AOI,
-                    'datetime':f'{start}T00:00:00Z/{end}T23:59:59Z','limit':100}
-              r=requests.post(S2_STAC,json=body,timeout=120); r.raise_for_status()
-              feats=r.json().get('features',[])
-              return feats,body
+          def search(start,end):
+              body={'collections':[COLL],'bbox':AOI,'datetime':f'{start}T00:00:00Z/{end}T23:59:59Z','limit':100}
+              q=requests.post(S2,json=body,timeout=120); q.raise_for_status(); return q.json().get('features',[]),body
+
+          def day_shortlist(year):
+              feats,body=search(f'{year}-08-17',f'{year}-08-23')
+              groups=defaultdict(list)
+              for it in feats:
+                  day=(it.get('properties',{}).get('datetime') or '')[:10]
+                  if day: groups[day].append(it)
+              ranked=[]
+              for day,items in groups.items():
+                  clouds=[float(x.get('properties',{}).get('eo:cloud_cover',100) or 100) for x in items]
+                  ranked.append({'day':day,'mean_cloud':round(float(np.mean(clouds)),3),'item_count':len(items),'scene_ids':sorted(str(x.get('id')) for x in items)})
+              ranked.sort(key=lambda x:(x['mean_cloud'],-x['item_count'],abs(int(x['day'][-2:])-20)))
+              wj(f'out/provenance/{year}_metadata_shortlist.json',{'request':body,'ranked_days':ranked})
+              return ranked[:2]
 
           def load_day(day):
-              feats,body=search_range(day,day)
-              required=['red','blue','nir08','swir16','swir22','scl']
-              red=np.full((H,W),np.nan,np.float32); blue=red.copy(); nir=red.copy(); s16=red.copy(); s22=red.copy()
-              scl=np.zeros((H,W),np.uint8); ids=[]
+              feats,body=search(day,day); req=['red','blue','nir08','swir16','swir22','scl']
+              red=np.full((H,W),np.nan,np.float32); blue=red.copy(); nir=red.copy(); s16=red.copy(); s22=red.copy(); scl=np.zeros((H,W),np.uint8); ids=[]
               for it in feats:
                   a=it.get('assets',{})
-                  if not all((a.get(k) or {}).get('href') for k in required): continue
+                  if not all((a.get(k) or {}).get('href') for k in req): continue
                   try:
-                      rr=rp(a['red']['href']); bb=rp(a['blue']['href']); nn=rp(a['nir08']['href'])
-                      x16=rp(a['swir16']['href']); x22=rp(a['swir22']['href']); cc=rp(a['scl']['href'],'uint8',Resampling.nearest,0)
-                  except Exception:
-                      continue
+                      rr=rp(a['red']['href']); bb=rp(a['blue']['href']); nn=rp(a['nir08']['href']); x16=rp(a['swir16']['href']); x22=rp(a['swir22']['href']); cc=rp(a['scl']['href'],'uint8',Resampling.nearest,0)
+                  except Exception: continue
                   m=np.isfinite(rr)&np.isfinite(bb)&np.isfinite(nn)&np.isfinite(x16)&np.isfinite(x22)&(rr>0)&(bb>0)&(nn>0)&(x16>0)&(x22>0)&(cc>0)
-                  red[m]=rr[m]; blue[m]=bb[m]; nir[m]=nn[m]; s16[m]=x16[m]; s22[m]=x22[m]; scl[m]=cc[m]
-                  ids.append(str(it.get('id')))
+                  red[m]=rr[m]; blue[m]=bb[m]; nir[m]=nn[m]; s16[m]=x16[m]; s22[m]=x22[m]; scl[m]=cc[m]; ids.append(str(it.get('id')))
               valid=np.isfinite(red)&np.isfinite(blue)&np.isfinite(nir)&np.isfinite(s16)&np.isfinite(s22)&(scl>0)
-              clear=core&valid&np.isin(scl,CLEAR_CLASSES)
+              clear=core&valid&np.isin(scl,CLEAR)
               def idx(num,den):
-                  o=np.full((H,W),np.nan,np.float32); m=clear
-                  o[m]=num[m]/(den[m]+1e-6); return o
-              f={'ndvi':idx(nir-red,nir+red),'nbr':idx(nir-s22,nir+s22),
-                 'bsi':idx((s16+red)-(nir+blue),(s16+red)+(nir+blue)),
-                 'ndbi':idx(s16-nir,s16+nir)}
-              return {'day':day,'ids':sorted(set(ids)),'features':f,'clear':clear,
-                      'urban_clear_fraction':float(clear.sum()/max(core_n,1)),'request':body}
+                  o=np.full((H,W),np.nan,np.float32); o[clear]=num[clear]/(den[clear]+1e-6); return o
+              return {'day':day,'ids':sorted(set(ids)),'clear':clear,'urban_clear_fraction':float(clear.sum()/core_n),
+                  'features':{'ndvi':idx(nir-red,nir+red),'nbr':idx(nir-s22,nir+s22),'bsi':idx((s16+red)-(nir+blue),(s16+red)+(nir+blue)),'ndbi':idx(s16-nir,s16+nir)},'request':body}
 
           cur=load_day(CURRENT_DAY)
-          if cur['urban_clear_fraction']<0.50:
-              raise RuntimeError(f'current urban clear coverage insufficient: {cur["urban_clear_fraction"]:.6f}')
+          if cur['urban_clear_fraction']<0.50: raise RuntimeError(f'current urban clear too low {cur["urban_clear_fraction"]:.4f}')
 
-          hist=[]; hist_selection=[]
-          for y in HIST_YEARS:
-              feats,body=search_range(f'{y}-{HIST_START_MMDD}',f'{y}-{HIST_END_MMDD}')
-              days=sorted({(it.get('properties',{}).get('datetime') or '')[:10] for it in feats if (it.get('properties',{}).get('datetime') or '')[:10]})
-              candidates=[]
-              for day in days:
-                  sc=load_day(day)
-                  if sc['urban_clear_fraction']>=0.50: candidates.append(sc)
-              if candidates:
-                  best=max(candidates,key=lambda s:(s['urban_clear_fraction'],-abs(int(s['day'][-2:])-20)))
-                  hist.append(best)
-                  hist_selection.append({'year':y,'selected_day':best['day'],
-                      'urban_clear_fraction':round(best['urban_clear_fraction'],8),'scene_ids':best['ids'],
-                      'candidate_days':[{'day':s['day'],'urban_clear_fraction':round(s['urban_clear_fraction'],8)} for s in candidates]})
-              else:
-                  hist_selection.append({'year':y,'selected_day':None,'candidate_days':[]})
-          wj('out/provenance/historical_selection.json',hist_selection)
-          if len(hist)<2: raise RuntimeError(f'need >=2 historical years, got {len(hist)}')
+          hist=[]; selections=[]
+          for year in HIST_YEARS:
+              shortlist=day_shortlist(year); tested=[]; chosen=None
+              for meta in shortlist:
+                  sc=load_day(meta['day']); tested.append({'day':sc['day'],'urban_clear_fraction':round(sc['urban_clear_fraction'],8),'mean_cloud':meta['mean_cloud'],'scene_ids':sc['ids']})
+                  if sc['urban_clear_fraction']>=0.50:
+                      chosen=sc; break
+              if chosen is not None: hist.append(chosen)
+              selections.append({'year':year,'chosen_day':chosen['day'] if chosen else None,'tested':tested})
+          wj('out/provenance/historical_selection.json',selections)
+          if len(hist)<2: raise RuntimeError(f'historical coverage insufficient {len(hist)}')
 
-          # Per-pixel same-season temporal robust z on the urban core.
-          hist_z_parts=[]; hist_count=np.zeros((H,W),np.uint8)
-          for name in FEATURES:
-              st=np.stack([s['features'][name] for s in hist])
-              count=np.isfinite(st).sum(0)
-              hist_count=np.maximum(hist_count,count.astype(np.uint8))
-              med=np.nanmedian(st,axis=0)
-              mad=np.nanmedian(np.abs(st-med),axis=0)
-              scale=np.maximum(1.4826*mad,0.03)
-              z=np.abs(cur['features'][name]-med)/scale
-              z[count<2]=np.nan
-              hist_z_parts.append(z)
-          hist_z=np.nanmax(np.stack(hist_z_parts),axis=0)
-          hist_z[~cur['clear']]=np.nan
+          hist_parts=[]
+          for name in FEATS:
+              st=np.stack([s['features'][name] for s in hist]); count=np.isfinite(st).sum(0)
+              med=np.nanmedian(st,axis=0); mad=np.nanmedian(np.abs(st-med),axis=0); scale=np.maximum(1.4826*mad,0.03)
+              z=np.abs(cur['features'][name]-med)/scale; z[count<2]=np.nan; hist_parts.append(z)
+          hist_z=np.nanmax(np.stack(hist_parts),axis=0); hist_z[~cur['clear']]=np.nan
 
-          # Current-context robust z is computed independently inside each broad sector,
-          # never as object coordinates. This reduces cross-city material/illumination bias.
-          ctx_z=np.full((H,W),np.nan,np.float32)
-          row_edges=np.linspace(0,H,5,dtype=int); col_edges=np.linspace(0,W,5,dtype=int)
-          sector_masks={}
+          ctx_z=np.full((H,W),np.nan,np.float32); re=np.linspace(0,H,5,dtype=int); ce=np.linspace(0,W,5,dtype=int); slices={}
           for rr in range(4):
               for cc in range(4):
-                  sec=f"{'ABCD'[cc]}{rr+1}"; ys=slice(row_edges[rr],row_edges[rr+1]); xs=slice(col_edges[cc],col_edges[cc+1])
-                  sm=np.zeros((H,W),bool); sm[ys,xs]=True; sector_masks[sec]=(sm,ys,xs)
-                  m=cur['clear']&sm
+                  sec=f"{'ABCD'[cc]}{rr+1}"; ys=slice(re[rr],re[rr+1]); xs=slice(ce[cc],ce[cc+1]); slices[sec]=(ys,xs)
+                  m=np.zeros((H,W),bool); m[ys,xs]=True; m &= cur['clear']
                   if int(m.sum())<300: continue
                   zmax=np.zeros((H,W),np.float32)
-                  for name in FEATURES:
-                      x=cur['features'][name][m]
-                      med=float(np.nanmedian(x)); mad=float(np.nanmedian(np.abs(x-med))); scale=max(1.4826*mad,0.02)
-                      z=np.abs(cur['features'][name]-med)/scale
-                      zmax=np.maximum(zmax,np.nan_to_num(z,nan=0,posinf=0,neginf=0))
+                  for name in FEATS:
+                      x=cur['features'][name][m]; med=float(np.nanmedian(x)); mad=float(np.nanmedian(np.abs(x-med))); scale=max(1.4826*mad,0.02)
+                      z=np.abs(cur['features'][name]-med)/scale; zmax=np.maximum(zmax,np.nan_to_num(z,nan=0,posinf=0,neginf=0))
                   ctx_z[m]=zmax[m]
 
-          lead=core&cur['clear']&np.isfinite(ctx_z)&np.isfinite(hist_z)&(ctx_z>=CTX_Z_MIN)&(hist_z>=HIST_Z_MIN)
-
+          lead=core&cur['clear']&np.isfinite(ctx_z)&np.isfinite(hist_z)&(ctx_z>=CTX_MIN)&(hist_z>=HIST_MIN)
           sectors=[]
-          for sec,(sm,ys,xs) in sector_masks.items():
-              cm=core[ys,xs]; clear=cur['clear'][ys,xs]; lm=lead[ys,xs]
-              cz=ctx_z[ys,xs][clear]; hz=hist_z[ys,xs][clear]
-              lab,n=ndimage.label(lm,structure=np.ones((3,3),int))
-              sizes=np.bincount(lab.ravel())[1:] if n else np.array([],int)
-              robust=sizes[sizes>=COMPONENT_MIN_PX]
-              core_px=int(cm.sum()); clear_px=int(clear.sum()); lead_px=int(lm.sum())
-              sectors.append({
-                  'sector':sec,
-                  'urban_core_px':core_px,
-                  'current_clear_px':clear_px,
-                  'current_clear_fraction':round(clear_px/max(core_px,1),6),
-                  'lead_px':lead_px,
-                  'lead_pct_of_clear_urban':round(100*lead_px/max(clear_px,1),6),
-                  'components_ge4px':int((sizes>=COMPONENT_MIN_PX).sum()) if sizes.size else 0,
-                  'largest_component_px':int(robust.max()) if robust.size else 0,
-                  'ctx_p99':round(float(np.nanpercentile(cz,99)),3) if cz.size else None,
-                  'hist_p99':round(float(np.nanpercentile(hz,99)),3) if hz.size else None,
-                  'hist_valid_fraction_of_current_clear':round(float(np.isfinite(hz).mean()),6) if hz.size else 0.0,
-              })
+          for sec,(ys,xs) in slices.items():
+              cm=core[ys,xs]; cl=cur['clear'][ys,xs]; lm=lead[ys,xs]; cz=ctx_z[ys,xs][cl]; hz=hist_z[ys,xs][cl]
+              lab,n=ndimage.label(lm,structure=np.ones((3,3),int)); sizes=np.bincount(lab.ravel())[1:] if n else np.array([],int); robust=sizes[sizes>=COMP_MIN]
+              cp=int(cm.sum()); qp=int(cl.sum()); lp=int(lm.sum())
+              sectors.append({'sector':sec,'urban_core_px':cp,'current_clear_px':qp,'current_clear_fraction':round(qp/max(cp,1),6),
+                  'lead_px':lp,'lead_pct_of_clear_urban':round(100*lp/max(qp,1),6),'components_ge4px':int((sizes>=COMP_MIN).sum()) if sizes.size else 0,
+                  'largest_component_px':int(robust.max()) if robust.size else 0,'ctx_p99':round(float(np.nanpercentile(cz,99)),3) if cz.size else None,
+                  'hist_p99':round(float(np.nanpercentile(hz,99)),3) if hz.size else None,'hist_valid_fraction_of_current_clear':round(float(np.isfinite(hz).mean()),6) if hz.size else 0.0})
 
           for metric in ['lead_pct_of_clear_urban','components_ge4px','largest_component_px']:
-              vals=np.array([c[metric] for c in sectors],float)
-              ranks=rankdata(vals,method='average')
-              for c,r in zip(sectors,ranks): c[metric+'_percentile']=round(float((r-1)/(len(vals)-1)*100),1)
-          for c in sectors:
-              c['rank_score']=round(0.55*c['lead_pct_of_clear_urban_percentile']+
-                  0.25*c['components_ge4px_percentile']+0.20*c['largest_component_px_percentile'],2)
-          sectors.sort(key=lambda c:c['rank_score'],reverse=True)
-          for i,c in enumerate(sectors,1): c['rank']=i
+              vals=np.array([x[metric] for x in sectors],float); rr=rankdata(vals,method='average')
+              for x,v in zip(sectors,rr): x[metric+'_percentile']=round(float((v-1)/(len(vals)-1)*100),1)
+          for x in sectors: x['rank_score']=round(0.55*x['lead_pct_of_clear_urban_percentile']+0.25*x['components_ge4px_percentile']+0.20*x['largest_component_px_percentile'],2)
+          sectors.sort(key=lambda x:x['rank_score'],reverse=True)
+          for i,x in enumerate(sectors,1): x['rank']=i
 
-          total_clear=int((core&cur['clear']).sum()); total_lead=int(lead.sum())
-          robust_total=sum(c['components_ge4px'] for c in sectors)
-          state='LEADS_PRESENT' if robust_total>0 else 'NO_ROBUST_LEADS'
-
-          result={
-              'status':'MEASURED_URBAN_ONLY_ARCHIVAL_CANARY',
-              'generated_utc':datetime.now(timezone.utc).isoformat(),
-              'purpose':'Test whether exact-year eroded urban masking yields interpretable broad-sector surface-change leads on an archived checkpoint before any latest-scene promotion.',
-              'scope':'Broad 4x4 sector aggregates only. No object positions, routes, target coordinates, actor attribution, current-force inference, or safe-passage certification.',
+          total_clear=int(cur['clear'].sum()); total_lead=int(lead.sum()); robust_total=sum(x['components_ge4px'] for x in sectors)
+          result={'status':'MEASURED_URBAN_ONLY_ARCHIVAL_CANARY_V2','generated_utc':datetime.now(timezone.utc).isoformat(),
+              'purpose':'Falsification-first archived test of exact-year eroded urban masking before any latest-scene promotion.',
+              'scope':'Broad 4x4 sector aggregates only; no lead geometry, object positions, routes, target coordinates, actor attribution, current-force inference, or safe-passage certification.',
+              'selection_efficiency':'Metadata shortlist first; full raster reads limited to current day plus at most two candidates per historical year.',
               'grid':{'crs':CRS,'resolution_m':RES,'shape':[H,W]},
-              'urban_mask':{'exact_year_ids':{'2021':lc21_ids,'2022':lc22_ids},
-                  'coverage':{'2021':lc21_cov,'2022':lc22_cov},'stable_built_fraction':float(stable.mean()),
-                  'eroded_core_fraction':float(core.mean()),'eroded_core_px':core_n},
-              'current':{'day':CURRENT_DAY,'urban_clear_fraction':round(cur['urban_clear_fraction'],8),'scene_ids':cur['ids']},
-              'historical':hist_selection,
-              'thresholds':{'context_z_min':CTX_Z_MIN,'historical_z_min':HIST_Z_MIN,'component_min_px':COMPONENT_MIN_PX},
-              'surface_lead_state':state,
-              'total_clear_urban_px':total_clear,'total_lead_px':total_lead,
-              'total_lead_pct_of_clear_urban':round(100*total_lead/max(total_clear,1),6),
-              'robust_component_count':robust_total,
-              'sector_ranking':sectors,
-              'truth_rules':[
-                  'A lead is a spectral surface-change anomaly only, not evidence of activity, actor, intent, hostile/current presence, or cause.',
-                  'Historical built-up classification is a prior; it does not prove a structure persisted unchanged into 2026.',
-                  'Current-context and same-season historical-context thresholds must both pass.',
-                  'No lead geometry or pixel coordinates are exported; only broad sector aggregates are retained.',
-                  'Prior AI-39 interpretations are used after readback as falsifiers/context, not as labels that the canary is forced to reproduce.',
-                  'Any promotion requires independent corroboration and explicit handling of cross-method disagreement.'
-              ],
-              'next_gate':'Semantically review the broad-sector ranking against prior agriculture/seasonality falsifiers. Promote only if the mask reduces known contamination without manufacturing a causal/presence claim.'
-          }
+              'urban_mask':{'exact_year_ids':{'2021':ids21,'2022':ids22},'coverage':{'2021':cov21,'2022':cov22},'stable_built_fraction':float(stable.mean()),'eroded_core_fraction':float(core.mean()),'eroded_core_px':core_n},
+              'current':{'day':CURRENT_DAY,'urban_clear_fraction':round(cur['urban_clear_fraction'],8),'scene_ids':cur['ids']},'historical':selections,
+              'thresholds':{'context_z_min':CTX_MIN,'historical_z_min':HIST_MIN,'component_min_px':COMP_MIN},
+              'surface_lead_state':'LEADS_PRESENT' if robust_total else 'NO_ROBUST_LEADS','total_clear_urban_px':total_clear,'total_lead_px':total_lead,
+              'total_lead_pct_of_clear_urban':round(100*total_lead/max(total_clear,1),6),'robust_component_count':robust_total,'sector_ranking':sectors,
+              'truth_rules':['Lead means spectral surface-change anomaly only, never cause/activity/actor/intent/current presence.',
+                  'Historical built class is a prior, not proof a structure persisted into 2026.','Both current contextual and same-season historical gates must pass.',
+                  'No lead geometry or pixel coordinates are exported.','Prior AI-39 interpretations are applied only after readback as falsifiers/context, never forced labels.',
+                  'Any promotion requires independent corroboration and explicit cross-method disagreement handling.'],
+              'next_gate':'Review sector ranking against agriculture/seasonality falsifiers. Promote only if contamination is reduced without manufacturing causal/presence claims.'}
           wj('out/result.json',result)
-
-          qa={'status':'PASS','checks':{
-              'exact_2021_item_ids':all(x.endswith('-2021') for x in lc21_ids),
-              'exact_2022_item_ids':all(x.endswith('-2022') for x in lc22_ids),
-              'landcover_coverage_ge_0_95':lc21_cov>=0.95 and lc22_cov>=0.95,
-              'urban_core_ge_5000':core_n>=5000,
-              'current_urban_clear_ge_0_50':cur['urban_clear_fraction']>=0.50,
-              'historical_years_ge_2':len(hist)>=2,
-              'dual_context_required':True,
-              'no_lead_geometry_exported':True,
-              'broad_sector_output_only':True,
-              'no_generated_pixels':True}}
+          qa={'status':'PASS','checks':{'exact_2021_item_ids':all(x.endswith('-2021') for x in ids21),'exact_2022_item_ids':all(x.endswith('-2022') for x in ids22),
+              'landcover_coverage_ge_0_95':cov21>=0.95 and cov22>=0.95,'urban_core_ge_5000':core_n>=5000,'current_urban_clear_ge_0_50':cur['urban_clear_fraction']>=0.50,
+              'historical_years_ge_2':len(hist)>=2,'metadata_first_shortlist':True,'dual_context_required':True,'no_lead_geometry_exported':True,'broad_sector_output_only':True,'no_generated_pixels':True}}
           if not all(qa['checks'].values()): qa['status']='FAIL'
           wj('out/qa.json',qa)
           if qa['status']!='PASS': raise RuntimeError(json.dumps(qa))
-          print(json.dumps({'qa':qa,'surface_lead_state':state,'total_lead_pct':result['total_lead_pct_of_clear_urban'],
-              'top8':[(c['sector'],c['rank_score'],c['lead_pct_of_clear_urban'],c['components_ge4px']) for c in sectors[:8]],
-              'current_clear':cur['urban_clear_fraction'],'historical_selected':[(x['year'],x['selected_day'],x.get('urban_clear_fraction')) for x in hist_selection]},indent=2))
+          print(json.dumps({'qa':qa,'state':result['surface_lead_state'],'total_lead_pct':result['total_lead_pct_of_clear_urban'],
+              'top8':[(x['sector'],x['rank_score'],x['lead_pct_of_clear_urban'],x['components_ge4px']) for x in sectors[:8]],
+              'current_clear':cur['urban_clear_fraction'],'historical':[(x['year'],x['chosen_day']) for x in selections]},indent=2))
           PY
 
       - name: Verify bounded outputs and hashes
@@ -292,8 +211,8 @@ jobs:
         run: |
           set -euo pipefail
           test "$(jq -r .status out/qa.json)" = PASS
-          test "$(jq -r .status out/result.json)" = MEASURED_URBAN_ONLY_ARCHIVAL_CANARY
-          test "$(find out -type f | wc -l)" -le 10
+          test "$(jq -r .status out/result.json)" = MEASURED_URBAN_ONLY_ARCHIVAL_CANARY_V2
+          test "$(find out -type f | wc -l)" -le 12
           test "$(du -sb out | cut -f1)" -le 10485760
           test "$(find out -type f \( -name '*.tif' -o -name '*.png' -o -name '*.geojson' \) | wc -l)" -eq 0
           (cd out && find . -type f ! -name SHA256SUMS.txt -print0 | sort -z | xargs -0 sha256sum > SHA256SUMS.txt)
@@ -303,7 +222,7 @@ jobs:
         id: upload
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: ai39-urban-surface-canary-${{ github.run_id }}-${{ github.run_attempt }}
+          name: ai39-urban-surface-canary-v2-${{ github.run_id }}-${{ github.run_attempt }}
           path: out/
           if-no-files-found: error
           retention-days: 14
