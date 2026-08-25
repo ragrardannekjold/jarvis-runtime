@@ -3,8 +3,6 @@ const ALLOWED_JOB_TYPES = new Set([
   "utility_search_self_test",
   "intentional_failure_probe",
   "checkpoint_recovery_probe",
-  "evidence_harvester_self_test",
-  "entity_resolver_self_test",
 ]);
 
 const CANONICAL_ID_RE = /^[A-Za-z0-9._:/#-]{1,128}$/;
