@@ -4,6 +4,7 @@ import { promisify } from "node:util";
 const execFileAsync = promisify(execFile);
 const QUEUE_PREFIX = "[QUEUE-JOB]";
 const PLAN_PREFIX = "[QUEUE-PLAN]";
+const INTERNAL_PRODUCER = "continuous_queue_refill_v1";
 const TERMINAL_STATUS_RE = /- state: \*\*(SUCCEEDED|FAILED|REJECTED)\*\*/;
 const ALLOWED_JOB_TYPES = new Set([
   "heartbeat_probe",
@@ -81,7 +82,6 @@ function validateTaskSpec(task, { requireCanonical = false } = {}) {
 function parseQueueJob(issue) {
   if (!issue?.number || issue.pull_request) throw new Error("not_queue_issue");
   if (!issue.title?.startsWith(QUEUE_PREFIX)) throw new Error("not_queue_title");
-  if (issue.user?.login !== repositoryOwner) throw new Error("queue_owner_mismatch");
 
   let job;
   try {
@@ -89,6 +89,10 @@ function parseQueueJob(issue) {
   } catch {
     throw new Error("invalid_json");
   }
+
+  const ownerAuthorized = issue.user?.login === repositoryOwner;
+  const internalAuthorized = issue.user?.login === "github-actions[bot]" && job.producer === INTERNAL_PRODUCER;
+  if (!ownerAuthorized && !internalAuthorized) throw new Error("queue_producer_not_authorized");
 
   if (job.schema_version !== 1) throw new Error("unsupported_schema_version");
   if (job.sensitivity !== "public") throw new Error("public_queue_requires_public_sensitivity");
@@ -300,6 +304,7 @@ async function createQueueIssue(plan, task) {
       title,
       body: JSON.stringify({
         schema_version: 1,
+        producer: INTERNAL_PRODUCER,
         job_type: task.job_type,
         sensitivity: "public",
         payload: task.payload,
