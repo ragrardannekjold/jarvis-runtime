@@ -1,0 +1,381 @@
+name: AI39 urban-mask checkpoint
+
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ai39-urban-mask-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  urban-mask:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: '3.12.11'
+
+      - name: Install pinned geospatial runtime
+        run: >-
+          python -m pip install --disable-pip-version-check
+          requests==2.32.3 numpy==2.2.6 Pillow==11.2.1 rasterio==1.4.3
+          pystac-client==0.8.6 planetary-computer==1.0.0
+
+      - name: Build stable urban-core mask on v0.4 grid
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p out/provenance
+          python - <<'PY'
+          import json
+          import math
+          from collections import Counter
+          from datetime import datetime, timezone
+          from pathlib import Path
+
+          import numpy as np
+          import rasterio
+          import requests
+          from PIL import Image
+          from pystac_client import Client
+          import planetary_computer
+          from rasterio.enums import Resampling
+          from rasterio.transform import from_bounds
+          from rasterio.warp import reproject, transform_bounds
+
+          AOI = [37.65, 48.25, 38.25, 48.90]
+          CRS = 'EPSG:32637'
+          RES = 30
+          S2_STAC = 'https://earth-search.aws.element84.com/v1/search'
+          S2_COLLECTION = 'sentinel-2-c1-l2a'
+          S2_WINDOW = ['2026-07-24T00:00:00Z', '2026-08-24T23:59:59Z']
+          STRICT_CLEAR = np.array([4, 5, 6], dtype=np.uint8)
+          OBSERVED = np.arange(1, 12, dtype=np.uint8)
+          BUILT_CLASS = 7
+
+          def write_json(path, value):
+              Path(path).write_text(json.dumps(value, ensure_ascii=False, indent=2), encoding='utf-8')
+
+          def snapped_grid():
+              left, bottom, right, top = transform_bounds('EPSG:4326', CRS, *AOI, densify_pts=41)
+              left = math.floor(left / RES) * RES
+              bottom = math.floor(bottom / RES) * RES
+              right = math.ceil(right / RES) * RES
+              top = math.ceil(top / RES) * RES
+              width = int(round((right - left) / RES))
+              height = int(round((top - bottom) / RES))
+              return (left, bottom, right, top), width, height, from_bounds(left, bottom, right, top, width, height)
+
+          bounds, width, height, dst_transform = snapped_grid()
+
+          def reproj(href, destination, resampling, nodata):
+              with rasterio.Env(
+                  AWS_NO_SIGN_REQUEST='YES',
+                  GDAL_DISABLE_READDIR_ON_OPEN='EMPTY_DIR',
+                  CPL_VSIL_CURL_ALLOWED_EXTENSIONS='.tif,.TIF',
+                  GDAL_HTTP_MAX_RETRY='3',
+                  GDAL_HTTP_RETRY_DELAY='2'):
+                  with rasterio.open(href) as src:
+                      reproject(
+                          source=rasterio.band(src, 1),
+                          destination=destination,
+                          src_transform=src.transform,
+                          src_crs=src.crs,
+                          src_nodata=src.nodata,
+                          dst_transform=dst_transform,
+                          dst_crs=CRS,
+                          dst_nodata=nodata,
+                          resampling=resampling)
+
+          pc = Client.open(
+              'https://planetarycomputer.microsoft.com/api/stac/v1',
+              modifier=planetary_computer.sign_inplace)
+
+          def load_landcover(year):
+              items = list(pc.search(
+                  collections=['io-lulc-9-class'],
+                  bbox=AOI,
+                  datetime=f'{year}-01-01/{year}-12-31').items())
+              arr = np.zeros((height, width), dtype=np.uint8)
+              ids = []
+              for item in items:
+                  asset = item.assets.get('data') or item.assets.get('map')
+                  if asset is None:
+                      asset = next((a for a in item.assets.values()
+                                    if a.href.lower().endswith(('.tif', '.tiff'))), None)
+                  if asset is None:
+                      continue
+                  tile = np.zeros((height, width), dtype=np.uint8)
+                  try:
+                      reproj(asset.href, tile, Resampling.nearest, 0)
+                  except Exception:
+                      continue
+                  m = tile > 0
+                  arr[m] = tile[m]
+                  ids.append(item.id)
+              if (arr > 0).mean() < 0.95:
+                  raise RuntimeError(f'land-cover coverage below 95% for {year}')
+              return arr, sorted(set(ids))
+
+          lc21, lc21_ids = load_landcover(2021)
+          lc22, lc22_ids = load_landcover(2022)
+          stable_built = (lc21 == BUILT_CLASS) & (lc22 == BUILT_CLASS)
+
+          # One 30 m cell of erosion removes class boundaries and mixed pixels.
+          urban_core = stable_built.copy()
+          padded = np.pad(stable_built, 1, mode='constant', constant_values=False)
+          for dy in range(3):
+              for dx in range(3):
+                  urban_core &= padded[dy:dy + height, dx:dx + width]
+
+          stable_fraction = float(stable_built.mean())
+          core_fraction = float(urban_core.mean())
+          if urban_core.sum() < 5000:
+              raise RuntimeError(f'urban core too small for broad QA: {int(urban_core.sum())} pixels')
+
+          request_body = {
+              'collections': [S2_COLLECTION],
+              'bbox': AOI,
+              'datetime': f'{S2_WINDOW[0]}/{S2_WINDOW[1]}',
+              'limit': 200,
+              'sortby': [{'field': 'properties.datetime', 'direction': 'desc'}],
+          }
+          write_json('out/provenance/sentinel2_request.json', request_body)
+          response = requests.post(S2_STAC, json=request_body, timeout=120)
+          response.raise_for_status()
+          payload = response.json()
+          write_json('out/provenance/sentinel2_response.json', payload)
+          features = payload.get('features', [])
+          if not features:
+              raise RuntimeError('no Sentinel-2 features returned')
+          context = payload.get('context', {})
+          matched = context.get('matched', context.get('numberMatched', len(features)))
+          if matched != len(features):
+              raise RuntimeError(f'STAC pagination gate failed: matched={matched}, returned={len(features)}')
+
+          def item_dt(item):
+              return datetime.fromisoformat(item['properties']['datetime'].replace('Z', '+00:00'))
+
+          features.sort(key=item_dt, reverse=True)
+          reference_date = item_dt(features[0]).date()
+          pixel_age = np.full((height, width), 65535, dtype=np.uint16)
+          provenance_code = np.zeros((height, width), dtype=np.uint16)
+          ever_observed = np.zeros((height, width), dtype=bool)
+          observed_count = np.zeros((height, width), dtype=np.uint16)
+          clear_count = np.zeros((height, width), dtype=np.uint16)
+          used_scene_ids = []
+          provenance_map = {}
+          code = 1
+
+          for item in features:
+              asset = item.get('assets', {}).get('scl')
+              if not asset or not asset.get('href'):
+                  continue
+              scl = np.zeros((height, width), dtype=np.uint8)
+              try:
+                  reproj(asset['href'], scl, Resampling.nearest, 0)
+              except Exception:
+                  continue
+              unique = set(int(v) for v in np.unique(scl))
+              if not unique.issubset(set(range(12))):
+                  raise RuntimeError(f'unknown SCL value in {item.get("id")}')
+              observed = np.isin(scl, OBSERVED)
+              clear = np.isin(scl, STRICT_CLEAR)
+              ever_observed |= observed
+              observed_count += observed.astype(np.uint16)
+              clear_count += clear.astype(np.uint16)
+              take = urban_core & clear & (pixel_age == 65535)
+              if take.any():
+                  age = max(0, (reference_date - item_dt(item).date()).days)
+                  pixel_age[take] = age
+                  provenance_code[take] = code
+                  scene_id = item.get('id') or f'unknown-{code}'
+                  provenance_map[str(code)] = {
+                      'scene_id': scene_id,
+                      'datetime': item['properties']['datetime'],
+                      'age_days': age,
+                  }
+                  used_scene_ids.append(scene_id)
+                  code += 1
+
+          if np.any(clear_count > observed_count):
+              raise RuntimeError('clear_count exceeds observed_count')
+
+          urban_observed = urban_core & ever_observed
+          urban_filled = urban_core & (pixel_age != 65535)
+          urban_observed_fraction = float(urban_observed.sum() / urban_core.sum())
+          urban_fill_fraction = float(urban_filled.sum() / urban_core.sum())
+          if urban_observed_fraction < 0.99:
+              raise RuntimeError(f'urban observed coverage below 99%: {urban_observed_fraction:.6f}')
+          if urban_fill_fraction < 0.95:
+              raise RuntimeError(f'urban strict-clear fill below 95%: {urban_fill_fraction:.6f}')
+
+          age_values = pixel_age[urban_filled]
+          age_counts = Counter(int(v) for v in age_values)
+          age_distribution = {
+              str(age): round(count / max(1, len(age_values)), 8)
+              for age, count in sorted(age_counts.items())
+          }
+
+          sectors = []
+          row_edges = np.linspace(0, height, 5, dtype=int)
+          col_edges = np.linspace(0, width, 5, dtype=int)
+          for r in range(4):
+              for c in range(4):
+                  ys = slice(row_edges[r], row_edges[r + 1])
+                  xs = slice(col_edges[c], col_edges[c + 1])
+                  core = urban_core[ys, xs]
+                  filled = urban_filled[ys, xs]
+                  ages = pixel_age[ys, xs][filled]
+                  core_n = int(core.sum())
+                  filled_n = int(filled.sum())
+                  sectors.append({
+                      'sector': f"{'ABCD'[c]}{r + 1}",
+                      'urban_core_px': core_n,
+                      'strict_clear_filled_px': filled_n,
+                      'strict_clear_fill_fraction': round(filled_n / max(1, core_n), 6),
+                      'age_p50_days': round(float(np.percentile(ages, 50)), 2) if ages.size else None,
+                      'age_p90_days': round(float(np.percentile(ages, 90)), 2) if ages.size else None,
+                      'age_max_days': int(ages.max()) if ages.size else None,
+                      'age_le_3d_fraction': round(float((ages <= 3).mean()), 6) if ages.size else None,
+                  })
+
+          profile_u8 = {
+              'driver': 'GTiff', 'height': height, 'width': width, 'count': 1,
+              'dtype': 'uint8', 'crs': CRS, 'transform': dst_transform,
+              'nodata': 0, 'compress': 'deflate', 'tiled': True,
+          }
+          with rasterio.open('out/urban_core_mask_30m.tif', 'w', **profile_u8) as dst:
+              dst.write(urban_core.astype(np.uint8), 1)
+          with rasterio.open('out/urban_core_observed_mask_30m.tif', 'w', **profile_u8) as dst:
+              dst.write(urban_filled.astype(np.uint8), 1)
+          with rasterio.open(
+              'out/urban_core_pixel_age_days_30m.tif', 'w',
+              **{**profile_u8, 'dtype': 'uint16', 'nodata': 65535}
+          ) as dst:
+              dst.write(pixel_age, 1)
+          with rasterio.open(
+              'out/urban_core_provenance_code_30m.tif', 'w',
+              **{**profile_u8, 'dtype': 'uint16', 'nodata': 0}
+          ) as dst:
+              dst.write(provenance_code, 1)
+
+          # Static QA preview only. White = stable eroded built core; gray = stable built edge.
+          preview = np.zeros((height, width), dtype=np.uint8)
+          preview[stable_built] = 110
+          preview[urban_core] = 255
+          max_side = 1200
+          scale = min(1.0, max_side / max(height, width))
+          if scale < 1.0:
+              im = Image.fromarray(preview).resize(
+                  (max(1, round(width * scale)), max(1, round(height * scale))),
+                  Image.Resampling.NEAREST)
+          else:
+              im = Image.fromarray(preview)
+          im.save('out/urban_mask_qa_preview.png', optimize=True)
+
+          manifest = {
+              'status': 'MEASURED_URBAN_MASK_CHECKPOINT',
+              'generated_utc': datetime.now(timezone.utc).isoformat(),
+              'scope': 'AI-39 broad Digital Twin QA; no object coordinates, routes, actor attribution, target-level output, or current-presence inference.',
+              'aoi_wgs84_bbox': AOI,
+              'analysis_crs': CRS,
+              'target_grid': {
+                  'resolution_m': RES,
+                  'bounds': list(bounds),
+                  'shape': [height, width],
+                  'transform': list(dst_transform)[:6],
+              },
+              'urban_mask': {
+                  'source_collection': 'io-lulc-9-class',
+                  'source_years': [2021, 2022],
+                  'built_class_value': BUILT_CLASS,
+                  'stable_built_fraction_of_aoi': round(stable_fraction, 8),
+                  'eroded_urban_core_fraction_of_aoi': round(core_fraction, 8),
+                  'erosion': 'one 30 m cell in all directions to suppress GIS edges/mixed pixels',
+                  'source_item_ids': {'2021': lc21_ids, '2022': lc22_ids},
+              },
+              'sentinel2_observability': {
+                  'collection': S2_COLLECTION,
+                  'window': S2_WINDOW,
+                  'reference_date': reference_date.isoformat(),
+                  'strict_clear_scl_classes': [4, 5, 6],
+                  'item_count': len(features),
+                  'urban_ever_observed_fraction': round(urban_observed_fraction, 8),
+                  'urban_strict_clear_fill_fraction': round(urban_fill_fraction, 8),
+                  'urban_pixel_age_distribution': age_distribution,
+                  'used_scene_ids': sorted(set(used_scene_ids)),
+                  'provenance_code_map': provenance_map,
+              },
+              'broad_4x4_sector_qa': sectors,
+              'truth_rules': [
+                  'Urban core is a historical GIS prior, not a claim that every structure still existed in 2026.',
+                  'Only pixels classified as built in both 2021 and 2022 are eligible before erosion.',
+                  'One-cell erosion intentionally sacrifices edge recall to reduce mixed-pixel and class-boundary contamination.',
+                  'Sentinel-2 fill uses only real observed SCL 4/5/6 pixels and retains per-pixel age and provenance.',
+                  'No generated pixels, inpainting, super-resolution, object detection, actor attribution, or present-force inference is used.',
+                  'This checkpoint validates a mask and observability layer only; it is not evidence of cause, activity, or organized presence.',
+              ],
+              'next_gate': 'Only after this checkpoint passes may urban-only temporal/contextual surface anomalies be computed, still at broad-sector output and requiring independent corroboration before causal or presence claims.',
+          }
+          write_json('out/urban_mask_manifest.json', manifest)
+
+          qa = {
+              'status': 'PASS',
+              'checks': {
+                  'common_v04_30m_grid': True,
+                  'landcover_2021_coverage_ge_0_95': True,
+                  'landcover_2022_coverage_ge_0_95': True,
+                  'stable_built_both_years_only': True,
+                  'one_cell_edge_erosion': True,
+                  'urban_core_px_ge_5000': bool(urban_core.sum() >= 5000),
+                  'urban_observed_ge_0_99': urban_observed_fraction >= 0.99,
+                  'urban_strict_clear_fill_ge_0_95': urban_fill_fraction >= 0.95,
+                  'clear_count_le_observed_count': True,
+                  'no_generated_pixels': True,
+                  'broad_sector_output_only': True,
+              }
+          }
+          write_json('out/qa.json', qa)
+          print(json.dumps({
+              'status': 'PASS',
+              'grid': [width, height],
+              'stable_built_fraction': stable_fraction,
+              'urban_core_fraction': core_fraction,
+              'urban_core_px': int(urban_core.sum()),
+              'urban_observed_fraction': urban_observed_fraction,
+              'urban_strict_clear_fill_fraction': urban_fill_fraction,
+              'age_distribution': age_distribution,
+              'sector_qa': sectors,
+          }, indent=2))
+          PY
+
+      - name: Verify checkpoint and hashes
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(jq -r .status out/qa.json)" = PASS
+          test "$(jq -r .status out/urban_mask_manifest.json)" = MEASURED_URBAN_MASK_CHECKPOINT
+          (cd out && find . -type f ! -name SHA256SUMS.txt -print0 | sort -z | xargs -0 sha256sum > SHA256SUMS.txt)
+          (cd out && sha256sum -c SHA256SUMS.txt)
+          test "$(find out -type f | wc -l)" -le 20
+          test "$(du -sb out | cut -f1)" -le 52428800
+
+      - name: Upload measured urban-mask checkpoint
+        id: upload
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: ai39-urban-mask-checkpoint-${{ github.run_id }}-${{ github.run_attempt }}
+          path: out/
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Record upload digest
+        if: success()
+        run: echo "artifact_digest=${{ steps.upload.outputs.artifact-digest }}"
