@@ -24,20 +24,28 @@ def wj(name,obj): (OUT/name).write_text(json.dumps(obj,ensure_ascii=False,indent
 def dt(s): return datetime.fromisoformat(s+'T00:00:00+00:00')
 
 def search(start,end):
-    body={'collections':[COLL],'bbox':AOI,'datetime':f'{start}T00:00:00Z/{end}T23:59:59Z','limit':100}
-    r=requests.post(STAC,json=body,timeout=120); r.raise_for_status(); j=r.json()
-    feats=j.get('features',[])
-    # Bounded windows should fit 100; fail closed rather than silently truncate.
-    if len(feats)>=100:
-        raise RuntimeError(f'possible STAC truncation {start} {end}: {len(feats)}')
-    return feats,body
+    # Split into 7-day windows so a full 100-item page is a hard error rather than silent truncation.
+    cur=dt(start); stop=dt(end); by_id={}; requests_used=[]
+    while cur<=stop:
+        chunk_end=min(cur+timedelta(days=6),stop)
+        s=cur.date().isoformat(); e=chunk_end.date().isoformat()
+        body={'collections':[COLL],'bbox':AOI,'datetime':f'{s}T00:00:00Z/{e}T23:59:59Z','limit':100}
+        r=requests.post(STAC,json=body,timeout=120); r.raise_for_status(); j=r.json(); feats=j.get('features',[])
+        if len(feats)>=100:
+            raise RuntimeError(f'possible STAC truncation even after chunking {s} {e}: {len(feats)}')
+        for f in feats:
+            fid=str(f.get('id') or '')
+            if fid: by_id[fid]=f
+        requests_used.append({'datetime':body['datetime'],'feature_count':len(feats)})
+        cur=chunk_end+timedelta(days=1)
+    return list(by_id.values()),requests_used
 
 rows=[]; provenance={}
 for label,ta,tb in THERMAL_ANCHORS:
     start=(dt(ta)-timedelta(days=12)).date().isoformat()
     end=(dt(tb)+timedelta(days=12)).date().isoformat()
-    feats,body=search(start,end)
-    provenance[label]={'request':body,'feature_count':len(feats)}
+    feats,requests_used=search(start,end)
+    provenance[label]={'requests':requests_used,'deduplicated_feature_count':len(feats)}
     days=defaultdict(lambda:{'clouds':[],'ids':[]})
     for f in feats:
         fid=str(f.get('id') or '')
@@ -59,7 +67,7 @@ for label,ta,tb in THERMAL_ANCHORS:
             sep=(dt(d2)-a).days
             if sep<9: continue
             if sep>11: break
-            clouds=days[(p1,d1)]['clouds']+days[(p2,d2)]['clouds']
+            clouds=days[(p1,d1)]['clouds']+days[(p1,d2)]['clouds']
             max_cloud=max(clouds) if clouds else 100.0
             mean_cloud=sum(clouds)/len(clouds) if clouds else 100.0
             endpoint_error=abs((dt(d1)-dt(ta)).days)+abs((dt(d2)-dt(tb)).days)
