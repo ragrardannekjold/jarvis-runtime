@@ -21,11 +21,8 @@ A snapshot records source URL, fetch timestamp, HTTP status, content type, selec
 
 The resolver preserves aliases, source references, match keys, and member counts. Name-only matching is jurisdiction-scoped; the resolver does not claim corporate identity from a fuzzy name match alone.
 
-## Async job integration
+## External execution
 
-Only self-tests are initially allowlisted:
+The first integration is deliberately isolated in `.github/workflows/investigation-evidence-ci.yml`.
 
-- `evidence_harvester_self_test`
-- `entity_resolver_self_test`
-
-Both are offline canaries. Live source collection should be enabled only after CI is green and a static public-source allowlist has been reviewed.
+It runs syntax checks and offline unit tests on a GitHub-hosted runner and accepts no arbitrary investigation payload. The existing generic issue-driven async worker remains unchanged. Live collection should be enabled only after this CI is green and a repository-controlled public-source allowlist has been reviewed.
