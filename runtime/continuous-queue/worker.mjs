@@ -1,9 +1,9 @@
-import fs from "node:fs";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
 const QUEUE_PREFIX = "[QUEUE-JOB]";
+const TERMINAL_STATUS_RE = /- state: \*\*(SUCCEEDED|FAILED|REJECTED)\*\*/;
 const ALLOWED_JOB_TYPES = new Set([
   "heartbeat_probe",
   "async_contract_self_test",
@@ -128,6 +128,14 @@ async function closeIssue(job) {
   });
 }
 
+async function hasTerminalQueueStatus(issueNumber) {
+  const comments = await githubRequest(`/repos/${repository}/issues/${issueNumber}/comments?per_page=100`);
+  return (comments || []).some((comment) => {
+    const body = comment?.body || "";
+    return body.includes("<!-- jarvis-queue-status -->") && TERMINAL_STATUS_RE.test(body);
+  });
+}
+
 async function runHeartbeat(job) {
   await postStatus(job, "RUNNING", "heartbeat acquired");
   await sleep(500);
@@ -202,14 +210,23 @@ async function rejectAndClose(issue, error) {
 
 async function main() {
   const started = Date.now();
+  const seenIssueNumbers = new Set();
   let processed = 0;
   let succeeded = 0;
   let failed = 0;
+  let deduped = 0;
 
   while (processed < MAX_JOBS_PER_RUN && Date.now() - started < MAX_RUNTIME_MS) {
     const issues = await listQueueIssues();
-    const issue = issues[0];
+    const issue = issues.find((candidate) => !seenIssueNumbers.has(candidate.number));
     if (!issue) break;
+    seenIssueNumbers.add(issue.number);
+
+    if (await hasTerminalQueueStatus(issue.number)) {
+      await closeIssue({ issueNumber: issue.number });
+      deduped += 1;
+      continue;
+    }
 
     let job;
     try {
@@ -239,6 +256,7 @@ async function main() {
     processed,
     succeeded,
     failed,
+    deduped,
     next_state: processed >= MAX_JOBS_PER_RUN || Date.now() - started >= MAX_RUNTIME_MS
       ? "BOUNDED_RUN_LIMIT_REACHED"
       : "WARM_STANDBY_NO_QUEUED_WORK",
