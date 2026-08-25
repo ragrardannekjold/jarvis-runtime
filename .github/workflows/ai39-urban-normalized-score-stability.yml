@@ -1,0 +1,326 @@
+name: AI39 archival urban normalized-score stability
+
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ai39-urban-normalized-score-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  normalized-score-stability:
+    runs-on: ubuntu-latest
+    timeout-minutes: 32
+    steps:
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: '3.12.11'
+
+      - name: Install pinned geospatial runtime
+        run: >-
+          python -m pip install --disable-pip-version-check
+          requests==2.32.3 numpy==2.2.6 rasterio==1.4.3
+          pystac-client==0.8.6 planetary-computer==1.0.0
+
+      - name: Measure normalized-score stability across four archived pairs
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p out/provenance
+          python - <<'PY'
+          import json, math
+          from datetime import datetime, timezone
+          from pathlib import Path
+
+          import numpy as np
+          import rasterio, requests
+          from pystac_client import Client
+          import planetary_computer
+          from rasterio.enums import Resampling
+          from rasterio.transform import from_bounds
+          from rasterio.warp import reproject, transform_bounds
+
+          AOI=[37.65,48.25,38.25,48.90]
+          CRS='EPSG:32637'; RES=30; BUILT=7
+          STAC='https://earth-search.aws.element84.com/v1/search'
+          COLL='sentinel-2-c1-l2a'
+          CLEAR=np.array([4,5,6],np.uint8)
+          FEATURES=['ndvi','nbr','bsi','ndbi']
+          PAIRS=[
+              ('S2B','2023-07-27','2023-08-06'),
+              ('S2A','2025-08-02','2025-08-12'),
+              ('S2B','2024-08-10','2024-08-20'),
+              ('S2B','2023-08-06','2023-08-16'),
+          ]
+          COMMON_MIN=0.50
+          SECTOR_MIN_PX=300
+          SCALE_FLOOR=0.0025
+          Z_THRESHOLDS=[4.0,6.0]
+
+          def wj(path,value):
+              Path(path).write_text(json.dumps(value,ensure_ascii=False,indent=2),encoding='utf-8')
+
+          left,bottom,right,top=transform_bounds('EPSG:4326',CRS,*AOI,densify_pts=41)
+          left=math.floor(left/RES)*RES; bottom=math.floor(bottom/RES)*RES
+          right=math.ceil(right/RES)*RES; top=math.ceil(top/RES)*RES
+          W=int(round((right-left)/RES)); H=int(round((top-bottom)/RES))
+          TR=from_bounds(left,bottom,right,top,W,H)
+
+          def rp(href,dtype='float32',resampling=Resampling.bilinear,nodata=np.nan):
+              out=np.full((H,W),nodata,dtype=dtype)
+              with rasterio.Env(
+                  AWS_NO_SIGN_REQUEST='YES',GDAL_DISABLE_READDIR_ON_OPEN='EMPTY_DIR',
+                  CPL_VSIL_CURL_ALLOWED_EXTENSIONS='.tif,.TIF',
+                  GDAL_HTTP_MAX_RETRY='3',GDAL_HTTP_RETRY_DELAY='2'):
+                  with rasterio.open(href) as src:
+                      reproject(source=rasterio.band(src,1),destination=out,
+                          src_transform=src.transform,src_crs=src.crs,src_nodata=src.nodata,
+                          dst_transform=TR,dst_crs=CRS,dst_nodata=nodata,
+                          resampling=resampling)
+              return out
+
+          pc=Client.open(
+              'https://planetarycomputer.microsoft.com/api/stac/v1',
+              modifier=planetary_computer.sign_inplace)
+
+          def landcover(year):
+              candidates=list(pc.search(
+                  collections=['io-lulc-9-class'],bbox=AOI,
+                  datetime=f'{year}-01-01/{year}-12-31').items())
+              selected=[it for it in candidates if str(it.id).endswith(f'-{year}')]
+              if not selected:
+                  raise RuntimeError(f'no exact land-cover item {year}')
+              arr=np.zeros((H,W),np.uint8); ids=[]
+              for item in selected:
+                  asset=(item.assets.get('data') or item.assets.get('map') or
+                         next((a for a in item.assets.values()
+                               if a.href.lower().endswith(('.tif','.tiff'))),None))
+                  if asset is None: continue
+                  tile=rp(asset.href,'uint8',Resampling.nearest,0)
+                  m=tile>0; arr[m]=tile[m]; ids.append(str(item.id))
+              coverage=float((arr>0).mean())
+              if coverage<0.95 or any(not x.endswith(f'-{year}') for x in ids):
+                  raise RuntimeError(f'land-cover provenance failed {year}')
+              return arr,sorted(ids),coverage
+
+          lc21,ids21,cov21=landcover(2021)
+          lc22,ids22,cov22=landcover(2022)
+          stable=(lc21==BUILT)&(lc22==BUILT)
+          core=stable.copy(); padded=np.pad(stable,1,constant_values=False)
+          for dy in range(3):
+              for dx in range(3):
+                  core &= padded[dy:dy+H,dx:dx+W]
+          core_n=int(core.sum())
+          if core_n<5000: raise RuntimeError('urban core too small')
+
+          unique_keys=sorted({(platform,day) for platform,a,b in PAIRS for day in (a,b)})
+          scenes={}; provenance={}
+
+          def load_scene(platform,day):
+              body={'collections':[COLL],'bbox':AOI,
+                    'datetime':f'{day}T00:00:00Z/{day}T23:59:59Z','limit':100}
+              response=requests.post(STAC,json=body,timeout=120)
+              response.raise_for_status()
+              all_items=response.json().get('features',[])
+              items=[item for item in all_items
+                     if str(item.get('id') or '').split('_',1)[0]==platform]
+              required=['red','blue','nir08','swir16','swir22','scl']
+              red=np.full((H,W),np.nan,np.float32); blue=red.copy(); nir=red.copy()
+              s16=red.copy(); s22=red.copy(); scl=np.zeros((H,W),np.uint8); used=[]
+              for item in items:
+                  assets=item.get('assets',{})
+                  if not all((assets.get(k) or {}).get('href') for k in required): continue
+                  try:
+                      rr=rp(assets['red']['href']); bb=rp(assets['blue']['href'])
+                      nn=rp(assets['nir08']['href']); x16=rp(assets['swir16']['href'])
+                      x22=rp(assets['swir22']['href'])
+                      cc=rp(assets['scl']['href'],'uint8',Resampling.nearest,0)
+                  except Exception:
+                      continue
+                  valid=(np.isfinite(rr)&np.isfinite(bb)&np.isfinite(nn)&
+                         np.isfinite(x16)&np.isfinite(x22)&
+                         (rr>0)&(bb>0)&(nn>0)&(x16>0)&(x22>0)&(cc>0))
+                  red[valid]=rr[valid]; blue[valid]=bb[valid]; nir[valid]=nn[valid]
+                  s16[valid]=x16[valid]; s22[valid]=x22[valid]; scl[valid]=cc[valid]
+                  used.append(str(item.get('id')))
+              clear=core&np.isin(scl,CLEAR)&np.isfinite(red)&np.isfinite(blue)&np.isfinite(nir)&np.isfinite(s16)&np.isfinite(s22)
+              def idx(num,den):
+                  out=np.full((H,W),np.nan,np.float32)
+                  out[clear]=num[clear]/(den[clear]+1e-6)
+                  return out
+              scene={'platform':platform,'day':day,'clear':clear,
+                     'clear_fraction':float(clear.sum()/core_n),'scene_ids':sorted(set(used)),
+                     'features':{
+                         'ndvi':idx(nir-red,nir+red),
+                         'nbr':idx(nir-s22,nir+s22),
+                         'bsi':idx((s16+red)-(nir+blue),(s16+red)+(nir+blue)),
+                         'ndbi':idx(s16-nir,s16+nir)}}
+              provenance[f'{platform}|{day}']={
+                  'request':body,'selected_scene_ids':scene['scene_ids'],
+                  'clear_fraction':round(scene['clear_fraction'],8)}
+              return scene
+
+          for key in unique_keys:
+              scenes[key]=load_scene(*key)
+          wj('out/provenance/scenes.json',provenance)
+
+          row_edges=np.linspace(0,H,5,dtype=int)
+          col_edges=np.linspace(0,W,5,dtype=int)
+          sector_defs={}
+          for rr in range(4):
+              for cc in range(4):
+                  sector=f"{'ABCD'[cc]}{rr+1}"
+                  sector_defs[sector]=(slice(row_edges[rr],row_edges[rr+1]),
+                                       slice(col_edges[cc],col_edges[cc+1]))
+
+          pair_results=[]
+          for platform,day_a,day_b in PAIRS:
+              a=scenes[(platform,day_a)]; b=scenes[(platform,day_b)]
+              common=a['clear']&b['clear']
+              common_px=int(common.sum()); common_frac=float(common_px/core_n)
+              if a['clear_fraction']<0.50 or b['clear_fraction']<0.50 or common_frac<COMMON_MIN:
+                  raise RuntimeError(f'preserved pair fell below coverage floor {platform} {day_a} {day_b}')
+
+              diffs={name:np.abs(b['features'][name]-a['features'][name]) for name in FEATURES}
+              combined=np.full((H,W),np.nan,np.float32)
+              sectors=[]
+              sufficient_px=0
+
+              for sector,(ys,xs) in sector_defs.items():
+                  cm=common[ys,xs]
+                  n=int(cm.sum()); core_sector=int(core[ys,xs].sum())
+                  row={'sector':sector,'urban_core_px':core_sector,'common_clear_px':n,
+                       'common_clear_fraction':round(n/max(core_sector,1),6)}
+                  if n<SECTOR_MIN_PX:
+                      row.update({'state':'INSUFFICIENT_DATA','score_p99':None,'score_p99_5':None,
+                                  'tail_z4_fraction':None,'tail_z6_fraction':None})
+                      sectors.append(row); continue
+
+                  z_stack=[]; feature_norm={}
+                  for name in FEATURES:
+                      values=diffs[name][ys,xs][cm]
+                      median=float(np.nanmedian(values))
+                      mad=float(np.nanmedian(np.abs(values-median)))
+                      q25=float(np.nanpercentile(values,25)); q75=float(np.nanpercentile(values,75))
+                      scale=max(1.4826*mad,(q75-q25)/1.349,SCALE_FLOOR)
+                      z=np.maximum(0.0,(diffs[name][ys,xs]-median)/scale)
+                      z_stack.append(z)
+                      feature_norm[name]={'median_abs_diff':round(median,8),
+                                          'robust_scale':round(scale,8)}
+                  zs=np.stack(z_stack,axis=0)
+                  sorted_z=np.sort(zs,axis=0)
+                  score=sorted_z[-2]  # at least two features must be unusual
+                  score[~cm]=np.nan
+                  combined[ys,xs][cm]=score[cm]
+                  vals=score[cm]
+                  tail4=float((vals>=4.0).mean()); tail6=float((vals>=6.0).mean())
+                  row.update({'state':'SUFFICIENT','feature_normalization':feature_norm,
+                              'score_p99':round(float(np.nanpercentile(vals,99)),6),
+                              'score_p99_5':round(float(np.nanpercentile(vals,99.5)),6),
+                              'tail_z4_fraction':round(tail4,8),
+                              'tail_z6_fraction':round(tail6,8)})
+                  sectors.append(row); sufficient_px+=n
+
+              valid=np.isfinite(combined)
+              if int(valid.sum())<10000:
+                  raise RuntimeError('too few normalized comparable pixels')
+              vals=combined[valid]
+              pair_results.append({
+                  'platform':platform,'day_a':day_a,'day_b':day_b,
+                  'separation_days':10,'common_clear_px':common_px,
+                  'common_clear_fraction':round(common_frac,8),
+                  'normalized_comparable_px':int(valid.sum()),
+                  'global_score_p95':round(float(np.nanpercentile(vals,95)),6),
+                  'global_score_p99':round(float(np.nanpercentile(vals,99)),6),
+                  'global_score_p99_5':round(float(np.nanpercentile(vals,99.5)),6),
+                  'global_tail_z4_fraction':round(float((vals>=4.0).mean()),8),
+                  'global_tail_z6_fraction':round(float((vals>=6.0).mean()),8),
+                  'sector_diagnostics':sectors})
+
+          def stability_metric(values):
+              arr=np.array(values,float)
+              median=float(np.median(arr)); lo=float(arr.min()); hi=float(arr.max())
+              mean=float(np.mean(arr)); std=float(np.std(arr,ddof=0))
+              return {'values':[round(float(x),8) for x in arr],
+                      'median':round(median,8),'min':round(lo,8),'max':round(hi,8),
+                      'relative_range_over_median':round((hi-lo)/max(abs(median),1e-9),4),
+                      'coefficient_of_variation':round(std/max(abs(mean),1e-9),4),
+                      'within_25pct_relative_range':bool((hi-lo)/max(abs(median),1e-9)<=0.25)}
+
+          stability={
+              'score_p99_5':stability_metric([p['global_score_p99_5'] for p in pair_results]),
+              'tail_z4_fraction':stability_metric([p['global_tail_z4_fraction'] for p in pair_results]),
+              'tail_z6_fraction':stability_metric([p['global_tail_z6_fraction'] for p in pair_results])}
+
+          raw_reference={
+              'ndvi_p99_5_relative_range':0.5504,
+              'nbr_p99_5_relative_range':0.5011,
+              'bsi_p99_5_relative_range':0.2179,
+              'ndbi_p99_5_relative_range':0.1766,
+              'all_feature_fixed_raw_gate':False}
+
+          result={
+              'status':'MEASURED_ARCHIVAL_NORMALIZED_SCORE_STABILITY',
+              'generated_utc':datetime.now(timezone.utc).isoformat(),
+              'purpose':'Test whether robust sector-local normalization produces a more stable multi-feature optical QA score across the same four archival pairs than fixed raw feature deltas.',
+              'scope':'Historical method QA only; broad 4x4 diagnostics, no geometry, no current-condition, route, actor, threat, or presence inference.',
+              'normalization':{
+                  'per_pair_per_sector_per_feature':'absolute difference -> subtract sector median -> divide by max(1.4826*MAD, IQR/1.349, 0.0025)',
+                  'combined_score':'second-highest normalized feature score, requiring at least two of NDVI/NBR/BSI/NDBI to be unusual',
+                  'sector_min_common_clear_px':SECTOR_MIN_PX,
+                  'z_thresholds':Z_THRESHOLDS},
+              'urban_mask':{'exact_year_ids':{'2021':ids21,'2022':ids22},
+                            'coverage':{'2021':cov21,'2022':cov22},'eroded_core_px':core_n},
+              'pair_count':len(pair_results),'pairs':pair_results,
+              'cross_pair_stability':stability,
+              'raw_multipair_reference':raw_reference,
+              'truth_rules':[
+                  'Normalization is fitted only within each archived pair/sector and is evaluated as method QA, not as a ground-truth label.',
+                  'The combined score requires at least two features to be jointly unusual after local robust normalization.',
+                  'The 25% relative-range flag remains a descriptive heuristic, not a physical law.',
+                  'Sector rank persistence is not required because real historical surface changes may differ between years.',
+                  'No geometry, object positions, routes, actor attribution, current-force inference, or threat inference is exported.'],
+              'next_gate':'If normalized global tail behavior is materially more stable than raw p99.5 deltas, retain robust local normalization as the optical QA layer and then compare only broad aggregated optical results with an independent sensor/source. If instability remains high, expand historical calibration before any promotion.'}
+          wj('out/result.json',result)
+          qa={'status':'PASS','checks':{
+              'exact_year_landcover':all(x.endswith('-2021') for x in ids21) and all(x.endswith('-2022') for x in ids22),
+              'four_preserved_pairs':len(pair_results)==4,
+              'all_pair_common_clear_ge_0_50':all(p['common_clear_fraction']>=0.50 for p in pair_results),
+              'normalized_comparable_ge_10000':all(p['normalized_comparable_px']>=10000 for p in pair_results),
+              'historical_only':True,'broad_sector_only':True,'no_geometry_export':True,'no_generated_pixels':True}}
+          if not all(qa['checks'].values()): qa['status']='FAIL'
+          wj('out/qa.json',qa)
+          if qa['status']!='PASS': raise RuntimeError(json.dumps(qa))
+          print(json.dumps({'qa':qa,
+              'pair_summary':[(p['platform'],p['day_a'],p['day_b'],p['global_score_p99_5'],p['global_tail_z4_fraction'],p['global_tail_z6_fraction']) for p in pair_results],
+              'stability':stability,'raw_reference':raw_reference},indent=2))
+          PY
+
+      - name: Verify bounded output and hashes
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(jq -r .status out/qa.json)" = PASS
+          test "$(jq -r .status out/result.json)" = MEASURED_ARCHIVAL_NORMALIZED_SCORE_STABILITY
+          test "$(find out -type f \( -name '*.tif' -o -name '*.png' -o -name '*.geojson' \) | wc -l)" -eq 0
+          test "$(du -sb out | cut -f1)" -le 5242880
+          (cd out && find . -type f ! -name SHA256SUMS.txt -print0 | sort -z | xargs -0 sha256sum > SHA256SUMS.txt)
+          (cd out && sha256sum -c SHA256SUMS.txt)
+
+      - name: Upload normalized-score calibration
+        id: upload
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: ai39-urban-normalized-score-${{ github.run_id }}-${{ github.run_attempt }}
+          path: out/
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Record digest
+        if: success()
+        run: echo "artifact_digest=${{ steps.upload.outputs.artifact-digest }}"
