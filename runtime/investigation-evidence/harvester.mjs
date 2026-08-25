@@ -11,10 +11,19 @@ function sha256(value) {
   return createHash("sha256").update(value).digest("hex");
 }
 
+function normalizeHostname(hostname) {
+  let normalized = String(hostname || "").toLowerCase().replace(/\.$/, "");
+  if (normalized.startsWith("[") && normalized.endsWith("]")) {
+    normalized = normalized.slice(1, -1);
+  }
+  return normalized;
+}
+
 function isBlockedIp(hostname) {
-  const version = isIP(hostname);
+  const value = normalizeHostname(hostname);
+  const version = isIP(value);
   if (version === 4) {
-    const parts = hostname.split(".").map(Number);
+    const parts = value.split(".").map(Number);
     const [a, b] = parts;
     return a === 0
       || a === 10
@@ -26,12 +35,8 @@ function isBlockedIp(hostname) {
       || a >= 224;
   }
   if (version === 6) {
-    const value = hostname.toLowerCase();
-    if (value.startsWith("::ffff:")) {
-      const mapped = value.slice("::ffff:".length);
-      if (isIP(mapped) === 4) return isBlockedIp(mapped);
-    }
-    return value === "::1"
+    return value.startsWith("::ffff:")
+      || value === "::1"
       || value === "::"
       || value.startsWith("fc")
       || value.startsWith("fd")
@@ -41,7 +46,7 @@ function isBlockedIp(hostname) {
 }
 
 function assertPublicHostname(hostname) {
-  const normalized = hostname.toLowerCase().replace(/\.$/, "");
+  const normalized = normalizeHostname(hostname);
   if (!normalized
     || normalized === "localhost"
     || normalized.endsWith(".localhost")
@@ -60,7 +65,7 @@ async function assertResolvedPublicHostname(hostname, lookupImpl) {
   if (addresses.length === 0) throw new Error("dns_resolution_empty");
   for (const item of addresses) {
     const address = typeof item === "string" ? item : item?.address;
-    if (!address || !isIP(address) || isBlockedIp(address)) {
+    if (!address || !isIP(normalizeHostname(address)) || isBlockedIp(address)) {
       throw new Error("non_public_dns_resolution_rejected");
     }
   }
