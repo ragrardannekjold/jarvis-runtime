@@ -1,0 +1,37 @@
+name: AI39 historical cross-sensor anchor discovery
+
+on:
+  push:
+    branches: [ai39-crosssensor-anchor-discovery-20260825]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  discover:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: '3.12.11'
+      - run: python -m pip install --disable-pip-version-check requests==2.32.3
+      - name: Discover optical pairs nearest fixed thermal anchors
+        run: python scripts/ai39_crosssensor_anchor_discovery.py
+      - name: Verify bounded output
+        run: |
+          set -euo pipefail
+          test "$(jq -r .status out/qa.json)" = PASS
+          test "$(jq -r .status out/result.json)" = HISTORICAL_CROSSSENSOR_ANCHOR_DISCOVERY
+          test "$(find out -type f \( -name '*.tif' -o -name '*.png' -o -name '*.geojson' \) | wc -l)" -eq 0
+          (cd out && find . -type f ! -name SHA256SUMS.txt -print0 | sort -z | xargs -0 sha256sum > SHA256SUMS.txt)
+          (cd out && sha256sum -c SHA256SUMS.txt)
+      - name: Upload discovery artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: ai39-crosssensor-anchor-discovery-${{ github.run_id }}-${{ github.run_attempt }}
+          path: out/
+          if-no-files-found: error
+          retention-days: 14
