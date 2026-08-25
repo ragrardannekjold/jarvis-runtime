@@ -478,7 +478,13 @@ async function refillFromPlans() {
       "REFILLED",
       `reserved-before-side-effect; created queue issues ${createdIssues.join(", ")}; useful queue target ${plan.target_queue_depth}`,
     );
-    return { created: createdIssues.length, completed, plan_id: plan.plan_id, state: "REFILLED" };
+    return {
+      created: createdIssues.length,
+      created_issue_numbers: createdIssues,
+      completed,
+      plan_id: plan.plan_id,
+      state: "REFILLED",
+    };
   }
   return { created: 0, completed, plan_id: null, state: "NO_OPEN_PLAN" };
 }
@@ -496,6 +502,7 @@ async function rejectAndClose(issue, error) {
 async function main() {
   const started = Date.now();
   const seenIssueNumbers = new Set();
+  const directIssueNumbers = [];
   let processed = 0;
   let succeeded = 0;
   let failed = 0;
@@ -504,13 +511,28 @@ async function main() {
   let plansCompleted = 0;
 
   while (processed < MAX_JOBS_PER_RUN && Date.now() - started < MAX_RUNTIME_MS) {
-    const issues = await listQueueIssues();
-    const issue = issues.find((candidate) => !seenIssueNumbers.has(candidate.number));
+    let issue = null;
+
+    while (directIssueNumbers.length > 0 && !issue) {
+      const issueNumber = directIssueNumbers.shift();
+      if (seenIssueNumbers.has(issueNumber)) continue;
+      const directIssue = await githubRequest(`/repos/${repository}/issues/${issueNumber}`);
+      if (directIssue?.state === "open") issue = directIssue;
+    }
+
+    if (!issue) {
+      const issues = await listQueueIssues();
+      issue = issues.find((candidate) => !seenIssueNumbers.has(candidate.number)) || null;
+    }
+
     if (!issue) {
       const refill = await refillFromPlans();
       refilled += refill.created;
       plansCompleted += refill.completed;
-      if (refill.created > 0) continue;
+      if (refill.created > 0) {
+        directIssueNumbers.push(...(refill.created_issue_numbers || []));
+        continue;
+      }
       break;
     }
     seenIssueNumbers.add(issue.number);
@@ -531,13 +553,13 @@ async function main() {
       continue;
     }
 
-    await postStatus(job, "ACCEPTED", "dequeued as next safe external task");
+    await postStatus(job, "ACCEPTED", "direct external handoff acquired");
     try {
       const result = await execute(job);
-      await postStatus(job, "SUCCEEDED", "complete; next queue item eligible immediately", result);
+      await postStatus(job, "SUCCEEDED", "complete; same-run next task/refill eligible immediately", result);
       succeeded += 1;
     } catch (error) {
-      await postStatus(job, "FAILED", "execution; local failure isolated; next queue item still eligible", String(error.message || error).slice(0, 300));
+      await postStatus(job, "FAILED", "execution; local failure isolated; same-run next task still eligible", String(error.message || error).slice(0, 300));
       failed += 1;
     }
     await closeIssue(job);
