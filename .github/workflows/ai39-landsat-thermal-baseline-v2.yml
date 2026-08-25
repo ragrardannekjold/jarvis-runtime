@@ -1,0 +1,49 @@
+name: AI39 Landsat thermal historical context baseline v2
+
+on:
+  push:
+    branches: [ai39-landsat-thermal-baseline-20260825]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ai39-landsat-thermal-baseline-v2-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  baseline-v2:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: '3.12.11'
+      - name: Install pinned geospatial runtime
+        run: >-
+          python -m pip install --disable-pip-version-check
+          numpy==2.2.6 rasterio==1.4.3 pystac-client==0.8.6 planetary-computer==1.0.0
+      - name: Build widened historical thermal context envelope
+        run: python scripts/ai39_landsat_thermal_baseline_v2.py
+      - name: Verify bounded output and hashes
+        run: |
+          set -euo pipefail
+          test "$(jq -r .status out/qa.json)" = PASS
+          test "$(jq -r .status out/result.json)" = LANDSAT_THERMAL_HISTORICAL_CONTEXT_BASELINE
+          test "$(find out -type f \( -name '*.tif' -o -name '*.png' -o -name '*.geojson' \) | wc -l)" -eq 0
+          test "$(du -sb out | cut -f1)" -le 5242880
+          (cd out && find . -type f ! -name SHA256SUMS.txt -print0 | sort -z | xargs -0 sha256sum > SHA256SUMS.txt)
+          (cd out && sha256sum -c SHA256SUMS.txt)
+      - name: Upload baseline artifact
+        id: upload
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: ai39-landsat-thermal-baseline-v2-${{ github.run_id }}-${{ github.run_attempt }}
+          path: out/
+          if-no-files-found: error
+          retention-days: 14
+      - name: Record digest
+        if: success()
+        run: echo "artifact_digest=${{ steps.upload.outputs.artifact-digest }}"
