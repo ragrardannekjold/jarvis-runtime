@@ -1,0 +1,42 @@
+name: Continuous External Queue
+
+on:
+  issues:
+    types: [opened]
+  workflow_dispatch:
+  schedule:
+    - cron: '*/5 * * * *'
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: continuous-external-queue
+  cancel-in-progress: false
+
+jobs:
+  drain-queue:
+    if: >-
+      github.event_name != 'issues' ||
+      (github.actor == github.repository_owner && startsWith(github.event.issue.title, '[QUEUE-JOB]'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout public runtime
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Validate queue worker syntax
+        run: node --check runtime/continuous-queue/worker.mjs
+
+      - name: Drain bounded public queue
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          REPOSITORY_OWNER: ${{ github.repository_owner }}
+        run: node runtime/continuous-queue/worker.mjs
