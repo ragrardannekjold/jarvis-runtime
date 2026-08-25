@@ -8,6 +8,7 @@ import {
 } from "./harvester.mjs";
 
 const allowedOrigins = ["https://public.example"];
+const publicLookup = async () => [{ address: "93.184.216.34", family: 4 }];
 
 test("canonicalizes only allowlisted public HTTPS URLs", () => {
   assert.equal(
@@ -24,6 +25,10 @@ test("canonicalizes only allowlisted public HTTPS URLs", () => {
   );
   assert.throws(
     () => canonicalizePublicUrl("https://127.0.0.1/docs", { allowedOrigins: ["https://127.0.0.1"] }),
+    /non_public_hostname_rejected/,
+  );
+  assert.throws(
+    () => canonicalizePublicUrl("https://[::ffff:127.0.0.1]/docs", { allowedOrigins: ["https://[::ffff:127.0.0.1]"] }),
     /non_public_hostname_rejected/,
   );
 });
@@ -56,10 +61,12 @@ test("creates deterministic semantic snapshots and detects meaningful change", (
   assert.equal(diffSnapshots(formattingOnly, changed).semantic_changed, true);
 });
 
-test("harvests through an injected fetch implementation without live network access", async () => {
+test("harvests through injected fetch and DNS implementations without live network access", async () => {
   let seenUrl = null;
-  const fetchImpl = async (url) => {
+  let seenRedirectMode = null;
+  const fetchImpl = async (url, options) => {
     seenUrl = url;
+    seenRedirectMode = options.redirect;
     return new Response(
       "<html><head><title>Evidence</title></head><body>Public document revision 3</body></html>",
       { status: 200, headers: { "content-type": "text/html; charset=utf-8" } },
@@ -71,13 +78,82 @@ test("harvests through an injected fetch implementation without live network acc
     {
       allowedOrigins,
       fetchImpl,
+      lookupImpl: publicLookup,
       now: () => new Date("2026-08-25T15:00:00.000Z"),
     },
   );
 
   assert.equal(seenUrl, "https://public.example/report?id=3");
+  assert.equal(seenRedirectMode, "manual");
   assert.equal(snapshot.url, "https://public.example/report?id=3");
   assert.equal(snapshot.title, "Evidence");
   assert.equal(snapshot.http_status, 200);
   assert.equal(snapshot.fetched_at, "2026-08-25T15:00:00.000Z");
+});
+
+test("rejects a hostname that resolves to a private address before fetch", async () => {
+  let fetchCalls = 0;
+  await assert.rejects(
+    () => harvestPublicUrl("https://public.example/report", {
+      allowedOrigins,
+      lookupImpl: async () => [{ address: "10.0.0.7", family: 4 }],
+      fetchImpl: async () => {
+        fetchCalls += 1;
+        return new Response("should not fetch");
+      },
+    }),
+    /non_public_dns_resolution_rejected/,
+  );
+  assert.equal(fetchCalls, 0);
+});
+
+test("rejects redirects to non-allowlisted origins before following them", async () => {
+  let fetchCalls = 0;
+  const fetchImpl = async () => {
+    fetchCalls += 1;
+    return new Response(null, {
+      status: 302,
+      headers: { location: "https://other.example/hidden" },
+    });
+  };
+
+  await assert.rejects(
+    () => harvestPublicUrl("https://public.example/start", {
+      allowedOrigins,
+      lookupImpl: publicLookup,
+      fetchImpl,
+    }),
+    /origin_not_allowlisted/,
+  );
+  assert.equal(fetchCalls, 1);
+});
+
+test("follows an allowlisted redirect only after re-validating the next hop", async () => {
+  const seen = [];
+  const fetchImpl = async (url) => {
+    seen.push(url);
+    if (url.endsWith("/start")) {
+      return new Response(null, {
+        status: 302,
+        headers: { location: "/final?utm_source=noise&id=9" },
+      });
+    }
+    return new Response("<html><head><title>Final</title></head><body>ok</body></html>", {
+      status: 200,
+      headers: { "content-type": "text/html" },
+    });
+  };
+
+  const snapshot = await harvestPublicUrl("https://public.example/start", {
+    allowedOrigins,
+    lookupImpl: publicLookup,
+    fetchImpl,
+  });
+
+  assert.deepEqual(seen, [
+    "https://public.example/start",
+    "https://public.example/final?id=9",
+  ]);
+  assert.equal(snapshot.url, "https://public.example/final?id=9");
+  assert.equal(snapshot.title, "Final");
 });
