@@ -6,6 +6,7 @@ on:
       - main
     paths:
       - ".github/workflows/ai39-cdse-stac-canary.yml"
+      - "runtime/persist_ai39_cdse_cache.py"
   workflow_dispatch:
 
 permissions:
@@ -21,6 +22,9 @@ jobs:
     timeout-minutes: 5
 
     steps:
+      - name: Checkout public runtime
+        uses: actions/checkout@v4
+
       - name: Require private bridge token
         shell: bash
         env:
@@ -45,13 +49,16 @@ jobs:
           python-version: "3.12"
 
       - name: Regression gate for CDSE STAC adapter
-        working-directory: command-center
         env:
-          PYTHONPATH: src
+          PYTHONPATH: command-center/src
         run: |
           set -euo pipefail
-          python -m py_compile src/jarvis/cdse_stac.py scripts/ai39_cdse_stac_discovery.py tests/test_cdse_stac.py
-          python -m unittest discover -s tests -p "test_cdse_stac.py" -v
+          python -m py_compile \
+            command-center/src/jarvis/cdse_stac.py \
+            command-center/scripts/ai39_cdse_stac_discovery.py \
+            command-center/tests/test_cdse_stac.py \
+            runtime/persist_ai39_cdse_cache.py
+          python -m unittest discover -s command-center/tests -p "test_cdse_stac.py" -v
 
       - name: Live AI39 Sentinel-1 GRD discovery readback
         working-directory: command-center
@@ -103,3 +110,11 @@ jobs:
           if payload.get("state") != "LIVE_READBACK" or not candidates or not schema_ok:
               raise SystemExit(4)
           PY
+
+      - name: Persist private durable scene-metadata cache
+        env:
+          COMMAND_CENTER_REPO: ragrardannekjold/jarvis-command-center
+          COMMAND_CENTER_TOKEN: ${{ secrets.COMMAND_CENTER_TOKEN }}
+        run: |
+          set -euo pipefail
+          python runtime/persist_ai39_cdse_cache.py --input "$RUNNER_TEMP/ai39-cdse-stac.json"
