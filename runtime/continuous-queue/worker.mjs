@@ -132,11 +132,35 @@ function parsePlanIssue(issue) {
   const tasks = plan.tasks.map((task) => validateTaskSpec(task, { requireCanonical: true }));
   const keys = tasks.map(taskKey);
   if (new Set(keys).size !== keys.length) throw new Error("duplicate_task_identity_in_plan");
+
+  const dispatchState = plan.dispatch_state ?? { schema_version: 1, issued: {} };
+  if (!dispatchState || typeof dispatchState !== "object" || Array.isArray(dispatchState)) {
+    throw new Error("invalid_dispatch_state");
+  }
+  if (dispatchState.schema_version !== 1) throw new Error("unsupported_dispatch_state_schema_version");
+  if (!dispatchState.issued || typeof dispatchState.issued !== "object" || Array.isArray(dispatchState.issued)) {
+    throw new Error("invalid_dispatch_issued_map");
+  }
+  const issued = new Map();
+  for (const [key, record] of Object.entries(dispatchState.issued)) {
+    if (!keys.includes(key)) throw new Error("dispatch_issued_key_not_in_plan");
+    if (!record || typeof record !== "object" || Array.isArray(record)) throw new Error("invalid_dispatch_record");
+    const issueNumber = record.issue_number ?? null;
+    if (issueNumber !== null && (!Number.isInteger(issueNumber) || issueNumber < 1)) {
+      throw new Error("invalid_dispatch_issue_number");
+    }
+    issued.set(key, {
+      issue_number: issueNumber,
+      reserved_at_utc: typeof record.reserved_at_utc === "string" ? record.reserved_at_utc : null,
+    });
+  }
   return {
     issueNumber: issue.number,
     plan_id: planId,
     target_queue_depth: targetQueueDepth,
     tasks,
+    raw_plan: plan,
+    issued,
   };
 }
 
@@ -300,9 +324,14 @@ async function listQueueIssues() {
 
 async function listPlanIssues() {
   const issues = await listIssues("open");
-  return (issues || []).filter((issue) =>
+  const candidates = (issues || []).filter((issue) =>
     !issue.pull_request && issue.title?.startsWith(PLAN_PREFIX),
   );
+  const fresh = [];
+  for (const candidate of candidates) {
+    fresh.push(await githubRequest(`/repos/${repository}/issues/${candidate.number}`));
+  }
+  return fresh;
 }
 
 async function listRecentQueueIssuesAllStates() {
@@ -329,6 +358,54 @@ async function createQueueIssue(plan, task) {
   });
 }
 
+async function persistPlanDispatchState(plan) {
+  const issued = {};
+  for (const [key, record] of plan.issued.entries()) {
+    issued[key] = {
+      issue_number: record.issue_number ?? null,
+      reserved_at_utc: record.reserved_at_utc ?? null,
+    };
+  }
+  const body = {
+    ...plan.raw_plan,
+    dispatch_state: {
+      schema_version: 1,
+      issued,
+    },
+  };
+  await githubRequest(`/repos/${repository}/issues/${plan.issueNumber}`, {
+    method: "PATCH",
+    body: { body: JSON.stringify(body) },
+  });
+  plan.raw_plan = body;
+}
+
+async function inspectPlanIssued(plan) {
+  let activeOrUnverified = 0;
+  let terminalVerified = 0;
+  const issueNumbers = new Set();
+  for (const [key, record] of plan.issued.entries()) {
+    if (!record.issue_number) {
+      activeOrUnverified += 1;
+      continue;
+    }
+    issueNumbers.add(record.issue_number);
+    const issue = await githubRequest(`/repos/${repository}/issues/${record.issue_number}`);
+    const parsed = parseQueueJob(issue);
+    if (taskKey(parsed) !== key) throw new Error("dispatch_issue_identity_mismatch");
+    if (issue.state !== "closed") {
+      activeOrUnverified += 1;
+      continue;
+    }
+    if (!(await hasTerminalQueueStatus(record.issue_number))) {
+      activeOrUnverified += 1;
+      continue;
+    }
+    terminalVerified += 1;
+  }
+  return { activeOrUnverified, terminalVerified, issueNumbers };
+}
+
 async function refillFromPlans() {
   const planIssues = await listPlanIssues();
   let completed = 0;
@@ -348,36 +425,58 @@ async function refillFromPlans() {
       continue;
     }
 
-    const openQueue = await listQueueIssues();
     const allQueue = await listRecentQueueIssuesAllStates();
-    const seenKeys = new Set(allQueue.map(queueTaskKeyFromIssue).filter(Boolean));
-    const remaining = plan.tasks.filter((task) => !seenKeys.has(taskKey(task)));
+    const historicalSeen = new Set(allQueue.map(queueTaskKeyFromIssue).filter(Boolean));
+    const issuedKeys = new Set(plan.issued.keys());
+    const remaining = plan.tasks.filter((task) => {
+      const key = taskKey(task);
+      return !issuedKeys.has(key) && !historicalSeen.has(key);
+    });
 
-    if (remaining.length === 0) {
-      if (openQueue.length === 0) {
-        await postPlanStatus(plan, "COMPLETE", "all finite plan tasks have terminal or historical queue identity");
-        await closeIssue(plan);
-        completed += 1;
-        continue;
-      }
-      return { created: 0, completed, plan_id: plan.plan_id, state: "WAITING_FOR_ACTIVE_QUEUE" };
+    const inspection = await inspectPlanIssued(plan);
+    if (remaining.length === 0 && inspection.activeOrUnverified === 0) {
+      await postPlanStatus(
+        plan,
+        "COMPLETE",
+        `all finite plan tasks have durable terminal identity/readback; verified=${inspection.terminalVerified}`,
+      );
+      await closeIssue(plan);
+      completed += 1;
+      continue;
     }
 
-    const slots = Math.max(0, plan.target_queue_depth - openQueue.length);
-    if (slots === 0) {
-      return { created: 0, completed, plan_id: plan.plan_id, state: "QUEUE_DEPTH_SATISFIED" };
+    const openQueue = await listQueueIssues();
+    const listedForeignOpen = openQueue.filter((candidate) => !inspection.issueNumbers.has(candidate.number)).length;
+    const occupied = inspection.activeOrUnverified + listedForeignOpen;
+    const slots = Math.max(0, plan.target_queue_depth - occupied);
+    if (slots === 0 || remaining.length === 0) {
+      return {
+        created: 0,
+        completed,
+        plan_id: plan.plan_id,
+        state: remaining.length === 0 ? "WAITING_FOR_TERMINAL_READBACK" : "QUEUE_DEPTH_SATISFIED",
+      };
     }
 
     const selected = remaining.slice(0, slots);
+    const reservedAt = new Date().toISOString();
+    for (const task of selected) {
+      plan.issued.set(taskKey(task), { issue_number: null, reserved_at_utc: reservedAt });
+    }
+    await persistPlanDispatchState(plan);
+
     const createdIssues = [];
     for (const task of selected) {
+      const key = taskKey(task);
       const createdIssue = await createQueueIssue(plan, task);
+      plan.issued.set(key, { issue_number: createdIssue.number, reserved_at_utc: reservedAt });
+      await persistPlanDispatchState(plan);
       createdIssues.push(createdIssue.number);
     }
     await postPlanStatus(
       plan,
       "REFILLED",
-      `created queue issues ${createdIssues.join(", ")}; useful queue target ${plan.target_queue_depth}`,
+      `reserved-before-side-effect; created queue issues ${createdIssues.join(", ")}; useful queue target ${plan.target_queue_depth}`,
     );
     return { created: createdIssues.length, completed, plan_id: plan.plan_id, state: "REFILLED" };
   }
