@@ -1,0 +1,105 @@
+name: AI39 CDSE STAC canary
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/ai39-cdse-stac-canary.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ai39-cdse-stac-canary
+  cancel-in-progress: false
+
+jobs:
+  live-readback:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Require private bridge token
+        shell: bash
+        env:
+          COMMAND_CENTER_TOKEN: ${{ secrets.COMMAND_CENTER_TOKEN }}
+        run: |
+          set -euo pipefail
+          test -n "$COMMAND_CENTER_TOKEN" || { echo "COMMAND_CENTER_TOKEN secret is missing"; exit 2; }
+
+      - name: Checkout private command center ephemerally
+        uses: actions/checkout@v4
+        with:
+          repository: ragrardannekjold/jarvis-command-center
+          token: ${{ secrets.COMMAND_CENTER_TOKEN }}
+          ref: main
+          path: command-center
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Regression gate for CDSE STAC adapter
+        working-directory: command-center
+        env:
+          PYTHONPATH: src
+        run: |
+          set -euo pipefail
+          python -m py_compile src/jarvis/cdse_stac.py scripts/ai39_cdse_stac_discovery.py tests/test_cdse_stac.py
+          python -m unittest discover -s tests -p "test_cdse_stac.py" -v
+
+      - name: Live AI39 Sentinel-1 GRD discovery readback
+        working-directory: command-center
+        env:
+          PYTHONPATH: src
+        shell: bash
+        run: |
+          set -euo pipefail
+          OUT="$RUNNER_TEMP/ai39-cdse-stac.json"
+          python scripts/ai39_cdse_stac_discovery.py --days 21 --limit 25 --require-candidates > "$OUT"
+          python - "$OUT" <<'PY'
+          import json
+          import sys
+          from pathlib import Path
+
+          payload = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+          candidates = payload.get("candidates") if isinstance(payload.get("candidates"), list) else []
+          preferred_orbit = payload.get("preferred_relative_orbit")
+          pair_compatible = sum(
+              1 for item in candidates
+              if isinstance(item, dict)
+              and preferred_orbit is not None
+              and item.get("relative_orbit") == preferred_orbit
+          )
+          datetimes = [
+              str(item.get("datetime_utc"))
+              for item in candidates
+              if isinstance(item, dict) and item.get("datetime_utc")
+          ]
+          schema_ok = all(
+              isinstance(item, dict)
+              and item.get("collection") == "sentinel-1-grd"
+              and item.get("pixel_state") == "METADATA_ONLY_PIXELS_NOT_VIEWED"
+              and item.get("provenance_state") == "PUBLIC_STAC_DISCOVERY"
+              for item in candidates
+          )
+          safe = {
+              "state": payload.get("state"),
+              "route_id": payload.get("route_id"),
+              "collection": payload.get("collection"),
+              "candidate_count": len(candidates),
+              "freshest_candidate_utc": max(datetimes) if datetimes else None,
+              "preferred_orbit_candidate_count": pair_compatible,
+              "schema_and_truth_gate": "PASS" if schema_ok and candidates else "FAIL",
+              "target_aoi": "PRIVATE_CANONICAL_AI39_COARSE_AOI",
+              "credentials_sent_to_cdse": False,
+          }
+          print(json.dumps(safe, sort_keys=True))
+          if payload.get("state") != "LIVE_READBACK" or not candidates or not schema_ok:
+              raise SystemExit(4)
+          PY
