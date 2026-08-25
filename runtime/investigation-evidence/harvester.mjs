@@ -1,18 +1,29 @@
 import { createHash } from "node:crypto";
+import { lookup as dnsLookup } from "node:dns/promises";
 import { isIP } from "node:net";
 
 const TRACKING_PARAM_RE = /^(?:utm_.+|fbclid|gclid|yclid|mc_cid|mc_eid)$/i;
 const DEFAULT_MAX_BYTES = 1_000_000;
 const DEFAULT_TIMEOUT_MS = 10_000;
+const DEFAULT_MAX_REDIRECTS = 4;
 
 function sha256(value) {
   return createHash("sha256").update(value).digest("hex");
 }
 
+function normalizeHostname(hostname) {
+  let normalized = String(hostname || "").toLowerCase().replace(/\.$/, "");
+  if (normalized.startsWith("[") && normalized.endsWith("]")) {
+    normalized = normalized.slice(1, -1);
+  }
+  return normalized;
+}
+
 function isBlockedIp(hostname) {
-  const version = isIP(hostname);
+  const value = normalizeHostname(hostname);
+  const version = isIP(value);
   if (version === 4) {
-    const parts = hostname.split(".").map(Number);
+    const parts = value.split(".").map(Number);
     const [a, b] = parts;
     return a === 0
       || a === 10
@@ -24,8 +35,8 @@ function isBlockedIp(hostname) {
       || a >= 224;
   }
   if (version === 6) {
-    const value = hostname.toLowerCase();
-    return value === "::1"
+    return value.startsWith("::ffff:")
+      || value === "::1"
       || value === "::"
       || value.startsWith("fc")
       || value.startsWith("fd")
@@ -35,7 +46,7 @@ function isBlockedIp(hostname) {
 }
 
 function assertPublicHostname(hostname) {
-  const normalized = hostname.toLowerCase().replace(/\.$/, "");
+  const normalized = normalizeHostname(hostname);
   if (!normalized
     || normalized === "localhost"
     || normalized.endsWith(".localhost")
@@ -44,6 +55,20 @@ function assertPublicHostname(hostname) {
     throw new Error("non_public_hostname_rejected");
   }
   return normalized;
+}
+
+async function assertResolvedPublicHostname(hostname, lookupImpl) {
+  const normalized = assertPublicHostname(hostname);
+  if (isIP(normalized)) return;
+  const result = await lookupImpl(normalized, { all: true, verbatim: true });
+  const addresses = Array.isArray(result) ? result : [result];
+  if (addresses.length === 0) throw new Error("dns_resolution_empty");
+  for (const item of addresses) {
+    const address = typeof item === "string" ? item : item?.address;
+    if (!address || !isIP(normalizeHostname(address)) || isBlockedIp(address)) {
+      throw new Error("non_public_dns_resolution_rejected");
+    }
+  }
 }
 
 function normalizeAllowedOrigins(allowedOrigins) {
@@ -168,26 +193,48 @@ export function diffSnapshots(previous, current) {
 export async function harvestPublicUrl(rawUrl, {
   allowedOrigins,
   fetchImpl = globalThis.fetch,
+  lookupImpl = dnsLookup,
   maxBytes = DEFAULT_MAX_BYTES,
   timeoutMs = DEFAULT_TIMEOUT_MS,
+  maxRedirects = DEFAULT_MAX_REDIRECTS,
   now = () => new Date(),
 } = {}) {
   if (typeof fetchImpl !== "function") throw new Error("fetch_implementation_required");
+  if (typeof lookupImpl !== "function") throw new Error("dns_lookup_implementation_required");
   if (!Number.isInteger(maxBytes) || maxBytes < 1 || maxBytes > 5_000_000) throw new Error("invalid_max_bytes");
   if (!Number.isInteger(timeoutMs) || timeoutMs < 100 || timeoutMs > 30_000) throw new Error("invalid_timeout_ms");
+  if (!Number.isInteger(maxRedirects) || maxRedirects < 0 || maxRedirects > 8) throw new Error("invalid_max_redirects");
 
-  const url = canonicalizePublicUrl(rawUrl, { allowedOrigins });
-  const response = await fetchImpl(url, {
-    method: "GET",
-    redirect: "follow",
-    headers: {
-      accept: "text/html,application/xhtml+xml,text/plain,application/json;q=0.8,*/*;q=0.1",
-      "user-agent": "jarvis-runtime-evidence-harvester/1.0",
-    },
-    signal: AbortSignal.timeout(timeoutMs),
-  });
+  let currentUrl = canonicalizePublicUrl(rawUrl, { allowedOrigins });
+  let response;
 
-  const finalUrl = canonicalizePublicUrl(response.url || url, { allowedOrigins });
+  for (let hop = 0; hop <= maxRedirects; hop += 1) {
+    const parsed = new URL(currentUrl);
+    await assertResolvedPublicHostname(parsed.hostname, lookupImpl);
+
+    response = await fetchImpl(currentUrl, {
+      method: "GET",
+      redirect: "manual",
+      headers: {
+        accept: "text/html,application/xhtml+xml,text/plain,application/json;q=0.8,*/*;q=0.1",
+        "user-agent": "jarvis-runtime-evidence-harvester/1.1",
+      },
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+
+    const location = response.headers?.get?.("location");
+    if (response.status >= 300 && response.status < 400 && location) {
+      if (hop >= maxRedirects) throw new Error("too_many_redirects");
+      const nextUrl = new URL(location, currentUrl).toString();
+      currentUrl = canonicalizePublicUrl(nextUrl, { allowedOrigins });
+      continue;
+    }
+    break;
+  }
+
+  if (!response) throw new Error("fetch_failed_without_response");
+
+  const finalUrl = canonicalizePublicUrl(currentUrl, { allowedOrigins });
   const declaredLength = Number(response.headers?.get?.("content-length"));
   if (Number.isFinite(declaredLength) && declaredLength > maxBytes) throw new Error("response_too_large");
 
