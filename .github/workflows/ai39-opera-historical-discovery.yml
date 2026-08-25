@@ -1,0 +1,151 @@
+name: AI39 OPERA RTC historical metadata discovery
+
+on:
+  push:
+    branches: [ai39-opera-historical-discovery-20260825]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  discover:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: '3.12.11'
+
+      - name: Query historical OPERA RTC metadata only
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          python - <<'PY'
+          import json, re
+          from datetime import datetime, timezone
+          from pathlib import Path
+          import urllib.parse, urllib.request
+
+          SERVICE='https://gis.earthdata.nasa.gov/image/rest/services/OPERA_L2_RTC_S1_V1/OPERA_L2_RTC_S1_V1_VV/ImageServer'
+          AOI='37.65,48.25,38.25,48.90'
+          WINDOWS=[
+            ('2023_pair1','2023-07-20','2023-08-20'),
+            ('2024_pair','2024-08-01','2024-08-30'),
+            ('2025_pair','2025-07-25','2025-08-25'),
+          ]
+
+          def get_json(url,params):
+              q=urllib.parse.urlencode(params)
+              req=urllib.request.Request(url+'?'+q,headers={'User-Agent':'AI39-historical-method-QA/1.0'})
+              with urllib.request.urlopen(req,timeout=90) as r:
+                  return json.load(r)
+
+          info=get_json(SERVICE,{'f':'json'})
+          field_names=[f.get('name') for f in info.get('fields',[]) if f.get('name')]
+
+          def epoch_ms(day):
+              dt=datetime.fromisoformat(day+'T00:00:00+00:00')
+              return int(dt.timestamp()*1000)
+
+          def parse_name(name):
+              s=str(name or '')
+              # Public product names encode burst/date/sensor. Keep only coarse consistency keys.
+              m=re.search(r'RTC-S1_([^_]+)_([0-9]{8}T[0-9]{6}Z)_[^_]+_(S1[A-Z])_',s)
+              if not m:
+                  return {'burst_key':None,'acq_utc':None,'sensor':None}
+              return {'burst_key':m.group(1),'acq_utc':m.group(2),'sensor':m.group(3)}
+
+          result={
+            'status':'HISTORICAL_METADATA_DISCOVERY_ONLY',
+            'generated_utc':datetime.now(timezone.utc).isoformat(),
+            'service':'NASA Earthdata GIS OPERA_L2_RTC_S1_V1 VV ImageServer',
+            'scope':'Historical archive-availability/matching QA only; no raster export, no geometry export, no current-condition or actor inference.',
+            'service_fields':field_names,
+            'windows':[]}
+
+          for label,start,end in WINDOWS:
+              params={
+                'where':'1=1','geometry':AOI,'geometryType':'esriGeometryEnvelope','inSR':4326,
+                'spatialRel':'esriSpatialRelIntersects','outFields':'OBJECTID,startdate,name',
+                'returnGeometry':'false','orderByFields':'startdate ASC','resultRecordCount':2000,
+                'time':f'{epoch_ms(start)},{epoch_ms(end)}','f':'json'}
+              q=get_json(SERVICE+'/query',params)
+              if q.get('error'):
+                  raise RuntimeError(json.dumps(q['error']))
+              rows=[]
+              for feat in q.get('features',[]):
+                  a=feat.get('attributes',{})
+                  p=parse_name(a.get('name'))
+                  rows.append({
+                    'object_id':a.get('OBJECTID'),'startdate_raw':a.get('startdate'),
+                    'burst_key':p['burst_key'],'acq_utc':p['acq_utc'],'sensor':p['sensor']})
+              by_day={}
+              by_burst={}
+              for row in rows:
+                  day=(row.get('acq_utc') or '')[:8] or str(row.get('startdate_raw'))
+                  by_day[day]=by_day.get(day,0)+1
+                  if row.get('burst_key'):
+                      by_burst.setdefault(row['burst_key'],[]).append(row)
+              reusable=[]
+              for burst,items in by_burst.items():
+                  dates=sorted({i['acq_utc'] for i in items if i.get('acq_utc')})
+                  sensors=sorted({i['sensor'] for i in items if i.get('sensor')})
+                  if len(dates)>=2:
+                      reusable.append({'burst_key':burst,'acquisition_count':len(dates),'acquisition_times':dates,'sensors':sensors})
+              reusable.sort(key=lambda x:(-x['acquisition_count'],x['burst_key']))
+              result['windows'].append({
+                'label':label,'date_start':start,'date_end':end,
+                'feature_count':len(rows),'acquisition_day_counts':by_day,
+                'repeated_burst_count':len(reusable),
+                'repeated_bursts':reusable[:200]})
+
+          result['truth_rules']=[
+            'Metadata discovery is not surface-change evidence.',
+            'Repeated burst availability only establishes that like-for-like historical comparison may be feasible.',
+            'No raster pixels, exact geometries, routes, military positions, or current-force claims are exported.'
+          ]
+          Path('out/result.json').write_text(json.dumps(result,indent=2),encoding='utf-8')
+          qa={
+            'status':'PASS',
+            'checks':{
+              'historical_only':True,
+              'three_windows':len(result['windows'])==3,
+              'no_geometry_export':True,
+              'no_raster_export':True,
+              'service_returned_fields':len(field_names)>0,
+              'all_queries_completed':all('feature_count' in w for w in result['windows'])}}
+          if not all(qa['checks'].values()): qa['status']='FAIL'
+          Path('out/qa.json').write_text(json.dumps(qa,indent=2),encoding='utf-8')
+          if qa['status']!='PASS': raise RuntimeError(json.dumps(qa))
+          print(json.dumps({
+            'qa':qa,
+            'windows':[{
+              'label':w['label'],'feature_count':w['feature_count'],
+              'repeated_burst_count':w['repeated_burst_count'],
+              'day_count':len(w['acquisition_day_counts'])} for w in result['windows']]
+          },indent=2))
+          PY
+
+      - name: Verify bounded metadata output
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(jq -r .status out/qa.json)" = PASS
+          test "$(find out -type f \( -name '*.tif' -o -name '*.png' -o -name '*.geojson' \) | wc -l)" -eq 0
+          (cd out && find . -type f ! -name SHA256SUMS.txt -print0 | sort -z | xargs -0 sha256sum > SHA256SUMS.txt)
+          (cd out && sha256sum -c SHA256SUMS.txt)
+
+      - name: Upload discovery artifact
+        id: upload
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: ai39-opera-historical-discovery-${{ github.run_id }}-${{ github.run_attempt }}
+          path: out/
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Record digest
+        if: success()
+        run: echo "artifact_digest=${{ steps.upload.outputs.artifact-digest }}"
