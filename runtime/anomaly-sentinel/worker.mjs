@@ -9,6 +9,7 @@ import {
 const repository = requiredEnv("GITHUB_REPOSITORY");
 const token = requiredEnv("GITHUB_TOKEN");
 const runId = requiredEnv("GITHUB_RUN_ID");
+const defaultBranch = requiredEnv("DEFAULT_BRANCH");
 const expectedCancelledWorkflows = (process.env.EXPECTED_CANCEL_WORKFLOWS || "Kyiv V3 public collector")
   .split(",").map((value) => value.trim()).filter(Boolean);
 
@@ -70,7 +71,7 @@ async function loadRecentRuns() {
   const enabled = workflows.filter((workflow) => workflow.state === "active");
   const runGroups = await mapLimit(enabled, 5, async (workflow) => {
     const response = await githubRequest(
-      `/repos/${repository}/actions/workflows/${workflow.id}/runs?per_page=10&exclude_pull_requests=false`,
+      `/repos/${repository}/actions/workflows/${workflow.id}/runs?branch=${encodeURIComponent(defaultBranch)}&per_page=10&exclude_pull_requests=true`,
     );
     return (response?.workflow_runs || []).map((run) => ({ ...run, name: workflow.name }));
   });

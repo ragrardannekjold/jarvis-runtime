@@ -42,7 +42,7 @@ test("CONTAIN baseline is exact and fail closed", async () => {
     legacy_secret_bindings: 7,
     legacy_secret_workflows: 2,
     manual_tombstones: 6,
-    privileged_source_pins: 25,
+    privileged_source_pins: 27,
     historical_rerun_capability: "PENDING_NEUTRALIZATION",
     external_attestation: "PENDING_EXTERNAL_AUTHORITY",
   });
@@ -363,6 +363,54 @@ test("current and unknown permission capabilities fail closed", async () => {
   assert.throws(
     () => validateSnapshot(unknown.workflows, unknown.contract),
     /unknown GitHub permission key/,
+  );
+});
+
+
+test("anomaly sentinel keeps exact default-branch source and authority boundaries", async () => {
+  const workflowPath = ".github/workflows/runtime-anomaly-sentinel.yml";
+
+  const manual = await fresh();
+  manual.workflows.set(
+    workflowPath,
+    manual.workflows.get(workflowPath).replace(
+      "on:\n  push:",
+      "on:\n  workflow_dispatch:\n  push:",
+    ),
+  );
+  repin(manual, workflowPath);
+  assert.throws(
+    () => validateSnapshot(manual.workflows, manual.contract),
+    /must execute only from default-branch push or the hourly schedule/,
+  );
+
+  const sourcePath = "runtime/anomaly-sentinel/worker.mjs";
+  const branchEscape = await fresh();
+  branchEscape.workflows.set(
+    sourcePath,
+    branchEscape.workflows.get(sourcePath).replace(
+      "branch=${encodeURIComponent(defaultBranch)}",
+      "branch=${encodeURIComponent(process.env.UNTRUSTED_BRANCH)}",
+    ),
+  );
+  repinSource(branchEscape, sourcePath);
+  assert.throws(
+    () => validateSnapshot(branchEscape.workflows, branchEscape.contract),
+    /worker escaped its source-observation-only boundary|fixed local execution (?:pin|blob) drifted/,
+  );
+
+  const widerWrite = await fresh();
+  widerWrite.workflows.set(
+    workflowPath,
+    widerWrite.workflows.get(workflowPath).replace(
+      "  issues: write",
+      "  issues: write\n  actions: write",
+    ),
+  );
+  repin(widerWrite, workflowPath);
+  assert.throws(
+    () => validateSnapshot(widerWrite.workflows, widerWrite.contract),
+    /write permission scope is not allowlisted/,
   );
 });
 
