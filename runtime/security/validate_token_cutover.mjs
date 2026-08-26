@@ -9,7 +9,7 @@ import { fileURLToPath } from "node:url";
 export const CONTRACT_PATH = "runtime/security/token_cutover_contract.json";
 export const MANIFEST_PATH = "PUBLIC_EXPORT_MANIFEST.json";
 export const EXPECTED_CONTRACT_SHA256 =
-  "d8ac65cbc44ecd5f2c74a3bef29ee498e71ff2e190de0d937404edd616840954";
+  "51377fd0677a6283eff9b316dd2cd09aae718c04cabe19a108885cdb908bcf68";
 const CONTAIN_PHASE_INDEX = 2;
 const OFFICIAL_NODE24_ACTION_PINS = new Map([
   ["actions/checkout", "3d3c42e5aac5ba805825da76410c181273ba90b1"],
@@ -90,8 +90,8 @@ const FIXED_LOCAL_EXECUTION_BLOBS = new Map([
   ["runtime/async-jobs/contract.mjs", "5d905100806b71ca9428edf5e4454c1e3ec6da3d"],
   ["runtime/async-jobs/contract.test.mjs", "a9908d14aeacb082aecd6d2bb416281ea346d683"],
   ["runtime/continuous-queue/worker.mjs", "3525aba2f971040c6324686023ff67230a9e336f"],
-  ["runtime/anomaly-sentinel/sentinel.mjs", "61c1e2104f61615ada115e62e77230a173069a9c"],
-  ["runtime/anomaly-sentinel/worker.mjs", "f5067fc4d227959cc6dd1932a9140f5dab7b7c6f"],
+  ["runtime/anomaly-sentinel/sentinel.mjs", "8964cbe0fd0ae3706c7ba101efebb22bf33395a4"],
+  ["runtime/anomaly-sentinel/worker.mjs", "f94bae283ea60db7c3ad156f414035b601e09509"],
 ]);
 
 function invariant(condition, message) {
@@ -830,12 +830,16 @@ function validateAnomalySentinelBoundary(files) {
     worker.includes('const defaultBranch = requiredEnv("DEFAULT_BRANCH");')
       && worker.includes("branch=${encodeURIComponent(defaultBranch)}")
       && worker.includes("exclude_pull_requests=true")
+      && worker.includes("/git/trees/${encodeURIComponent(defaultBranch)}?recursive=1")
+      && worker.includes('throw new Error("default_branch_tree_incomplete")')
+      && worker.includes("decommissionedWorkflowNames")
       && !/node:child_process|\bexecFile\b|\bspawn\b|\bnpm\b|\bimport\s*\(|\brequire\s*\(|\/dispatches|\/rerun/.test(worker),
     "anomaly sentinel worker escaped its source-observation-only boundary",
   );
   invariant(
     /^import \{ createHash \} from "node:crypto";$/m.test(core)
       && (core.match(/^import /gm) ?? []).length === 1
+      && core.includes('"DECOMMISSIONED"')
       && !/node:child_process|\bfetch\s*\(|process\.env|\bimport\s*\(|\brequire\s*\(/.test(core),
     "anomaly sentinel classifier must remain a pure non-network contract",
   );

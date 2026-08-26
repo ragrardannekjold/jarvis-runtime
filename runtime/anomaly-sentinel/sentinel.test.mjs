@@ -54,6 +54,23 @@ test("unallowlisted cancellation remains unknown", () => {
   assert.equal(state.state, "UNKNOWN");
 });
 
+test("retired or missing workflows are decommissioned, not active failures", () => {
+  const [byName] = classifyWorkflowRuns([run({
+    name: "Legacy Liski Bridge (Retired)",
+    conclusion: "failure",
+  })], {
+    now: NOW,
+    decommissionedWorkflowNames: ["Legacy Liski Bridge (Retired)"],
+  });
+  assert.equal(byName.state, "DECOMMISSIONED");
+
+  const [byId] = classifyWorkflowRuns([run({ conclusion: "failure" })], {
+    now: NOW,
+    decommissionedWorkflowIds: [100],
+  });
+  assert.equal(byId.state, "DECOMMISSIONED");
+});
+
 test("stale in-progress run becomes an active incident", () => {
   const [state] = classifyWorkflowRuns([
     run({ status: "in_progress", conclusion: null, created_at: "2026-08-26T10:00:00.000Z" }),
@@ -93,6 +110,17 @@ test("healthy state closes one existing incident", () => {
   const [close] = planIncidentActions([healthy], open);
   assert.equal(close.action, "CLOSE");
   assert.equal(close.resolution, "RECOVERED");
+});
+
+test("decommissioned state closes a stale incident as decommissioned", () => {
+  const [state] = classifyWorkflowRuns([run({ conclusion: "failure" })], {
+    now: NOW,
+    decommissionedWorkflowIds: [100],
+  });
+  const open = [{ issue_number: 11, workflow_id: 100, fingerprint: incidentFingerprint(100, "workflow_failure") }];
+  const [close] = planIncidentActions([state], open);
+  assert.equal(close.action, "CLOSE");
+  assert.equal(close.resolution, "DECOMMISSIONED");
 });
 
 test("public issue rendering excludes private and mailbox fields", () => {
