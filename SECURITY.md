@@ -21,6 +21,12 @@ Passive searches may run only through `exposure-intelligence.yml` after a strict
 
 The bridge schedule stays disabled until the secrets exist and a manual bridge test passes.
 
+## Knowledge and Skills Bus
+
+The public bus accepts only inline packets marked `public`. Never place private system details, client data, credentials, investigation targets/results, access telemetry, or threat-intelligence holdings in a queue issue. Skill packets may identify only repository-pinned paths and verifier paths; they are data references and must not introduce arbitrary commands, URLs, downloads, or execution.
+
+A packet may report observed indicators or missing telemetry. It must never convert missing evidence into a claim that hostile monitoring is absent. Treat suspected Russian, allied, contractor, insider, or supply-chain access as a threat hypothesis that requires authorized, asset-scoped telemetry and independent corroboration.
+
 ## Token scope
 
 Use a fine-grained token limited to the one private command-center repository. Start with `Contents: Read and write` only. Add another permission only when a verified runtime requirement cannot be satisfied without it.

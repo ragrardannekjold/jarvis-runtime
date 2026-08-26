@@ -1,5 +1,6 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
+import { inspectPacket } from "../knowledge-skill-bus/bus-core.mjs";
 
 const execFileAsync = promisify(execFile);
 const QUEUE_PREFIX = "[QUEUE-JOB]";
@@ -8,6 +9,7 @@ const INTERNAL_PRODUCER = "continuous_queue_refill_v1";
 const TERMINAL_STATUS_RE = /- state: \*\*(SUCCEEDED|FAILED|REJECTED)\*\*/;
 const ALLOWED_JOB_TYPES = new Set([
   "heartbeat_probe",
+  "bus_packet_validate",
   "async_contract_self_test",
   "runtime_syntax_self_test",
   "utility_search_self_test",
@@ -251,6 +253,33 @@ async function runHeartbeat(job) {
   return "continuous queue heartbeat verified";
 }
 
+async function seenBusPacketIdsBefore(issueNumber) {
+  const issues = await listRecentQueueIssuesAllStates();
+  const ids = [];
+  for (const issue of issues) {
+    if (issue.number >= issueNumber || issue.pull_request) continue;
+    let body;
+    try {
+      body = JSON.parse(issue.body || "{}");
+    } catch {
+      continue;
+    }
+    const packetId = body?.job_type === "bus_packet_validate"
+      ? body?.payload?.packet?.packet_id
+      : null;
+    if (typeof packetId === "string") ids.push(packetId);
+  }
+  return ids;
+}
+
+async function runBusPacketValidate(job) {
+  await postStatus(job, "RUNNING", "validate public knowledge/skill packet");
+  const seenPacketIds = await seenBusPacketIdsBefore(job.issueNumber);
+  const receipt = inspectPacket(job.payload?.packet, { seenPacketIds });
+  if (!receipt.accepted) throw new Error("bus_packet_duplicate");
+  return `BUS_PACKET_READBACK ${JSON.stringify(receipt)}`;
+}
+
 async function runAsyncContractSelfTest(job) {
   await postStatus(job, "RUNNING", "node contract tests");
   const { stdout, stderr } = await execFileAsync(
@@ -268,6 +297,10 @@ async function runRuntimeSyntaxSelfTest(job) {
     maxBuffer: 1024 * 1024,
   });
   await execFileAsync("node", ["--check", "runtime/continuous-queue/worker.mjs"], {
+    timeout: 60000,
+    maxBuffer: 1024 * 1024,
+  });
+  await execFileAsync("node", ["--check", "runtime/knowledge-skill-bus/bus-core.mjs"], {
     timeout: 60000,
     maxBuffer: 1024 * 1024,
   });
@@ -308,6 +341,7 @@ async function runSustainedRhythmVerification(job) {
 
 async function execute(job) {
   if (job.job_type === "heartbeat_probe") return runHeartbeat(job);
+  if (job.job_type === "bus_packet_validate") return runBusPacketValidate(job);
   if (job.job_type === "async_contract_self_test") return runAsyncContractSelfTest(job);
   if (job.job_type === "runtime_syntax_self_test") return runRuntimeSyntaxSelfTest(job);
   if (job.job_type === "utility_search_self_test") return runUtilitySearchSelfTest(job);
@@ -629,3 +663,4 @@ async function main() {
 }
 
 await main();
+
