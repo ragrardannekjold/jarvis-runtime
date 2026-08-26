@@ -1,58 +1,15 @@
-name: Legacy Liski public-runner bridge smoke
+name: Legacy Liski Bridge (Retired)
 
-# EMERGENCY CONTAINMENT 2026-08-16: Liski background execution is paused.
 on:
   workflow_dispatch:
 
-permissions:
-  contents: read
-
-concurrency:
-  group: legacy-liski-public-bridge-smoke
-  cancel-in-progress: true
+permissions: {}
 
 jobs:
-  smoke:
+  legacy-liski-bridge-disabled:
+    if: ${{ false }}
     runs-on: ubuntu-latest
-    timeout-minutes: 12
-
+    timeout-minutes: 1
     steps:
-      - name: Checkout public runtime
-        uses: actions/checkout@v4
-
-      - name: Require private bridge token
-        shell: bash
-        env:
-          PRIVATE_REPO_TOKEN: ${{ secrets.COMMAND_CENTER_TOKEN }}
-        run: |
-          set -euo pipefail
-          test -n "$PRIVATE_REPO_TOKEN" || { echo "PRIVATE_REPO_TOKEN missing"; exit 2; }
-
-      - name: Checkout legacy private repository ephemerally
-        uses: actions/checkout@v4
-        with:
-          repository: ragrardannekjold/ragrardannekjold-liski-scene-agent-1
-          token: ${{ secrets.COMMAND_CENTER_TOKEN }}
-          ref: main
-          path: legacy
-          fetch-depth: 1
-          persist-credentials: false
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-
-      - name: Validate legacy continuous-work contract
-        working-directory: legacy
-        run: python automation/validate_continuous_contract.py
-
-      - name: Run autonomous-learning regression smoke
-        working-directory: legacy
-        env:
-          PYTHONPATH: src
-        run: python -m unittest discover -s tests -p 'test_autolearn.py' -v
-
-      - name: Public-safe result
-        if: always()
-        run: echo "Legacy private-repository bridge smoke completed; no private files are uploaded as artifacts."
+      - name: Shared-token lane is quarantined
+        run: echo "Disabled pending migration to an isolated short-lived credential."

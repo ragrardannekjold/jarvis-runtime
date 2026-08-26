@@ -1,14 +1,8 @@
 name: Shodan Runtime Readback
 
 on:
-  workflow_dispatch:
-  push:
-    branches:
-      - main
-    paths:
-      - '.github/workflows/shodan-runtime-readback.yml'
-      - 'runtime/shodan_readback.py'
-      - 'runtime/test_shodan_readback.py'
+  schedule:
+    - cron: '17 3 * * *'
 
 permissions:
   contents: read
@@ -19,13 +13,13 @@ concurrency:
 
 jobs:
   verify:
+    if: github.event_name == 'schedule'
     runs-on: ubuntu-latest
     timeout-minutes: 4
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Regression-test credential boundary
-        run: python -m unittest runtime/test_shodan_readback.py -v
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
 
       - name: Verify Shodan credential without search spend
         shell: bash
@@ -39,4 +33,4 @@ jobs:
             exit 1
           fi
           echo "::add-mask::$SHODAN_API_KEY"
-          python runtime/shodan_readback.py
+          python -I -S runtime/shodan_readback.py

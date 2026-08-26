@@ -3,12 +3,10 @@ name: Continuous External Queue
 on:
   issues:
     types: [opened]
-  workflow_dispatch:
   schedule:
     - cron: '*/5 * * * *'
 
 permissions:
-  actions: write
   contents: read
   issues: write
 
@@ -28,15 +26,15 @@ jobs:
 
     steps:
       - name: Checkout public runtime
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
 
       - name: Set up Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
         with:
-          node-version: '20'
-
-      - name: Validate queue worker syntax
-        run: node --check runtime/continuous-queue/worker.mjs
+          node-version: '24'
+          package-manager-cache: false
 
       - name: Drain and refill bounded public queue
         env:

@@ -1,6 +1,5 @@
 const ALLOWED_JOB_TYPES = new Set([
   "heartbeat_probe",
-  "utility_search_self_test",
   "intentional_failure_probe",
   "checkpoint_recovery_probe",
 ]);

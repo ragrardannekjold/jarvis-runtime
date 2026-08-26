@@ -23,9 +23,9 @@ The bridge schedule stays disabled until the secrets exist and a manual bridge t
 
 ## Knowledge and Skills Bus
 
-The public bus accepts only inline packets marked `public`. Never place private system details, client data, credentials, investigation targets/results, access telemetry, or threat-intelligence holdings in a queue issue. Skill packets may identify only repository-pinned paths and verifier paths; they are data references and must not introduce arbitrary commands, URLs, downloads, or execution.
+The packet contract and canary are available, but `bus_packet_validate` is not allowed on the public issue queue. GitHub issue bodies are scrapeable and must contain only opaque public control metadata. Never place system details, client data, credentials, investigation targets or results, access telemetry, or threat-intelligence holdings in an issue.
 
-A packet may report observed indicators or missing telemetry. It must never convert missing evidence into a claim that hostile monitoring is absent. Treat suspected Russian, allied, contractor, insider, or supply-chain access as a threat hypothesis that requires authorized, asset-scoped telemetry and independent corroboration.
+Runtime activation requires an authenticated private transport, opaque packet references, independently revocable least-privilege credentials, bounded retention and verified deletion, and a readback bound to the exact packet identity. Missing telemetry remains `UNKNOWN` and must never become a claim that hostile observation is absent.
 
 ## Token scope
 

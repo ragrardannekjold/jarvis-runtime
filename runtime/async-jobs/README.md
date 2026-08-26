@@ -31,4 +31,7 @@ This public fabric MUST NOT carry private investigation text, client data, secre
 
 ## Initial allowlist
 - `heartbeat_probe` — proves dispatch/heartbeat/readback without meaningful compute.
-- `utility_search_self_test` — runs Utility Search tests on an external GitHub runner.
+- `checkpoint_recovery_probe` — verifies recovery from a prior bounded checkpoint.
+- `intentional_failure_probe` — exercises fail-closed status handling.
+
+`utility_search_self_test` is quarantined until its dependency installation and tests run in a separate tokenless job. The issue-writing worker must not launch package managers or repository test code while it holds `GITHUB_TOKEN`.

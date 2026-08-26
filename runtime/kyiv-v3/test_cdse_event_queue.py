@@ -5,6 +5,7 @@ import importlib.util
 import pathlib
 import sys
 import unittest
+from unittest import mock
 
 HERE = pathlib.Path(__file__).resolve().parent
 SPEC = importlib.util.spec_from_file_location("cdse_event_queue", HERE / "cdse_event_queue.py")
@@ -15,6 +16,26 @@ SPEC.loader.exec_module(m)
 
 
 class CDSEEventQueueTests(unittest.TestCase):
+    def test_dispatch_target_is_exact_public_collector(self):
+        class Response:
+            status = 204
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+        with mock.patch.object(m.urllib.request, "urlopen", return_value=Response()) as opened:
+            m.dispatch_refresh("masked-token", "owner/runtime")
+        request = opened.call_args.args[0]
+        self.assertEqual(m.WORKFLOW, "kyiv-v3-public-collector.yml")
+        self.assertEqual(
+            request.full_url,
+            "https://api.github.com/repos/owner/runtime/actions/workflows/kyiv-v3-public-collector.yml/dispatches",
+        )
+        self.assertEqual(request.get_method(), "POST")
+
     def test_filter_is_broad_and_limited_to_sentinel_families(self):
         self.assertIn("SENTINEL-1", m.FILTER)
         self.assertIn("SENTINEL-2", m.FILTER)

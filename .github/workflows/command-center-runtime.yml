@@ -1,73 +1,15 @@
-name: Command Center Public Runtime
+name: Command Center Runtime (Shared Token Disabled)
 
-# EMERGENCY CONTAINMENT 2026-08-16: cross-system background execution is paused.
-# Manual dispatch is preserved for bounded verified recovery work only.
 on:
   workflow_dispatch:
 
-permissions:
-  contents: read
-
-concurrency:
-  group: command-center-public-runtime
-  cancel-in-progress: false
+permissions: {}
 
 jobs:
-  control-plane:
+  command-center-runtime-disabled:
+    if: ${{ false }}
     runs-on: ubuntu-latest
-    timeout-minutes: 20
-
+    timeout-minutes: 1
     steps:
-      - name: Checkout public runtime
-        uses: actions/checkout@v4
-
-      - name: Require private bridge token
-        shell: bash
-        env:
-          COMMAND_CENTER_TOKEN: ${{ secrets.COMMAND_CENTER_TOKEN }}
-        run: |
-          set -euo pipefail
-          test -n "$COMMAND_CENTER_TOKEN" || { echo "COMMAND_CENTER_TOKEN secret is missing"; exit 2; }
-
-      - name: Checkout private command center ephemerally
-        uses: actions/checkout@v4
-        with:
-          repository: ragrardannekjold/jarvis-command-center
-          token: ${{ secrets.COMMAND_CENTER_TOKEN }}
-          ref: main
-          path: command-center
-          fetch-depth: 1
-          persist-credentials: false
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-
-      - name: Test public runtime recovery contracts
-        run: python -m unittest discover -s runtime -p 'test_*.py' -v
-
-      - name: Validate generation-9 stable baseline
-        working-directory: command-center
-        run: |
-          set -euo pipefail
-          python scripts/validate_recovery_floor.py
-          python scripts/validate_stable_operating_state.py
-
-      - name: Execute fail-closed control-plane checks
-        env:
-          COMMAND_CENTER_REPO: ragrardannekjold/jarvis-command-center
-          COMMAND_CENTER_TOKEN: ${{ secrets.COMMAND_CENTER_TOKEN }}
-          COMMAND_CENTER_PATH: command-center
-        run: python runtime/secure_runner.py
-
-      - name: Persist private chat recovery snapshot
-        env:
-          COMMAND_CENTER_REPO: ragrardannekjold/jarvis-command-center
-          COMMAND_CENTER_TOKEN: ${{ secrets.COMMAND_CENTER_TOKEN }}
-        run: python runtime/persist_recovery_snapshot.py --queue /tmp/jarvis-public-runtime/queue.json
-
-      - name: Public-safe summary
-        if: always()
-        run: |
-          echo "Runtime completed. Detailed private output is intentionally not uploaded or printed."
+      - name: Shared-token lane is quarantined
+        run: echo "Disabled pending migration to an isolated short-lived credential."
