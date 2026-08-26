@@ -1,0 +1,32 @@
+name: Knowledge and Skills Bus CI
+
+on:
+  pull_request:
+    paths:
+      - 'runtime/knowledge-skill-bus/**'
+      - 'runtime/continuous-queue/worker.mjs'
+      - '.github/workflows/knowledge-skill-bus-ci.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  contract-and-canary:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Checkout public runtime
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Run bus contract tests
+        run: node --test runtime/knowledge-skill-bus/bus-core.test.mjs
+
+      - name: Emit exact external canary readback
+        run: node runtime/knowledge-skill-bus/canary.mjs

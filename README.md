@@ -36,6 +36,8 @@ The operational passive lane is `.github/workflows/exposure-intelligence.yml`. I
 
 Live runs [#1](https://github.com/ragrardannekjold/jarvis-runtime/actions/runs/32366430482) and [#3](https://github.com/ragrardannekjold/jarvis-runtime/actions/runs/32368379389) verified two separately authorized documentation canaries. Each task used exactly one Shodan query credit; the latest exact-hostname scope retained 41 observations in 42 verified evidence entries. The target, task identifier, observations, IP data, credentials, and exact account balances were absent from public logs. `runtime/exposure-verify-trigger.txt` provides a zero-task commit-triggered route for explicit idempotency readback without waiting for cron.
 
+Knowledge and Skills Bus Core v0.1 lives at `runtime/knowledge-skill-bus/` and is wired to the continuous queue as the useful `bus_packet_validate` job. It accepts only inline public packets, validates deterministic identity, TTL, provenance, lineage, and content integrity, and returns structured gap signals. Skill packets are references only: this lane does not execute supplied code or shell commands. Private transport, autonomous promotion, and claims of absent hostile observation remain disabled.
+
 Phase 1 restores **independent control-plane validation** outside the private repository's billing-blocked GitHub-hosted Actions.
 
 It does **not yet** execute project-native workflows locally. The heartbeat therefore explicitly reports:
