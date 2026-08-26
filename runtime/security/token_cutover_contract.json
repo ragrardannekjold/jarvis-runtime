@@ -160,8 +160,8 @@
     "runtime/async-jobs/contract.mjs": "5d905100806b71ca9428edf5e4454c1e3ec6da3d",
     "runtime/async-jobs/contract.test.mjs": "a9908d14aeacb082aecd6d2bb416281ea346d683",
     "runtime/continuous-queue/worker.mjs": "3525aba2f971040c6324686023ff67230a9e336f",
-    "runtime/anomaly-sentinel/sentinel.mjs": "61c1e2104f61615ada115e62e77230a173069a9c",
-    "runtime/anomaly-sentinel/worker.mjs": "f5067fc4d227959cc6dd1932a9140f5dab7b7c6f"
+    "runtime/anomaly-sentinel/sentinel.mjs": "8964cbe0fd0ae3706c7ba101efebb22bf33395a4",
+    "runtime/anomaly-sentinel/worker.mjs": "f94bae283ea60db7c3ad156f414035b601e09509"
   },
   "phase_order": [
     "SHADOW_BASELINE",

@@ -55,6 +55,8 @@ function activeState(run, incidentClass, reason) {
 export function classifyWorkflowRuns(runs, {
   now = new Date(),
   expectedCancelledWorkflows = [],
+  decommissionedWorkflowIds = [],
+  decommissionedWorkflowNames = [],
   graceMs = 60_000,
   staleMs = 30 * 60_000,
   ignoredWorkflowNames = ["Runtime Anomaly Sentinel"],
@@ -63,6 +65,8 @@ export function classifyWorkflowRuns(runs, {
   const nowMs = now instanceof Date ? now.getTime() : Date.parse(now);
   if (!Number.isFinite(nowMs)) fail("invalid_now");
   const expectedCancelled = new Set(expectedCancelledWorkflows);
+  const decommissionedIds = new Set(decommissionedWorkflowIds);
+  const decommissionedNames = new Set(decommissionedWorkflowNames);
   const ignored = new Set(ignoredWorkflowNames);
   const grouped = new Map();
 
@@ -83,6 +87,21 @@ export function classifyWorkflowRuns(runs, {
     const latest = bucket[0];
     const ageMs = nowMs - timestamp(latest.updated_at || latest.created_at, "run_updated_at");
     if (ageMs < -5 * 60_000) fail("run_timestamp_in_future");
+
+    if (decommissionedIds.has(latest.workflow_id) || decommissionedNames.has(latest.name)) {
+      states.push({
+        state: "DECOMMISSIONED",
+        reason: decommissionedIds.has(latest.workflow_id)
+          ? "workflow path is absent from the current default branch"
+          : "workflow is explicitly retired or quarantined",
+        workflow_id: latest.workflow_id,
+        workflow_name: latest.name,
+        latest_run_id: latest.id,
+        latest_run_url: latest.html_url,
+        observed_at: latest.updated_at || latest.created_at,
+      });
+      continue;
+    }
 
     if (latest.status !== "completed") {
       const createdAgeMs = nowMs - timestamp(latest.created_at, "run_created_at");
@@ -181,9 +200,14 @@ export function planIncidentActions(states, openIncidents = []) {
       }
       continue;
     }
-    if (["HEALTHY", "RECOVERED_INCIDENT"].includes(state.state)) {
+    if (["HEALTHY", "RECOVERED_INCIDENT", "DECOMMISSIONED"].includes(state.state)) {
       for (const incident of matchingWorkflow) {
-        actions.push({ action: "CLOSE", issue_number: incident.issue_number, state, resolution: "RECOVERED" });
+        actions.push({
+          action: "CLOSE",
+          issue_number: incident.issue_number,
+          state,
+          resolution: state.state === "DECOMMISSIONED" ? "DECOMMISSIONED" : "RECOVERED",
+        });
       }
     }
   }

@@ -12,6 +12,14 @@ const runId = requiredEnv("GITHUB_RUN_ID");
 const defaultBranch = requiredEnv("DEFAULT_BRANCH");
 const expectedCancelledWorkflows = (process.env.EXPECTED_CANCEL_WORKFLOWS || "Kyiv V3 public collector")
   .split(",").map((value) => value.trim()).filter(Boolean);
+const decommissionedWorkflowNames = [
+  "AI39 CDSE STAC canary (Shared Token Disabled)",
+  "Command Center Runtime (Shared Token Disabled)",
+  "Legacy Liski Bridge (Retired)",
+  "Main Daily Report (Shared Token Disabled)",
+  "Relay A7 (Shared Token Disabled)",
+  "Checkpoint Parser Repair (Retired)",
+];
 
 function requiredEnv(name) {
   const value = process.env[name];
@@ -67,15 +75,27 @@ async function mapLimit(items, limit, mapper) {
 }
 
 async function loadRecentRuns() {
+  const tree = await githubRequest(
+    `/repos/${repository}/git/trees/${encodeURIComponent(defaultBranch)}?recursive=1`,
+  );
+  if (tree?.truncated || !Array.isArray(tree?.tree)) throw new Error("default_branch_tree_incomplete");
+  const currentWorkflowPaths = new Set(
+    tree.tree
+      .filter((entry) => entry.type === "blob" && /^\.github\/workflows\/[^/]+\.ya?ml$/i.test(entry.path))
+      .map((entry) => entry.path),
+  );
   const workflows = await paginated(`/repos/${repository}/actions/workflows`, "workflows");
   const enabled = workflows.filter((workflow) => workflow.state === "active");
+  const decommissionedWorkflowIds = enabled
+    .filter((workflow) => !currentWorkflowPaths.has(workflow.path))
+    .map((workflow) => workflow.id);
   const runGroups = await mapLimit(enabled, 5, async (workflow) => {
     const response = await githubRequest(
       `/repos/${repository}/actions/workflows/${workflow.id}/runs?branch=${encodeURIComponent(defaultBranch)}&per_page=10&exclude_pull_requests=true`,
     );
     return (response?.workflow_runs || []).map((run) => ({ ...run, name: workflow.name }));
   });
-  return runGroups.flat();
+  return { runs: runGroups.flat(), decommissionedWorkflowIds };
 }
 
 async function loadOpenIncidents() {
@@ -131,9 +151,11 @@ async function executeAction(action) {
 }
 
 async function main() {
-  const runs = await loadRecentRuns();
+  const { runs, decommissionedWorkflowIds } = await loadRecentRuns();
   const states = classifyWorkflowRuns(runs, {
     expectedCancelledWorkflows,
+    decommissionedWorkflowIds,
+    decommissionedWorkflowNames,
     ignoredWorkflowNames: ["Runtime Anomaly Sentinel", "Runtime Anomaly Sentinel CI"],
   });
   const openIncidents = await loadOpenIncidents();
@@ -142,7 +164,7 @@ async function main() {
   for (const action of plan) executed.push(await executeAction(action));
 
   const counts = Object.fromEntries(
-    ["ACTIVE_FAILURE", "RECOVERED_INCIDENT", "EXPECTED_CANCEL", "HEALTHY", "UNKNOWN"]
+    ["ACTIVE_FAILURE", "RECOVERED_INCIDENT", "EXPECTED_CANCEL", "DECOMMISSIONED", "HEALTHY", "UNKNOWN"]
       .map((state) => [state, states.filter((item) => item.state === state).length]),
   );
   console.log(`ANOMALY_SENTINEL_READBACK ${JSON.stringify({

@@ -2,7 +2,7 @@
 
 This source-native Anomaly Bus sentinel observes GitHub Actions directly instead of treating email notifications as the source of truth.
 
-It classifies the latest run per active workflow as `ACTIVE_FAILURE`, `RECOVERED_INCIDENT`, `EXPECTED_CANCEL`, `HEALTHY`, or `UNKNOWN`. Active failures are collapsed into one sanitized `[ANOMALY]` issue per deterministic workflow/incident fingerprint. A newer successful run closes the matching open incident. Repeated scans with the same run produce no write.
+It classifies the latest default-branch run per active workflow as `ACTIVE_FAILURE`, `RECOVERED_INCIDENT`, `EXPECTED_CANCEL`, `DECOMMISSIONED`, `HEALTHY`, or `UNKNOWN`. Active failures are collapsed into one sanitized `[ANOMALY]` issue per deterministic workflow/incident fingerprint. A newer successful run closes the matching open incident. Retired, quarantined, and default-branch-removed workflows close stale incidents as `DECOMMISSIONED`. Repeated scans with the same run produce no write.
 
 ## Security and privacy boundary
 
