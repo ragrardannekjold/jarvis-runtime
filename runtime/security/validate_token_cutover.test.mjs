@@ -404,7 +404,7 @@ test("anomaly sentinel keeps exact default-branch source and authority boundarie
     workflowPath,
     widerWrite.workflows.get(workflowPath).replace(
       "  issues: write",
-      "  issues: write\n  actions: write",
+      "  issues: write\n  models: write",
     ),
   );
   repin(widerWrite, workflowPath);
