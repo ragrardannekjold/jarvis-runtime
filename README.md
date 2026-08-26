@@ -38,6 +38,8 @@ Live runs [#1](https://github.com/ragrardannekjold/jarvis-runtime/actions/runs/3
 
 Knowledge and Skills Bus Core v0.1 lives at `runtime/knowledge-skill-bus/` and is wired to the continuous queue as the useful `bus_packet_validate` job. It accepts only inline public packets, validates deterministic identity, TTL, provenance, lineage, and content integrity, and returns structured gap signals. Skill packets are references only: this lane does not execute supplied code or shell commands. Private transport, autonomous promotion, and claims of absent hostile observation remain disabled.
 
+Live public-queue canary [issue #278](https://github.com/ragrardannekjold/jarvis-runtime/issues/278) completed with `SUCCEEDED` and an exact `BUS_PACKET_READBACK` at 2026-08-26T08:44:11Z. It accepted the deterministic packet and emitted the expected `capability_missing: bus.private_transport` gap.
+
 Phase 1 restores **independent control-plane validation** outside the private repository's billing-blocked GitHub-hosted Actions.
 
 It does **not yet** execute project-native workflows locally. The heartbeat therefore explicitly reports:
