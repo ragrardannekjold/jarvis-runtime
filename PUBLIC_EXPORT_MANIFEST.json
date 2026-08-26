@@ -310,7 +310,7 @@
     }
   },
   "runtime_anomaly_sentinel": {
-    "status": "CI_PENDING",
+    "status": "CI_VERIFIED_MERGE_READY",
     "schema_version": 1,
     "source": "github_actions_public_metadata",
     "schedule": "hourly",
