@@ -1,0 +1,187 @@
+{
+  "schema_version": 1,
+  "phase": "CONTAIN",
+  "legacy_secret": {
+    "name": "COMMAND_CENTER_TOKEN",
+    "same_name_replacement_forbidden": true,
+    "current_binding_count": 7,
+    "current_workflow_count": 2,
+    "historical_rerun_capability": "PENDING_NEUTRALIZATION",
+    "repository_secret_removal": "PENDING_EXTERNAL_ATTESTATION",
+    "underlying_credential_revocation": "PENDING_EXTERNAL_ATTESTATION"
+  },
+  "manual_tombstones": [
+    {
+      "path": ".github/workflows/ai39-cdse-stac-canary.yml",
+      "workflow_name": "AI39 CDSE STAC canary (Shared Token Disabled)",
+      "job_id": "ai39-cdse-stac-canary-disabled",
+      "disposition": "MIGRATE_TO_ISOLATED_AI39_LANE"
+    },
+    {
+      "path": ".github/workflows/command-center-runtime.yml",
+      "workflow_name": "Command Center Runtime (Shared Token Disabled)",
+      "job_id": "command-center-runtime-disabled",
+      "disposition": "MIGRATE"
+    },
+    {
+      "path": ".github/workflows/legacy-liski-bridge-smoke.yml",
+      "workflow_name": "Legacy Liski Bridge (Retired)",
+      "job_id": "legacy-liski-bridge-disabled",
+      "disposition": "RETIRE"
+    },
+    {
+      "path": ".github/workflows/main-daily-report.yml",
+      "workflow_name": "Main Daily Report (Shared Token Disabled)",
+      "job_id": "main-daily-report-disabled",
+      "disposition": "MIGRATE"
+    },
+    {
+      "path": ".github/workflows/relay-a7.yml",
+      "workflow_name": "Relay A7 (Shared Token Disabled)",
+      "job_id": "relay-a7-disabled",
+      "disposition": "MIGRATE_AFTER_UNIQUE_VALUE_PROOF"
+    },
+    {
+      "path": ".github/workflows/repair-checkpoint-parser.yml",
+      "workflow_name": "Checkpoint Parser Repair (Retired)",
+      "job_id": "repair-checkpoint-parser-disabled",
+      "disposition": "RETIRE"
+    }
+  ],
+  "critical_lanes": [
+    {
+      "lane_id": "KYIV_FAST_WATCH",
+      "workflow": ".github/workflows/kyiv-fast-watch.yml",
+      "current_legacy_binding_count": 5,
+      "replacement_secret_names": [
+        "KYIV_CODE_READ_TOKEN",
+        "KYIV_STATE_RW_TOKEN"
+      ]
+    },
+    {
+      "lane_id": "EXPOSURE_LOOKUP",
+      "workflow": ".github/workflows/exposure-intelligence.yml",
+      "current_legacy_binding_count": 1,
+      "replacement_secret_names": [
+        "EXPOSURE_QUEUE_RW_TOKEN"
+      ]
+    },
+    {
+      "lane_id": "INVESTIGATION_PASSIVE_INDEX",
+      "workflow": ".github/workflows/exposure-intelligence.yml",
+      "current_legacy_binding_count": 1,
+      "replacement_secret_names": [
+        "INVESTIGATION_QUEUE_RW_TOKEN"
+      ]
+    }
+  ],
+  "workflow_pins": {
+    ".github/workflows/kyiv-fast-watch.yml": {
+      "git_blob_sha1": "cc6a7e0b31b35015b4449867117213d7e6809311",
+      "legacy_secret_binding_count": 5
+    },
+    ".github/workflows/exposure-intelligence.yml": {
+      "git_blob_sha1": "847315833aaa1c0757fc409e06a8bdea0e00cb9f",
+      "legacy_secret_binding_count": 2
+    },
+    ".github/workflows/kyiv-cdse-event-queue.yml": {
+      "git_blob_sha1": "3943fbd1297fc5b7de0e79a32b903091daf4e629",
+      "legacy_secret_binding_count": 0
+    },
+    ".github/workflows/shodan-runtime-readback.yml": {
+      "git_blob_sha1": "9514d1ca6e38d64b345d3c0b6b7544bd4f2527ef",
+      "legacy_secret_binding_count": 0
+    },
+    ".github/workflows/async-job-worker.yml": {
+      "git_blob_sha1": "083e98b0b71fde01ab82e223d21cbb4aa32208f2",
+      "legacy_secret_binding_count": 0
+    },
+    ".github/workflows/continuous-external-queue.yml": {
+      "git_blob_sha1": "a06242941d968fba6836b39612de4aa3b06719ab",
+      "legacy_secret_binding_count": 0
+    }
+  },
+  "workflow_secret_allowlist": {
+    ".github/workflows/kyiv-fast-watch.yml": [
+      "COMMAND_CENTER_TOKEN",
+      "KYIV_CODE_READ_TOKEN",
+      "KYIV_STATE_RW_TOKEN"
+    ],
+    ".github/workflows/exposure-intelligence.yml": [
+      "COMMAND_CENTER_TOKEN",
+      "SHODAN_API_KEY",
+      "CENSYS_PLATFORM_TOKEN",
+      "CENSYS_ORGANIZATION_ID",
+      "NETLAS_API_KEY",
+      "EXPOSURE_QUEUE_RW_TOKEN",
+      "INVESTIGATION_QUEUE_RW_TOKEN"
+    ],
+    ".github/workflows/kyiv-cdse-event-queue.yml": [
+      "CDSE_USERNAME",
+      "CDSE_PASSWORD"
+    ],
+    ".github/workflows/shodan-runtime-readback.yml": [
+      "SHODAN_API_KEY"
+    ]
+  },
+  "private_code_pins": {
+    ".github/workflows/kyiv-fast-watch.yml": {
+      "repository": "ragrardannekjold/jarvis-command-center",
+      "commit": "b2588be4b7391a40175ab8ca808594f6fb8dc464"
+    }
+  },
+  "privileged_source_pins": {
+    "runtime/exposure_queue_worker.mjs": "6b7c203895edada412ca42646ffb60065c1cc04d",
+    "runtime/investigation_passive_index_worker.mjs": "f4259d73899050479afdc2514d5cfc0b2f93b56a",
+    "runtime/investigation_passive_index.mjs": "99865510cbd62c1bdc476d8f153bed97ca72f192",
+    "runtime/exposure-intelligence/src/assets.mjs": "31012d87cc60be7f361c1b7b93792889b50b20ab",
+    "runtime/exposure-intelligence/src/checkpoint.mjs": "9a846c7bd154097b103b4776281b0e3b700e8da2",
+    "runtime/exposure-intelligence/src/circuit.mjs": "826eb41ab3ae8bd9e63ed9244c12dc1d1b473849",
+    "runtime/exposure-intelligence/src/engine.mjs": "1fea9df9b34d0d7cbbb8d6b8e272cc97be6735f2",
+    "runtime/exposure-intelligence/src/errors.mjs": "56c9780ea52643f82991370c9120796a51fd1a96",
+    "runtime/exposure-intelligence/src/evidence.mjs": "104946aafe471eb25da81c700f99afecf885ce58",
+    "runtime/exposure-intelligence/src/http-response.mjs": "960c67acf51a832f3bcd477b3a7cfb9aa9e8b418",
+    "runtime/exposure-intelligence/src/normalize.mjs": "b7942511021076bd7b1d256ba289999f1e8df8bc",
+    "runtime/exposure-intelligence/src/providers/censys.mjs": "ef46060e740a64cde5e93600cb7c63200442a1a4",
+    "runtime/exposure-intelligence/src/providers/netlas.mjs": "86d4980364006d27e7a24e2606c8999651282c2a",
+    "runtime/exposure-intelligence/src/providers/shodan.mjs": "2efaa28abffdb08fe1906f2ba4c5587bdd877aa0",
+    "runtime/exposure-intelligence/src/queries.mjs": "f3b11e9b48ffefae6efbe28249a934b0b5a6b030",
+    "runtime/exposure-intelligence/src/run-lock.mjs": "369dfc5b6a80ffeb385059b4fb70f5347d39717d",
+    "runtime/exposure-intelligence/src/scope.mjs": "12adda1c5f437eb6f677018bfb42ca96518a6f63",
+    "runtime/exposure-intelligence/src/util.mjs": "a0c4351defd6bb100463c104abe01cf164a0ecb4",
+    "runtime/kyiv-v3/cdse_event_queue.py": "f04ccb25b9adaf32e3a9ad817f0bbc7da2b41040",
+    "runtime/kyiv-v3/cdse_public_delta.py": "efc8680691aac9f60a065a90199994d8d070746e",
+    "runtime/shodan_readback.py": "3e6f32accf59a52bf42a8e5d731ae900df4277b5",
+    "runtime/async-jobs/worker.mjs": "fdb07d194dfbca3cac4559e4963e60c72644efbe",
+    "runtime/async-jobs/contract.mjs": "5d905100806b71ca9428edf5e4454c1e3ec6da3d",
+    "runtime/async-jobs/contract.test.mjs": "a9908d14aeacb082aecd6d2bb416281ea346d683",
+    "runtime/continuous-queue/worker.mjs": "3525aba2f971040c6324686023ff67230a9e336f"
+  },
+  "phase_order": [
+    "SHADOW_BASELINE",
+    "RATCHET",
+    "CONTAIN",
+    "CUTOVER_READY",
+    "ENFORCED"
+  ],
+  "cutover_requires": [
+    "lane credentials use distinct secret names and distinct credential identities",
+    "whole-context and inherited workflow secret access is forbidden",
+    "lane credentials are short lived or independently revocable",
+    "each credential is restricted to its dedicated private repository and minimum contents permission",
+    "scheduled canary readback passes without concurrent consumers",
+    "manual secret-bearing execution remains disabled until protected environment branch rules and approval are externally attested",
+    "continuous public queue has no Actions write authority self-dispatch or package-manager execution",
+    "AI39 uses a distinct externally attested code-read and state-write lane before reactivation",
+    "current main contains zero references to COMMAND_CENTER_TOKEN",
+    "repository organization and environment secret registries attest the old name is absent",
+    "the underlying legacy credential is revoked",
+    "main branch protection and rollback readback pass"
+  ],
+  "repo_only_limit": "Secret values are opaque; repository code cannot prove that differently named secrets contain distinct credentials.",
+  "external_attestation": {
+    "status": "PENDING_EXTERNAL_AUTHORITY",
+    "artifact_sha256": null,
+    "verified_at_utc": null
+  }
+}

@@ -118,8 +118,8 @@ def main() -> int:
     parser.add_argument("--input", required=True, type=Path)
     args = parser.parse_args()
 
-    repo = os.environ.get("COMMAND_CENTER_REPO", "").strip()
-    token = os.environ.get("COMMAND_CENTER_TOKEN", "").strip()
+    repo = os.environ.get("AI39_STATE_REPO", "").strip()
+    token = os.environ.get("AI39_STATE_WRITE_TOKEN", "").strip()
     if not repo or not token:
         print("AI39_CDSE_STAC_CACHE_BRIDGE_NOT_CONFIGURED")
         return 2

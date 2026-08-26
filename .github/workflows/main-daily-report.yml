@@ -1,112 +1,15 @@
-name: Main Daily Control Report
+name: Main Daily Report (Shared Token Disabled)
 
-# EMERGENCY CONTAINMENT 2026-08-16: reporting background execution is paused.
 on:
   workflow_dispatch:
-    inputs:
-      mode:
-        description: Report execution mode
-        required: true
-        default: verification
-        type: choice
-        options:
-          - verification
-          - final
-          - dry-run
-      force:
-        description: Replace an already verified final report for the same Kyiv date
-        required: false
-        default: false
-        type: boolean
 
-permissions:
-  contents: read
-
-concurrency:
-  group: main-daily-control-report
-  cancel-in-progress: false
+permissions: {}
 
 jobs:
-  report:
+  main-daily-report-disabled:
+    if: ${{ false }}
     runs-on: ubuntu-latest
-    timeout-minutes: 15
-
+    timeout-minutes: 1
     steps:
-      - name: Checkout public runtime
-        uses: actions/checkout@v4
-
-      - name: Require private bridge token
-        shell: bash
-        env:
-          COMMAND_CENTER_TOKEN: ${{ secrets.COMMAND_CENTER_TOKEN }}
-        run: |
-          set -euo pipefail
-          test -n "$COMMAND_CENTER_TOKEN" || { echo "COMMAND_CENTER_TOKEN secret is missing"; exit 2; }
-
-      - name: Checkout private command center ephemerally
-        uses: actions/checkout@v4
-        with:
-          repository: ragrardannekjold/jarvis-command-center
-          token: ${{ secrets.COMMAND_CENTER_TOKEN }}
-          ref: main
-          path: command-center
-          fetch-depth: 100
-          persist-credentials: false
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-
-      - name: Compile and test public daily-report runtime
-        run: |
-          set -euo pipefail
-          python -m py_compile \
-            runtime/generate_daily_main_report.py \
-            runtime/resilient_daily_report_runner.py \
-            runtime/select_daily_report_mode.py
-          python -m unittest discover -s runtime -p 'test_*.py' -v
-
-      - name: Validate private command-center contracts
-        run: |
-          set -euo pipefail
-          python command-center/scripts/validate_repo.py
-          PYTHONPATH=command-center/src python -m unittest discover \
-            -s command-center/tests \
-            -p 'test_daily_control_report.py' \
-            -v
-
-      - name: Generate one evidence-first report
-        shell: bash
-        env:
-          COMMAND_CENTER_REPO: ragrardannekjold/jarvis-command-center
-          COMMAND_CENTER_TOKEN: ${{ secrets.COMMAND_CENTER_TOKEN }}
-          DAILY_REPORT_READBACK_ATTEMPTS: '7'
-          DAILY_REPORT_READBACK_BASE_DELAY_SECONDS: '0.5'
-        run: |
-          set -euo pipefail
-          FORCE_ARGS=()
-          MODE="$(python runtime/select_daily_report_mode.py \
-            --event-name "${{ github.event_name }}" \
-            --event-json "$GITHUB_EVENT_PATH" \
-            --dispatch-mode "${{ inputs.mode }}")"
-
-          case "$MODE" in
-            dry-run|verification|final) ;;
-            *) echo "Unexpected report mode: $MODE"; exit 3 ;;
-          esac
-
-          if [[ "${{ github.event_name }}" == "workflow_dispatch" && "${{ inputs.force }}" == "true" ]]; then
-            FORCE_ARGS+=(--force)
-          fi
-
-          echo "SELECTED_REPORT_MODE=$MODE"
-          python runtime/resilient_daily_report_runner.py \
-            --command-center command-center \
-            --mode "$MODE" \
-            "${FORCE_ARGS[@]}"
-
-      - name: Public-safe summary
-        if: always()
-        run: |
-          echo "Daily report runtime completed. Private report content is intentionally not printed or uploaded."
+      - name: Shared-token lane is quarantined
+        run: echo "Disabled pending migration to an isolated short-lived credential."

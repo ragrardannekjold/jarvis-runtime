@@ -1,42 +1,26 @@
 name: Kyiv CDSE scene-event queue
 
 on:
-  push:
-    branches:
-      - main
-    paths:
-      - "runtime/kyiv-v3/cdse_event_queue.py"
-      - "runtime/kyiv-v3/cdse_public_delta.py"
-      - "runtime/kyiv-v3/test_cdse_event_queue.py"
-      - "runtime/kyiv-v3/test_cdse_public_delta.py"
-      - ".github/workflows/kyiv-cdse-event-queue.yml"
-  pull_request:
-    paths:
-      - "runtime/kyiv-v3/cdse_event_queue.py"
-      - "runtime/kyiv-v3/cdse_public_delta.py"
-      - "runtime/kyiv-v3/test_cdse_event_queue.py"
-      - "runtime/kyiv-v3/test_cdse_public_delta.py"
-      - ".github/workflows/kyiv-cdse-event-queue.yml"
-  workflow_dispatch:
   schedule:
     - cron: "1-59/5 * * * *"
 
 permissions:
   contents: read
-  actions: write
 
 concurrency:
   group: kyiv-cdse-event-queue
   cancel-in-progress: false
 
 jobs:
-  validate-and-drain:
+  validate:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
         with:
           python-version: "3.12"
 
@@ -49,8 +33,24 @@ jobs:
             runtime/kyiv-v3/test_cdse_public_delta.py
           python -m unittest discover -s runtime/kyiv-v3 -p "test_cdse_*.py" -v
 
+  drain:
+    needs: validate
+    if: ${{ !cancelled() && needs.validate.result == 'success' && github.event_name == 'schedule' }}
+    permissions:
+      contents: read
+      actions: write
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: "3.12"
+
       - name: Consume new Copernicus scene events
-        if: github.event_name != 'push' && github.event_name != 'pull_request'
         env:
           CDSE_USERNAME: ${{ secrets.CDSE_USERNAME }}
           CDSE_PASSWORD: ${{ secrets.CDSE_PASSWORD }}

@@ -1,18 +1,19 @@
 import { execFile } from "node:child_process";
+import path from "node:path";
 import { promisify } from "node:util";
-import { inspectPacket } from "../knowledge-skill-bus/bus-core.mjs";
+import { fileURLToPath } from "node:url";
 
 const execFileAsync = promisify(execFile);
 const QUEUE_PREFIX = "[QUEUE-JOB]";
 const PLAN_PREFIX = "[QUEUE-PLAN]";
-const INTERNAL_PRODUCER = "continuous_queue_refill_v1";
-const TERMINAL_STATUS_RE = /- state: \*\*(SUCCEEDED|FAILED|REJECTED)\*\*/;
+const INTERNAL_PRODUCER = "continuous_queue_refill_v2";
+const STATUS_EPOCH = "continuous_queue_status_v2";
+const TERMINAL_STATES = new Set(["SUCCEEDED", "FAILED", "REJECTED"]);
+const CANONICAL_UTC_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
 const ALLOWED_JOB_TYPES = new Set([
   "heartbeat_probe",
-  "bus_packet_validate",
   "async_contract_self_test",
   "runtime_syntax_self_test",
-  "utility_search_self_test",
   "sustained_rhythm_verification",
 ]);
 const CANONICAL_ID_RE = /^[A-Za-z0-9._:/#-]{1,128}$/;
@@ -24,6 +25,15 @@ const MAX_QUEUE_DEPTH = 4;
 const MAX_PLAN_TASKS = 32;
 const ISSUE_PAGE_SIZE = 100;
 const MAX_ISSUE_HISTORY_PAGES = 100;
+const RESERVATION_LEASE_MS = 15 * 60 * 1000;
+const TOKENLESS_CHILD_ENV = Object.freeze({});
+const CANONICAL_PAYLOAD_KEYS = ["cell_id", "mission_id", "route_id"];
+const JOB_PAYLOAD_KEYS = new Map([
+  ["heartbeat_probe", CANONICAL_PAYLOAD_KEYS],
+  ["async_contract_self_test", CANONICAL_PAYLOAD_KEYS],
+  ["runtime_syntax_self_test", CANONICAL_PAYLOAD_KEYS],
+  ["sustained_rhythm_verification", [...CANONICAL_PAYLOAD_KEYS, "hold_ms", "probe"]],
+]);
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -33,10 +43,17 @@ function env(name) {
   return value;
 }
 
-const repository = env("GITHUB_REPOSITORY");
-const repositoryOwner = env("REPOSITORY_OWNER");
-const token = env("GITHUB_TOKEN");
-const runId = env("GITHUB_RUN_ID");
+let repository;
+let repositoryOwner;
+let token;
+let runId;
+
+function loadRuntimeEnvironment() {
+  repository = env("GITHUB_REPOSITORY");
+  repositoryOwner = env("REPOSITORY_OWNER");
+  token = env("GITHUB_TOKEN");
+  runId = env("GITHUB_RUN_ID");
+}
 
 async function githubRequest(path, { method = "GET", body } = {}) {
   const response = await fetch(`https://api.github.com${path}`, {
@@ -66,10 +83,44 @@ function canonicalId(value, field) {
   return value;
 }
 
-function validateTaskSpec(task, { requireCanonical = false } = {}) {
+function reservationTimestampMs(value) {
+  if (typeof value !== "string" || !CANONICAL_UTC_RE.test(value)) {
+    throw new Error("invalid_reservation_timestamp");
+  }
+  const timestampMs = Date.parse(value);
+  if (!Number.isFinite(timestampMs) || new Date(timestampMs).toISOString() !== value) {
+    throw new Error("invalid_reservation_timestamp");
+  }
+  return timestampMs;
+}
+
+function assertExactKeys(value, allowedKeys, label) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error(`invalid_${label}`);
+  }
+  const actual = Object.keys(value).sort();
+  const expected = [...allowedKeys].sort();
+  if (actual.length !== expected.length || actual.some((key, index) => key !== expected[index])) {
+    throw new Error(`${label}_fields_not_allowlisted`);
+  }
+}
+
+function assertAllowedKeys(value, allowedKeys, label) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error(`invalid_${label}`);
+  }
+  const allowed = new Set(allowedKeys);
+  if (Object.keys(value).some((key) => !allowed.has(key))) {
+    throw new Error(`${label}_fields_not_allowlisted`);
+  }
+}
+
+export function validateTaskSpec(task, { requireCanonical = false } = {}) {
   if (!task || typeof task !== "object" || Array.isArray(task)) throw new Error("invalid_task");
+  assertExactKeys(task, ["job_type", "payload"], "task");
   if (!ALLOWED_JOB_TYPES.has(task.job_type)) throw new Error("job_type_not_allowlisted");
-  const payload = task.payload ?? {};
+  const payload = task.payload;
+  assertAllowedKeys(payload, JOB_PAYLOAD_KEYS.get(task.job_type), "payload");
   if (Buffer.byteLength(JSON.stringify(payload), "utf8") > MAX_PAYLOAD_BYTES) {
     throw new Error("payload_too_large");
   }
@@ -81,10 +132,18 @@ function validateTaskSpec(task, { requireCanonical = false } = {}) {
   const supplied = Object.values(canonical).filter(Boolean).length;
   if (supplied !== 0 && supplied !== 3) throw new Error("canonical_ids_must_be_complete");
   if (requireCanonical && supplied !== 3) throw new Error("plan_tasks_require_canonical_ids");
+  if (task.job_type === "sustained_rhythm_verification") {
+    if (!["runtime_syntax", "async_contract"].includes(payload.probe)) {
+      throw new Error("invalid_sustained_rhythm_probe");
+    }
+    if (!Number.isInteger(payload.hold_ms) || payload.hold_ms < 90000 || payload.hold_ms > 120000) {
+      throw new Error("invalid_sustained_rhythm_hold_ms");
+    }
+  }
   return { job_type: task.job_type, payload, canonical };
 }
 
-function parseQueueJob(issue) {
+export function parseQueueJob(issue, authorizedOwner = repositoryOwner) {
   if (!issue?.number || issue.pull_request) throw new Error("not_queue_issue");
   if (!issue.title?.startsWith(QUEUE_PREFIX)) throw new Error("not_queue_title");
 
@@ -95,25 +154,40 @@ function parseQueueJob(issue) {
     throw new Error("invalid_json");
   }
 
-  const ownerAuthorized = issue.user?.login === repositoryOwner;
+  const ownerAuthorized = issue.user?.login === authorizedOwner;
   const internalAuthorized = issue.user?.login === "github-actions[bot]" && job.producer === INTERNAL_PRODUCER;
   if (!ownerAuthorized && !internalAuthorized) throw new Error("queue_producer_not_authorized");
+
+  if (ownerAuthorized) {
+    assertExactKeys(
+      job,
+      ["schema_version", "job_type", "sensitivity", "payload"],
+      "queue_job",
+    );
+  } else {
+    assertExactKeys(
+      job,
+      ["schema_version", "producer", "job_type", "sensitivity", "payload"],
+      "queue_job",
+    );
+    if (job.producer !== INTERNAL_PRODUCER) throw new Error("queue_producer_not_authorized");
+  }
 
   if (job.schema_version !== 1) throw new Error("unsupported_schema_version");
   if (job.sensitivity !== "public") throw new Error("public_queue_requires_public_sensitivity");
   if (job.payload_ref !== undefined) throw new Error("private_payload_ref_not_enabled");
 
-  const spec = validateTaskSpec(job);
+  const spec = validateTaskSpec({ job_type: job.job_type, payload: job.payload });
   return {
     issueNumber: issue.number,
     ...spec,
   };
 }
 
-function parsePlanIssue(issue) {
+export function parsePlanIssue(issue, authorizedOwner = repositoryOwner) {
   if (!issue?.number || issue.pull_request) throw new Error("not_plan_issue");
   if (!issue.title?.startsWith(PLAN_PREFIX)) throw new Error("not_plan_title");
-  if (issue.user?.login !== repositoryOwner) throw new Error("plan_owner_mismatch");
+  if (issue.user?.login !== authorizedOwner) throw new Error("plan_owner_mismatch");
 
   let plan;
   try {
@@ -121,6 +195,11 @@ function parsePlanIssue(issue) {
   } catch {
     throw new Error("invalid_plan_json");
   }
+  assertAllowedKeys(
+    plan,
+    ["schema_version", "sensitivity", "plan_id", "target_queue_depth", "tasks", "dispatch_state"],
+    "plan",
+  );
   if (plan.schema_version !== 1) throw new Error("unsupported_plan_schema_version");
   if (plan.sensitivity !== "public") throw new Error("public_plan_requires_public_sensitivity");
   const planId = canonicalId(plan.plan_id, "plan_id");
@@ -140,6 +219,7 @@ function parsePlanIssue(issue) {
   if (!dispatchState || typeof dispatchState !== "object" || Array.isArray(dispatchState)) {
     throw new Error("invalid_dispatch_state");
   }
+  assertExactKeys(dispatchState, ["schema_version", "issued"], "dispatch_state");
   if (dispatchState.schema_version !== 1) throw new Error("unsupported_dispatch_state_schema_version");
   if (!dispatchState.issued || typeof dispatchState.issued !== "object" || Array.isArray(dispatchState.issued)) {
     throw new Error("invalid_dispatch_issued_map");
@@ -148,13 +228,15 @@ function parsePlanIssue(issue) {
   for (const [key, record] of Object.entries(dispatchState.issued)) {
     if (!keys.includes(key)) throw new Error("dispatch_issued_key_not_in_plan");
     if (!record || typeof record !== "object" || Array.isArray(record)) throw new Error("invalid_dispatch_record");
+    assertExactKeys(record, ["issue_number", "reserved_at_utc"], "dispatch_record");
     const issueNumber = record.issue_number ?? null;
     if (issueNumber !== null && (!Number.isInteger(issueNumber) || issueNumber < 1)) {
       throw new Error("invalid_dispatch_issue_number");
     }
+    reservationTimestampMs(record.reserved_at_utc);
     issued.set(key, {
       issue_number: issueNumber,
-      reserved_at_utc: typeof record.reserved_at_utc === "string" ? record.reserved_at_utc : null,
+      reserved_at_utc: record.reserved_at_utc,
     });
   }
   return {
@@ -167,18 +249,22 @@ function parsePlanIssue(issue) {
   };
 }
 
-function taskKey(task) {
-  return [
+export function taskKey(task) {
+  const identity = [
     task.job_type,
     task.canonical?.mission_id || "",
     task.canonical?.route_id || "",
     task.canonical?.cell_id || "",
-  ].join("|");
+  ];
+  if (task.job_type === "sustained_rhythm_verification") {
+    identity.push(task.payload?.probe || "", String(task.payload?.hold_ms ?? ""));
+  }
+  return identity.join("|");
 }
 
-function queueTaskKeyFromIssue(issue) {
+function queueTaskKeyFromIssue(issue, authorizedOwner = repositoryOwner) {
   try {
-    return taskKey(parseQueueJob(issue));
+    return taskKey(parseQueueJob(issue, authorizedOwner));
   } catch {
     return null;
   }
@@ -188,11 +274,13 @@ function renderStatus(job, state, step, detail = null) {
   const lines = [
     "<!-- jarvis-queue-status -->",
     "**CONTINUOUS QUEUE STATUS**",
+    `- status_epoch: ${STATUS_EPOCH}`,
     `- queue_job_id: \`${repository}#${job.issueNumber}/run-${runId}\``,
     job.canonical.mission_id ? `- mission_id: \`${job.canonical.mission_id}\`` : null,
     job.canonical.route_id ? `- route_id: \`${job.canonical.route_id}\`` : null,
     job.canonical.cell_id ? `- cell_id: \`${job.canonical.cell_id}\`` : null,
     `- job_type: \`${job.job_type}\``,
+    `- task_identity: \`${taskKey(job)}\``,
     `- state: **${state}**`,
     `- step: ${step}`,
     `- heartbeat_utc: ${new Date().toISOString()}`,
@@ -239,12 +327,110 @@ async function closeIssue(job) {
   });
 }
 
-async function hasTerminalQueueStatus(issueNumber) {
-  const comments = await githubRequest(`/repos/${repository}/issues/${issueNumber}/comments?per_page=100`);
-  return (comments || []).some((comment) => {
-    const body = comment?.body || "";
-    return body.includes("<!-- jarvis-queue-status -->") && TERMINAL_STATUS_RE.test(body);
-  });
+export async function collectCompletePages(fetchPage, label) {
+  const records = [];
+  for (let page = 1; page <= MAX_ISSUE_HISTORY_PAGES; page += 1) {
+    const pageRecords = await fetchPage(page);
+    if (!Array.isArray(pageRecords)) throw new Error(`invalid_${label}_response`);
+    records.push(...pageRecords);
+    if (pageRecords.length < ISSUE_PAGE_SIZE) return records;
+  }
+  throw new Error(`${label}_completeness_unproven`);
+}
+
+function exactStatusField(lines, field) {
+  const prefix = `- ${field}: `;
+  const matches = lines.filter((line) => line.startsWith(prefix));
+  return matches.length === 1 ? matches[0].slice(prefix.length) : null;
+}
+
+export function authenticTerminalState(comment, job, expectedRepository = repository) {
+  if (comment?.user?.login !== "github-actions[bot]") return null;
+  if (!job || !Number.isInteger(job.issueNumber) || !job.job_type || !job.canonical) return null;
+  if (typeof expectedRepository !== "string" || !expectedRepository) return null;
+  const lines = String(comment.body || "").split("\n");
+  if (lines[0] !== "<!-- jarvis-queue-status -->") return null;
+  if (lines[1] !== "**CONTINUOUS QUEUE STATUS**") return null;
+  if (exactStatusField(lines, "status_epoch") !== STATUS_EPOCH) return null;
+
+  const queueJobId = exactStatusField(lines, "queue_job_id");
+  const queueJobIdPrefix = `\`${expectedRepository}#${job.issueNumber}/run-`;
+  if (!queueJobId?.startsWith(queueJobIdPrefix) || !queueJobId.endsWith("`")) return null;
+  const statusRunId = queueJobId.slice(queueJobIdPrefix.length, -1);
+  if (!/^[0-9]+$/.test(statusRunId)) return null;
+  if (exactStatusField(lines, "job_type") !== `\`${job.job_type}\``) return null;
+  if (exactStatusField(lines, "task_identity") !== `\`${taskKey(job)}\``) return null;
+  if (exactStatusField(lines, "execution_surface") !== "github_actions_continuous_queue") return null;
+  if (exactStatusField(lines, "chat_blocking") !== "false") return null;
+
+  for (const field of CANONICAL_PAYLOAD_KEYS) {
+    const rendered = exactStatusField(lines, field);
+    const expected = job.canonical[field];
+    if (expected ? rendered !== `\`${expected}\`` : rendered !== null) return null;
+  }
+
+  const heartbeat = exactStatusField(lines, "heartbeat_utc");
+  if (!heartbeat || !CANONICAL_UTC_RE.test(heartbeat) || new Date(heartbeat).toISOString() !== heartbeat) {
+    return null;
+  }
+  const stateField = exactStatusField(lines, "state");
+  const match = /^\*\*(SUCCEEDED|FAILED|REJECTED)\*\*$/.exec(stateField || "");
+  return match && TERMINAL_STATES.has(match[1]) ? match[1] : null;
+}
+
+function uniqueAuthenticTerminalState(comments, job, expectedRepository) {
+  const states = new Set(
+    comments
+      .map((comment) => authenticTerminalState(comment, job, expectedRepository))
+      .filter(Boolean),
+  );
+  if (states.size > 1) throw new Error("ambiguous_terminal_status_history");
+  return states.values().next().value ?? null;
+}
+
+export function hasAuthenticTerminalStatus(comments, job, expectedRepository = repository) {
+  return uniqueAuthenticTerminalState(comments, job, expectedRepository) !== null;
+}
+
+async function listIssueComments(issueNumber) {
+  return collectCompletePages(
+    (page) => githubRequest(
+      `/repos/${repository}/issues/${issueNumber}/comments?per_page=${ISSUE_PAGE_SIZE}&page=${page}`,
+    ),
+    "issue_comment_history",
+  );
+}
+
+async function hasTerminalQueueStatus(job) {
+  return hasAuthenticTerminalStatus(
+    await listIssueComments(job.issueNumber),
+    job,
+    repository,
+  );
+}
+
+export function classifyIssuedIssue(
+  issue,
+  expectedTaskKey,
+  comments,
+  authorizedOwner,
+  expectedRepository = repository,
+) {
+  let parsed;
+  try {
+    parsed = parseQueueJob(issue, authorizedOwner);
+  } catch {
+    return "INVALID_EVIDENCE";
+  }
+  if (taskKey(parsed) !== expectedTaskKey) return "INVALID_EVIDENCE";
+  if (issue.state !== "closed") return "ACTIVE";
+  let terminalState;
+  try {
+    terminalState = uniqueAuthenticTerminalState(comments, parsed, expectedRepository);
+  } catch {
+    return "INVALID_EVIDENCE";
+  }
+  return terminalState ? `TERMINAL_${terminalState}` : "UNVERIFIED";
 }
 
 async function runHeartbeat(job) {
@@ -253,74 +439,29 @@ async function runHeartbeat(job) {
   return "continuous queue heartbeat verified";
 }
 
-async function seenBusPacketIdsBefore(issueNumber) {
-  const issues = await listRecentQueueIssuesAllStates();
-  const ids = [];
-  for (const issue of issues) {
-    if (issue.number >= issueNumber || issue.pull_request) continue;
-    let body;
-    try {
-      body = JSON.parse(issue.body || "{}");
-    } catch {
-      continue;
-    }
-    const packetId = body?.job_type === "bus_packet_validate"
-      ? body?.payload?.packet?.packet_id
-      : null;
-    if (typeof packetId === "string") ids.push(packetId);
-  }
-  return ids;
-}
-
-async function runBusPacketValidate(job) {
-  await postStatus(job, "RUNNING", "validate public knowledge/skill packet");
-  const seenPacketIds = await seenBusPacketIdsBefore(job.issueNumber);
-  const receipt = inspectPacket(job.payload?.packet, { seenPacketIds });
-  if (!receipt.accepted) throw new Error("bus_packet_duplicate");
-  return `BUS_PACKET_READBACK ${JSON.stringify(receipt)}`;
-}
-
 async function runAsyncContractSelfTest(job) {
   await postStatus(job, "RUNNING", "node contract tests");
   const { stdout, stderr } = await execFileAsync(
-    "node",
+    process.execPath,
     ["--test", "runtime/async-jobs/contract.test.mjs"],
-    { timeout: 120000, maxBuffer: 1024 * 1024 },
+    { timeout: 120000, maxBuffer: 1024 * 1024, env: TOKENLESS_CHILD_ENV },
   );
   return (stdout || stderr || "contract tests passed").trim().slice(-500);
 }
 
 async function runRuntimeSyntaxSelfTest(job) {
   await postStatus(job, "RUNNING", "runtime syntax checks");
-  await execFileAsync("node", ["--check", "runtime/async-jobs/worker.mjs"], {
+  await execFileAsync(process.execPath, ["--check", "runtime/async-jobs/worker.mjs"], {
     timeout: 60000,
     maxBuffer: 1024 * 1024,
+    env: TOKENLESS_CHILD_ENV,
   });
-  await execFileAsync("node", ["--check", "runtime/continuous-queue/worker.mjs"], {
+  await execFileAsync(process.execPath, ["--check", "runtime/continuous-queue/worker.mjs"], {
     timeout: 60000,
     maxBuffer: 1024 * 1024,
-  });
-  await execFileAsync("node", ["--check", "runtime/knowledge-skill-bus/bus-core.mjs"], {
-    timeout: 60000,
-    maxBuffer: 1024 * 1024,
+    env: TOKENLESS_CHILD_ENV,
   });
   return "runtime syntax checks passed";
-}
-
-async function runUtilitySearchSelfTest(job) {
-  await postStatus(job, "RUNNING", "install utility-search dependencies");
-  await execFileAsync("npm", ["install", "--ignore-scripts", "--no-audit", "--no-fund"], {
-    cwd: "plugin/utility-search",
-    timeout: 180000,
-    maxBuffer: 1024 * 1024,
-  });
-  await postStatus(job, "RUNNING", "execute utility-search tests");
-  const { stdout } = await execFileAsync("npm", ["test"], {
-    cwd: "plugin/utility-search",
-    timeout: 180000,
-    maxBuffer: 1024 * 1024,
-  });
-  return stdout.trim().slice(-500);
 }
 
 async function runSustainedRhythmVerification(job) {
@@ -329,54 +470,72 @@ async function runSustainedRhythmVerification(job) {
   if (!Number.isInteger(holdMs) || holdMs < 90000 || holdMs > 120000) {
     throw new Error("invalid_sustained_rhythm_hold_ms");
   }
-  if (!["runtime_syntax", "async_contract", "utility_search"].includes(probe)) {
+  if (!["runtime_syntax", "async_contract"].includes(probe)) {
     throw new Error("invalid_sustained_rhythm_probe");
   }
   await postStatus(job, "RUNNING", `sustained rhythm hold ${holdMs}ms before ${probe}`);
   await sleep(holdMs);
   if (probe === "runtime_syntax") return runRuntimeSyntaxSelfTest(job);
-  if (probe === "async_contract") return runAsyncContractSelfTest(job);
-  return runUtilitySearchSelfTest(job);
+  return runAsyncContractSelfTest(job);
 }
 
 async function execute(job) {
   if (job.job_type === "heartbeat_probe") return runHeartbeat(job);
-  if (job.job_type === "bus_packet_validate") return runBusPacketValidate(job);
   if (job.job_type === "async_contract_self_test") return runAsyncContractSelfTest(job);
   if (job.job_type === "runtime_syntax_self_test") return runRuntimeSyntaxSelfTest(job);
-  if (job.job_type === "utility_search_self_test") return runUtilitySearchSelfTest(job);
   if (job.job_type === "sustained_rhythm_verification") return runSustainedRhythmVerification(job);
   throw new Error("unreachable_job_type");
 }
 
-async function listIssuesPage(state = "open", page = 1) {
+async function listIssuesPage(state, creator, page) {
   if (!Number.isInteger(page) || page < 1) throw new Error("invalid_issue_page");
   return githubRequest(
-    `/repos/${repository}/issues?state=${state}&sort=created&direction=asc&per_page=${ISSUE_PAGE_SIZE}&page=${page}`,
+    `/repos/${repository}/issues?state=${state}&creator=${encodeURIComponent(creator)}&sort=created&direction=asc&per_page=${ISSUE_PAGE_SIZE}&page=${page}`,
   );
 }
 
-async function listIssues(state = "open") {
-  const allIssues = [];
-  for (let page = 1; page <= MAX_ISSUE_HISTORY_PAGES; page += 1) {
-    const pageIssues = await listIssuesPage(state, page);
-    if (!Array.isArray(pageIssues)) throw new Error("invalid_issue_history_response");
-    allIssues.push(...pageIssues);
-    if (pageIssues.length < ISSUE_PAGE_SIZE) return allIssues;
+async function listIssuesByCreator(state, creator) {
+  return collectCompletePages(
+    (page) => listIssuesPage(state, creator, page),
+    `issue_history_${creator.replaceAll(/[^A-Za-z0-9]/g, "_")}`,
+  );
+}
+
+function uniqueIssues(issueGroups) {
+  const byNumber = new Map();
+  for (const issue of issueGroups.flat()) {
+    if (Number.isInteger(issue?.number)) byNumber.set(issue.number, issue);
   }
-  throw new Error("issue_history_completeness_unproven");
+  return [...byNumber.values()].sort((a, b) => a.number - b.number);
 }
 
 async function listQueueIssues() {
-  const issues = await listIssues("open");
-  return (issues || []).filter((issue) =>
+  const issues = uniqueIssues(await Promise.all([
+    listIssuesByCreator("open", repositoryOwner),
+    listIssuesByCreator("open", "github-actions[bot]"),
+  ]));
+  return issues.filter((issue) =>
     !issue.pull_request && issue.title?.startsWith(QUEUE_PREFIX),
   );
 }
 
+export function assertNoDuplicateQueueTaskKeys(issues, authorizedOwner = repositoryOwner) {
+  const issueByKey = new Map();
+  for (const issue of issues) {
+    let key;
+    try {
+      key = taskKey(parseQueueJob(issue, authorizedOwner));
+    } catch {
+      continue;
+    }
+    if (issueByKey.has(key)) throw new Error("ambiguous_open_queue_task_identity");
+    issueByKey.set(key, issue.number);
+  }
+}
+
 async function listPlanIssues() {
-  const issues = await listIssues("open");
-  const candidates = (issues || []).filter((issue) =>
+  const issues = await listIssuesByCreator("open", repositoryOwner);
+  const candidates = issues.filter((issue) =>
     !issue.pull_request && issue.title?.startsWith(PLAN_PREFIX),
   );
   const fresh = [];
@@ -387,8 +546,11 @@ async function listPlanIssues() {
 }
 
 async function listRecentQueueIssuesAllStates() {
-  const issues = await listIssues("all");
-  return (issues || []).filter((issue) =>
+  const issues = uniqueIssues(await Promise.all([
+    listIssuesByCreator("all", repositoryOwner),
+    listIssuesByCreator("all", "github-actions[bot]"),
+  ]));
+  return issues.filter((issue) =>
     !issue.pull_request && issue.title?.startsWith(QUEUE_PREFIX),
   );
 }
@@ -408,6 +570,71 @@ async function createQueueIssue(plan, task) {
       }),
     },
   });
+}
+
+export function reconcilePlanState(
+  plan,
+  allQueue,
+  { authorizedOwner, nowMs = Date.now() },
+) {
+  if (!Number.isFinite(nowMs)) throw new Error("invalid_reconciliation_time");
+  const candidatesByKey = new Map();
+  for (const issue of allQueue) {
+    const key = queueTaskKeyFromIssue(issue, authorizedOwner);
+    if (!key) continue;
+    const candidates = candidatesByKey.get(key) ?? [];
+    candidates.push(issue);
+    candidatesByKey.set(key, candidates);
+  }
+
+  let changed = false;
+  for (const task of plan.tasks) {
+    const key = taskKey(task);
+    const record = plan.issued.get(key);
+    const candidates = candidatesByKey.get(key) ?? [];
+    if (candidates.length > 1) throw new Error("ambiguous_task_history");
+    if (record) {
+      const reservedAtMs = reservationTimestampMs(record.reserved_at_utc);
+      if (reservedAtMs > nowMs + 60_000) throw new Error("invalid_reservation_timestamp");
+      if (record.issue_number) continue;
+    }
+    if (candidates.length === 1) {
+      plan.issued.set(key, {
+        issue_number: candidates[0].number,
+        reserved_at_utc: record?.reserved_at_utc ?? new Date(nowMs).toISOString(),
+      });
+      changed = true;
+      continue;
+    }
+    if (!record) continue;
+    const reservedAtMs = reservationTimestampMs(record.reserved_at_utc);
+    if (nowMs - reservedAtMs >= RESERVATION_LEASE_MS) {
+      plan.issued.delete(key);
+      changed = true;
+    }
+  }
+  return changed;
+}
+
+export function planCompletionVerified(plan, remaining, inspection) {
+  return remaining.length === 0
+    && inspection.activeOrUnverified === 0
+    && inspection.terminalSucceeded === plan.tasks.length
+    && inspection.terminalFailed === 0
+    && inspection.terminalRejected === 0
+    && inspection.invalidEvidence === 0;
+}
+
+export function planTerminalOutcome(plan, remaining, inspection) {
+  const failed = inspection.terminalFailed > 0
+    || inspection.terminalRejected > 0
+    || inspection.invalidEvidence > 0;
+  if (failed) {
+    return inspection.activeOrUnverified > 0
+      ? "WAITING_FOR_TERMINAL_FAILURE_READBACK"
+      : "FAILED";
+  }
+  return planCompletionVerified(plan, remaining, inspection) ? "COMPLETE" : null;
 }
 
 async function persistPlanDispatchState(plan) {
@@ -434,7 +661,10 @@ async function persistPlanDispatchState(plan) {
 
 async function inspectPlanIssued(plan) {
   let activeOrUnverified = 0;
-  let terminalVerified = 0;
+  let terminalSucceeded = 0;
+  let terminalFailed = 0;
+  let terminalRejected = 0;
+  let invalidEvidence = 0;
   const issueNumbers = new Set();
   for (const [key, record] of plan.issued.entries()) {
     if (!record.issue_number) {
@@ -443,19 +673,39 @@ async function inspectPlanIssued(plan) {
     }
     issueNumbers.add(record.issue_number);
     const issue = await githubRequest(`/repos/${repository}/issues/${record.issue_number}`);
-    const parsed = parseQueueJob(issue);
-    if (taskKey(parsed) !== key) throw new Error("dispatch_issue_identity_mismatch");
-    if (issue.state !== "closed") {
-      activeOrUnverified += 1;
+    const comments = issue.state === "closed"
+      ? await listIssueComments(record.issue_number)
+      : [];
+    const classification = classifyIssuedIssue(issue, key, comments, repositoryOwner, repository);
+    if (classification === "TERMINAL_SUCCEEDED") {
+      terminalSucceeded += 1;
       continue;
     }
-    if (!(await hasTerminalQueueStatus(record.issue_number))) {
-      activeOrUnverified += 1;
+    if (classification === "TERMINAL_FAILED") {
+      terminalFailed += 1;
       continue;
     }
-    terminalVerified += 1;
+    if (classification === "TERMINAL_REJECTED") {
+      terminalRejected += 1;
+      continue;
+    }
+    if (classification === "INVALID_EVIDENCE" || classification === "UNVERIFIED") {
+      invalidEvidence += 1;
+      continue;
+    }
+    if (classification !== "ACTIVE") {
+      throw new Error("unknown_dispatch_issue_classification");
+    }
+    activeOrUnverified += 1;
   }
-  return { activeOrUnverified, terminalVerified, issueNumbers };
+  return {
+    activeOrUnverified,
+    terminalSucceeded,
+    terminalFailed,
+    terminalRejected,
+    invalidEvidence,
+    issueNumbers,
+  };
 }
 
 async function refillFromPlans() {
@@ -478,19 +728,37 @@ async function refillFromPlans() {
     }
 
     const allQueue = await listRecentQueueIssuesAllStates();
-    const historicalSeen = new Set(allQueue.map(queueTaskKeyFromIssue).filter(Boolean));
+    if (reconcilePlanState(plan, allQueue, { authorizedOwner: repositoryOwner })) {
+      await persistPlanDispatchState(plan);
+    }
     const issuedKeys = new Set(plan.issued.keys());
-    const remaining = plan.tasks.filter((task) => {
-      const key = taskKey(task);
-      return !issuedKeys.has(key) && !historicalSeen.has(key);
-    });
+    const remaining = plan.tasks.filter((task) => !issuedKeys.has(taskKey(task)));
 
     const inspection = await inspectPlanIssued(plan);
-    if (remaining.length === 0 && inspection.activeOrUnverified === 0) {
+    const terminalOutcome = planTerminalOutcome(plan, remaining, inspection);
+    if (terminalOutcome === "WAITING_FOR_TERMINAL_FAILURE_READBACK") {
+        return {
+          created: 0,
+          completed,
+          plan_id: plan.plan_id,
+          state: "WAITING_FOR_TERMINAL_FAILURE_READBACK",
+        };
+    }
+    if (terminalOutcome === "FAILED") {
+      await postPlanStatus(
+        plan,
+        "FAILED",
+        `finite plan stopped after failures=${inspection.terminalFailed}; rejected=${inspection.terminalRejected}; invalid_evidence=${inspection.invalidEvidence}`,
+      );
+      await closeIssue(plan);
+      completed += 1;
+      continue;
+    }
+    if (terminalOutcome === "COMPLETE") {
       await postPlanStatus(
         plan,
         "COMPLETE",
-        `all finite plan tasks have durable terminal identity/readback; verified=${inspection.terminalVerified}`,
+        `all finite plan tasks succeeded with durable terminal identity/readback; succeeded=${inspection.terminalSucceeded}`,
       );
       await closeIssue(plan);
       completed += 1;
@@ -572,8 +840,9 @@ async function main() {
       if (directIssue?.state === "open") issue = directIssue;
     }
 
+    const issues = await listQueueIssues();
+    assertNoDuplicateQueueTaskKeys(issues, repositoryOwner);
     if (!issue) {
-      const issues = await listQueueIssues();
       issue = issues.find((candidate) => !seenIssueNumbers.has(candidate.number)) || null;
     }
 
@@ -589,12 +858,6 @@ async function main() {
     }
     seenIssueNumbers.add(issue.number);
 
-    if (await hasTerminalQueueStatus(issue.number)) {
-      await closeIssue({ issueNumber: issue.number });
-      deduped += 1;
-      continue;
-    }
-
     let job;
     try {
       job = parseQueueJob(issue);
@@ -602,6 +865,12 @@ async function main() {
       await rejectAndClose(issue, error);
       processed += 1;
       failed += 1;
+      continue;
+    }
+
+    if (await hasTerminalQueueStatus(job)) {
+      await closeIssue(job);
+      deduped += 1;
       continue;
     }
 
@@ -629,19 +898,9 @@ async function main() {
         ? "PLAN_PENDING_REFILL_OR_DRAIN"
         : "WARM_STANDBY_NO_DEMAND";
 
-  let continuationDispatched = false;
-  let continuationError = null;
-  if (bounded && (queueRemaining > 0 || plansRemaining > 0)) {
-    try {
-      await githubRequest(
-        `/repos/${repository}/actions/workflows/continuous-external-queue.yml/dispatches`,
-        { method: "POST", body: { ref: "main" } },
-      );
-      continuationDispatched = true;
-    } catch (error) {
-      continuationError = String(error.message || error).slice(0, 300);
-    }
-  }
+  const continuationMode = bounded && (queueRemaining > 0 || plansRemaining > 0)
+    ? "NEXT_FIVE_MINUTE_SCHEDULE_TICK"
+    : "NOT_REQUIRED";
 
   console.log(JSON.stringify({
     queue_run_id: runId,
@@ -654,13 +913,15 @@ async function main() {
     queue_remaining: queueRemaining,
     plans_remaining: plansRemaining,
     next_state: nextState,
-    continuation_dispatched: continuationDispatched,
-    continuation_error: continuationError,
+    continuation_mode: continuationMode,
     chat_blocking: false,
     reserve_min_pct: 60,
   }));
-  if (continuationError) throw new Error(`continuation_dispatch_failed:${continuationError}`);
 }
 
-await main();
-
+const isMain = process.argv[1]
+  && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
+if (isMain) {
+  loadRuntimeEnvironment();
+  await main();
+}

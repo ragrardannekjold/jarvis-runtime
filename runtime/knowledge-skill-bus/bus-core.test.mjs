@@ -1,6 +1,5 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { existsSync } from "node:fs";
 import { deriveGapSignals, inspectPacket, sealPacket, stableJson, validatePacket } from "./bus-core.mjs";
 
 const NOW = new Date("2026-08-26T09:00:00.000Z");
@@ -122,8 +121,7 @@ test("stable JSON ignores object key insertion order", () => {
   assert.equal(stableJson({ b: 2, a: 1 }), stableJson({ a: 1, b: 2 }));
 });
 
-test("continuous queue contains the bus validation route", { skip: !existsSync("runtime/continuous-queue/worker.mjs") }, async () => {
+test("scrapeable public queue keeps inline bus packets quarantined", async () => {
   const source = await import("node:fs/promises").then((fs) => fs.readFile("runtime/continuous-queue/worker.mjs", "utf8"));
-  assert.match(source, /"bus_packet_validate"/);
-  assert.match(source, /runBusPacketValidate/);
+  assert.doesNotMatch(source, /"bus_packet_validate"|runBusPacketValidate/);
 });

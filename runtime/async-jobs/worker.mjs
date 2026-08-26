@@ -1,9 +1,5 @@
 import fs from "node:fs";
-import { execFile } from "node:child_process";
-import { promisify } from "node:util";
 import { parseJobBody, buildStatus, extractCanonicalIds } from "./contract.mjs";
-
-const execFileAsync = promisify(execFile);
 
 function readEvent() {
   const eventPath = process.env.GITHUB_EVENT_PATH;
@@ -78,27 +74,6 @@ async function runHeartbeatProbe(context) {
   await postStatus(context, "RUNNING", "2/2 heartbeat confirmed");
   await sleep(1000);
   return "external worker heartbeat path verified";
-}
-
-async function runUtilitySearchSelfTest(context) {
-  await postStatus(context, "RUNNING", "1/3 install utility-search dependencies");
-  await execFileAsync(
-    "npm",
-    ["install", "--ignore-scripts", "--no-audit", "--no-fund"],
-    {
-      cwd: "plugin/utility-search",
-      timeout: 180000,
-      maxBuffer: 1024 * 1024,
-    },
-  );
-  await postStatus(context, "RUNNING", "2/3 execute utility-search tests");
-  const { stdout } = await execFileAsync("npm", ["test"], {
-    cwd: "plugin/utility-search",
-    timeout: 180000,
-    maxBuffer: 1024 * 1024,
-  });
-  await postStatus(context, "RUNNING", "3/3 tests complete", stdout.trim().slice(-240));
-  return "utility-search tests passed on external GitHub runner";
 }
 
 async function runIntentionalFailureProbe(context) {
@@ -178,7 +153,6 @@ async function main() {
     await postStatus(context, "ACCEPTED", `job_type=${job.job_type}`);
     let result;
     if (job.job_type === "heartbeat_probe") result = await runHeartbeatProbe(context);
-    else if (job.job_type === "utility_search_self_test") result = await runUtilitySearchSelfTest(context);
     else if (job.job_type === "intentional_failure_probe") result = await runIntentionalFailureProbe(context);
     else if (job.job_type === "checkpoint_recovery_probe") result = await runCheckpointRecoveryProbe(context, job);
     else throw new Error("unreachable_job_type");

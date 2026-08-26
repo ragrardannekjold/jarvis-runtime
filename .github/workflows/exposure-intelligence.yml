@@ -1,22 +1,8 @@
 name: Private Exposure Intelligence
 
 on:
-  workflow_dispatch:
   schedule:
     - cron: '7,22,37,52 * * * *'
-  push:
-    branches:
-      - main
-    paths:
-      - '.github/workflows/exposure-intelligence.yml'
-      - 'runtime/exposure_queue_worker.mjs'
-      - 'runtime/test_exposure_queue_worker.mjs'
-      - 'runtime/investigation_passive_index.mjs'
-      - 'runtime/investigation_passive_index_worker.mjs'
-      - 'runtime/test_investigation_passive_index.mjs'
-      - 'runtime/test_investigation_passive_index_worker.mjs'
-      - 'runtime/exposure-intelligence/**'
-      - 'runtime/exposure-verify-trigger.txt'
 
 permissions:
   contents: read
@@ -26,20 +12,42 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  passive-read:
+  boundary-tests:
     runs-on: ubuntu-latest
     timeout-minutes: 8
     steps:
       - name: Checkout owner-controlled public runtime
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
         with:
           node-version: '24'
+          package-manager-cache: false
 
       - name: Regression-test passive exposure boundary
         run: node --test runtime/exposure-intelligence/test/*.test.mjs runtime/test_exposure_queue_worker.mjs runtime/test_investigation_passive_index.mjs runtime/test_investigation_passive_index_worker.mjs
+
+  passive-read:
+    needs: boundary-tests
+    if: ${{ !cancelled() && github.event_name == 'schedule' && needs.boundary-tests.result == 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - name: Checkout exact owner-controlled public runtime
+        id: runtime_checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+
+      - name: Set up Node.js
+        id: runtime_node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: '24'
+          package-manager-cache: false
 
       - name: Execute one authorized private task
         shell: bash
@@ -61,7 +69,7 @@ jobs:
           node runtime/exposure_queue_worker.mjs
 
       - name: Execute one risk-gated passive Investigation enrichment task
-        if: always()
+        if: ${{ !cancelled() && needs.boundary-tests.result == 'success' && steps.runtime_checkout.outcome == 'success' && steps.runtime_node.outcome == 'success' }}
         shell: bash
         env:
           COMMAND_CENTER_TOKEN: ${{ secrets.COMMAND_CENTER_TOKEN }}

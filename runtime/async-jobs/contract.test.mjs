@@ -70,6 +70,14 @@ test("rejects unallowlisted job types", () => {
   })), /job_type_not_allowlisted/);
 });
 
+test("quarantines dependency-installing utility search jobs from the token-bearing worker", () => {
+  assert.throws(() => parseJobBody(JSON.stringify({
+    schema_version: 1,
+    job_type: "utility_search_self_test",
+    sensitivity: "public",
+  })), /job_type_not_allowlisted/);
+});
+
 test("status advertises policy target and durable canonical checkpoint", () => {
   const status = buildStatus({
     repository: "owner/repo",

@@ -1,6 +1,6 @@
 # Knowledge and Skills Bus Core v0.1
 
-This module adds the first useful, external-queue-safe Knowledge Bus and Skills Bus contract. A queue issue is the durable public envelope; the worker validates an inline packet and posts an exact receipt containing its deterministic identity, content hash, and structured gap signals.
+This module provides a deterministic Knowledge Bus and Skills Bus contract plus a local canary. It is not connected to the public issue queue: inline issue bodies are scrapeable and cannot provide the confidentiality boundary required for system knowledge.
 
 ## What v0.1 does
 
@@ -11,31 +11,23 @@ This module adds the first useful, external-queue-safe Knowledge Bus and Skills 
 - never executes skill content, shell strings, arbitrary URLs, or third-party scans;
 - leaves private transport and promotion to production disabled.
 
-This is a contract and transport canary, not autonomous self-modification. A later repair lane should use `observe -> diagnose -> repair_spec -> canary -> independent_verify -> promote_or_rollback` with separate authority at promotion.
+This is a contract canary, not autonomous self-modification. A later repair lane should use `observe -> diagnose -> repair_spec -> canary -> independent_verify -> promote_or_rollback` with separate authority at promotion.
 
-## External queue job
+## Transport state
 
-Create an owner-authored `[QUEUE-JOB]` issue with the existing queue envelope:
+`bus_packet_validate` is deliberately absent from the public queue allowlist. Do not place a packet in a GitHub issue, even when it is labelled public. The next transport must provide:
 
-```json
-{
-  "schema_version": 1,
-  "job_type": "bus_packet_validate",
-  "sensitivity": "public",
-  "payload": {
-    "mission_id": "BUS-CORE-001",
-    "route_id": "KNOWLEDGE-SKILLS",
-    "cell_id": "PACKET-001",
-    "packet": "<sealed packet object>"
-  }
-}
-```
+- an authenticated private channel;
+- opaque queue references rather than inline packet bodies;
+- independently revocable least-privilege credentials;
+- bounded retention and verified deletion;
+- an auditable readback bound to the packet identity.
 
-The whole queue payload remains subject to the queue's 2048-byte limit. `packet_id` and `provenance.content_sha256` must be produced by `sealPacket`; consumers must use `inspectPacket`.
+Until those gates are externally attested, the module and canary remain usable locally and in read-only CI, while the runtime route stays quarantined.
 
 ## Security meaning
 
-The public bus can prove only what its inputs and evidence chain support. Missing telemetry must be reported as `UNKNOWN`, never as proof that hostile observation is absent. Sensitive system, client, investigation, access, or threat-intelligence data belongs only in a future authenticated private transport and must never be placed in this public queue.
+The bus can prove only what its inputs and evidence chain support. Missing telemetry must be reported as `UNKNOWN`, never as proof that hostile observation is absent. Sensitive system, client, investigation, access, or threat-intelligence data belongs only in a future authenticated private transport and must never be placed in a public issue.
 
 Run locally:
 
