@@ -310,7 +310,7 @@
     }
   },
   "runtime_anomaly_sentinel": {
-    "status": "CI_VERIFIED_MERGE_READY",
+    "status": "PRODUCTION_ACTIVE_CANARY_VERIFIED",
     "schema_version": 1,
     "source": "github_actions_public_metadata",
     "schedule": "hourly",
@@ -319,6 +319,15 @@
     "expected_cancellation_separate": true,
     "rerun_or_repair_authority": false,
     "mailbox_content_read": false,
-    "private_content_publication": false
+    "private_content_publication": false,
+    "latest_main_canary": {
+      "run_id": 32969965585,
+      "observed_utc": "2026-08-26T12:42:18.111Z",
+      "workflows_observed": 21,
+      "active_failures": 0,
+      "unknown_states": 0,
+      "decommissioned": 7,
+      "closed_issue_numbers": [283, 284, 285]
+    }
   }
 }

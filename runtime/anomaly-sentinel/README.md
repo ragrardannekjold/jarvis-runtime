@@ -18,3 +18,7 @@ Run locally:
 node --test runtime/anomaly-sentinel/sentinel.test.mjs
 node runtime/anomaly-sentinel/canary.mjs
 ```
+
+## Production verification
+
+Main-branch canary [run 32969965585](https://github.com/ragrardannekjold/jarvis-runtime/actions/runs/32969965585) completed successfully on 2026-08-26. It observed 21 workflows, reported zero active failures and zero unknown states, and closed stale issues #284 and #285 as `DECOMMISSIONED`. Issue #283 was already closed and its durable record was corrected to the same resolution.
