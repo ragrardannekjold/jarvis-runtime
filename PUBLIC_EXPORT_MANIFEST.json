@@ -233,7 +233,7 @@
     "automatic_google_drive_delivery_claimed": false
   },
   "knowledge_skill_bus": {
-    "status": "PUBLIC_QUEUE_VALIDATION_READY",
+    "status": "LIVE_VERIFIED_PUBLIC_QUEUE",
     "schema_version": 1,
     "enabled_job_type": "bus_packet_validate",
     "public_inline_packets_only": true,
@@ -243,6 +243,16 @@
     "arbitrary_command_or_url_execution": false,
     "private_transport_enabled": false,
     "autonomous_production_promotion": false,
-    "hostile_observation_absence_claimed": false
+    "hostile_observation_absence_claimed": false,
+    "live_canary": {
+      "issue_number": 278,
+      "queue_run_id": 32949269297,
+      "verified_utc": "2026-08-26T08:44:11.451Z",
+      "state": "SUCCEEDED",
+      "accepted": true,
+      "packet_id": "bus:v1:knowledge:417e93afab1381184fab3aa591fbe1e464d4c401ae9a7a0da74f8b02c6819efa",
+      "deterministic_gap_type": "capability_missing",
+      "detected_gap": "bus.private_transport"
+    }
   }
 }
