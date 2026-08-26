@@ -27,6 +27,12 @@ The packet contract and canary are available, but `bus_packet_validate` is not a
 
 Runtime activation requires an authenticated private transport, opaque packet references, independently revocable least-privilege credentials, bounded retention and verified deletion, and a readback bound to the exact packet identity. Missing telemetry remains `UNKNOWN` and must never become a claim that hostile observation is absent.
 
+## Runtime Anomaly Sentinel
+
+The source-native sentinel may publish only public GitHub workflow name, run URL/ID, bounded timestamps, state class, occurrence count, and deterministic fingerprint. It must not publish actor identity, commit messages, event inputs, mailbox content or addresses, private-repository facts, credentials, attachments, investigation data, user/client data, or arbitrary API responses.
+
+The sentinel records and resolves incidents but never reruns workflows, changes permissions, rotates credentials, or follows links from email. Unallowlisted cancellation and incomplete coverage remain `UNKNOWN`.
+
 ## Token scope
 
 Use a fine-grained token limited to the one private command-center repository. Start with `Contents: Read and write` only. Add another permission only when a verified runtime requirement cannot be satisfied without it.

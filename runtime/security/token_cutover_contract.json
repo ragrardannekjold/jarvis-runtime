@@ -99,6 +99,10 @@
     ".github/workflows/continuous-external-queue.yml": {
       "git_blob_sha1": "a06242941d968fba6836b39612de4aa3b06719ab",
       "legacy_secret_binding_count": 0
+    },
+    ".github/workflows/runtime-anomaly-sentinel.yml": {
+      "git_blob_sha1": "5df49f48129bebb4ac632d9cef8675535a74b7b6",
+      "legacy_secret_binding_count": 0
     }
   },
   "workflow_secret_allowlist": {
@@ -155,7 +159,9 @@
     "runtime/async-jobs/worker.mjs": "fdb07d194dfbca3cac4559e4963e60c72644efbe",
     "runtime/async-jobs/contract.mjs": "5d905100806b71ca9428edf5e4454c1e3ec6da3d",
     "runtime/async-jobs/contract.test.mjs": "a9908d14aeacb082aecd6d2bb416281ea346d683",
-    "runtime/continuous-queue/worker.mjs": "3525aba2f971040c6324686023ff67230a9e336f"
+    "runtime/continuous-queue/worker.mjs": "3525aba2f971040c6324686023ff67230a9e336f",
+    "runtime/anomaly-sentinel/sentinel.mjs": "61c1e2104f61615ada115e62e77230a173069a9c",
+    "runtime/anomaly-sentinel/worker.mjs": "f5067fc4d227959cc6dd1932a9140f5dab7b7c6f"
   },
   "phase_order": [
     "SHADOW_BASELINE",

@@ -120,7 +120,14 @@
     "plugin/utility-search/tests/fixtures/catalog.json",
     "plugin/utility-search/README.md",
     "README.md",
-    "SECURITY.md"
+    "SECURITY.md",
+    ".github/workflows/runtime-anomaly-sentinel-ci.yml",
+    ".github/workflows/runtime-anomaly-sentinel.yml",
+    "runtime/anomaly-sentinel/README.md",
+    "runtime/anomaly-sentinel/sentinel.mjs",
+    "runtime/anomaly-sentinel/worker.mjs",
+    "runtime/anomaly-sentinel/sentinel.test.mjs",
+    "runtime/anomaly-sentinel/canary.mjs"
   ],
   "deny_private_paths": [
     "projects/",
@@ -301,5 +308,17 @@
       "security_attestation_accepted": false,
       "legacy_v1_public_transport_now_quarantined": true
     }
+  },
+  "runtime_anomaly_sentinel": {
+    "status": "CI_VERIFIED_MERGE_READY",
+    "schema_version": 1,
+    "source": "github_actions_public_metadata",
+    "schedule": "hourly",
+    "active_failure_dedupe": true,
+    "recovery_closes_incident": true,
+    "expected_cancellation_separate": true,
+    "rerun_or_repair_authority": false,
+    "mailbox_content_read": false,
+    "private_content_publication": false
   }
 }
