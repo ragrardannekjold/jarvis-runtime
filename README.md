@@ -40,6 +40,8 @@ Knowledge and Skills Bus Core v0.1 lives at `runtime/knowledge-skill-bus/` as a 
 
 Historical public-queue canary [issue #278](https://github.com/ragrardannekjold/jarvis-runtime/issues/278) reported a successful deterministic packet readback and the expected `capability_missing: bus.private_transport` gap. That legacy-v1 observation is retained as feature evidence, not accepted as a security attestation; the scrapeable inline route is now quarantined.
 
+Runtime Anomaly Sentinel v0.1 lives at `runtime/anomaly-sentinel/`. It observes GitHub Actions at the source, collapses repeated active failures into one sanitized `[ANOMALY]` issue, and closes the issue after a newer successful run. Expected concurrency cancellations remain distinct from outages. The hourly worker never reads mailbox content and never retries failed workflows.
+
 Phase 1 restores **independent control-plane validation** outside the private repository's billing-blocked GitHub-hosted Actions.
 
 It does **not yet** execute project-native workflows locally. The heartbeat therefore explicitly reports:

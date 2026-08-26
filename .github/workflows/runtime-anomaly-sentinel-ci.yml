@@ -1,0 +1,31 @@
+name: Runtime Anomaly Sentinel CI
+
+on:
+  pull_request:
+    paths:
+      - 'runtime/anomaly-sentinel/**'
+      - '.github/workflows/runtime-anomaly-sentinel*.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  contract-and-canary:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout public runtime
+        uses: actions/checkout@v4
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Syntax checks
+        run: |
+          node --check runtime/anomaly-sentinel/sentinel.mjs
+          node --check runtime/anomaly-sentinel/worker.mjs
+      - name: Contract tests
+        run: node --test runtime/anomaly-sentinel/sentinel.test.mjs
+      - name: Exact offline canary
+        run: node runtime/anomaly-sentinel/canary.mjs

@@ -1,0 +1,34 @@
+name: Runtime Anomaly Sentinel
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '23 * * * *'
+
+permissions:
+  actions: read
+  contents: read
+  issues: write
+
+concurrency:
+  group: runtime-anomaly-sentinel
+  cancel-in-progress: false
+
+jobs:
+  observe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - name: Checkout public runtime
+        uses: actions/checkout@v4
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Contract gate
+        run: node --test runtime/anomaly-sentinel/sentinel.test.mjs
+      - name: Scan source workflow state and reconcile incidents
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          EXPECTED_CANCEL_WORKFLOWS: Kyiv V3 public collector
+        run: node runtime/anomaly-sentinel/worker.mjs
