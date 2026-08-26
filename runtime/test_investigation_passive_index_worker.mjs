@@ -1,10 +1,16 @@
 import assert from "node:assert/strict";
-import { createHash } from "node:crypto";
+import { createHash, createHmac } from "node:crypto";
 import test from "node:test";
-import { runOne } from "./investigation_passive_index_worker.mjs";
+import {
+  buildCapabilityRndReceipt,
+  runOne,
+  verifyCapabilityRndReceipt,
+} from "./investigation_passive_index_worker.mjs";
 
 const fixedNowMs = Date.parse("2026-08-20T13:30:00.000Z");
 const now = () => fixedNowMs;
+const RECEIPT_KEY_HEX = "11".repeat(32);
+const RECEIPT_KEY_ENV = "JARVIS_CAPRND_RUNTIME_RECEIPT_HMAC_KEY_HEX";
 
 function task(overrides = {}) {
   return {
@@ -30,6 +36,7 @@ function task(overrides = {}) {
     max_query_credits: 1,
     created_at: "2026-08-20T13:25:00.000Z",
     expires_at: "2026-08-21T13:25:00.000Z",
+    runtime_context_binding_sha256: "7".repeat(64),
     authorization: {
       basis: "PUBLIC_AUTHORITATIVE_ENTITY_ANCHORS",
       approved_by: "owner",
@@ -82,6 +89,21 @@ function githubFile(document, sha = "a".repeat(40)) {
 
 function documentSha256(document) {
   return createHash("sha256").update(`${JSON.stringify(document, null, 2)}\n`).digest("hex");
+}
+
+function canonicalJson(value) {
+  if (value === null) return "null";
+  if (["string", "boolean", "number"].includes(typeof value)) return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
+  return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${canonicalJson(value[key])}`).join(",")}}`;
+}
+
+function expectedReceiptMac(receipt, keyHex = RECEIPT_KEY_HEX) {
+  const { attestation, ...payload } = receipt;
+  const { mac: _mac, ...metadata } = attestation;
+  return createHmac("sha256", Buffer.from(keyHex, "hex"))
+    .update(canonicalJson({ payload, attestation: metadata }))
+    .digest("hex");
 }
 
 test("idle private Investigation queue sends no provider request", async () => {
@@ -141,7 +163,11 @@ test("worker keeps normalized intelligence private and exposes only safe status 
   };
 
   const result = await runOne({
-    env: { COMMAND_CENTER_TOKEN: "private-token", SHODAN_API_KEY: "shodan-secret" },
+    env: {
+      COMMAND_CENTER_TOKEN: "private-token",
+      SHODAN_API_KEY: "shodan-secret",
+      [RECEIPT_KEY_ENV]: RECEIPT_KEY_HEX,
+    },
     now,
     fetchImpl,
   });
@@ -156,8 +182,124 @@ test("worker keeps normalized intelligence private and exposes only safe status 
   assert.equal(puts[1].result.observations[0].ip, "192.0.2.10");
   assert.equal(puts[1].result.observations[0].port, 443);
   assert.deepEqual(puts[1].result.observations[0].vulnerabilities, [{ cve: "CVE-2026-12345", verified: true }]);
+  assert.deepEqual(Object.keys(puts[1]).sort(), [
+    "attestation", "capability", "completed_at", "execution_contract", "private_only",
+    "project_id", "request_sha256", "result", "runtime_context_binding_sha256",
+    "schema_version", "started_at", "status", "task_id",
+  ].sort());
+  assert.deepEqual(Object.keys(puts[1].result).sort(), [
+    "additional_monetary_spend_usd", "capability", "collected_at", "error_code",
+    "observations", "parent_investigation_effect", "private_only", "project_id",
+    "provider", "provider_requests_sent", "quality_metrics", "query_credit_max",
+    "query_credit_min", "query_credits_spent", "schema_version", "status", "task_id",
+  ].sort());
+  assert.deepEqual(Object.keys(puts[1].attestation).sort(), [
+    "algorithm", "expires_at", "issued_at", "issuer", "key_id", "mac", "nonce",
+    "purpose", "schema_version",
+  ].sort());
+  assert.equal(puts[1].runtime_context_binding_sha256, privateTask.runtime_context_binding_sha256);
+  assert.deepEqual(puts[1].execution_contract.runtime_validator, {
+    path: "runtime/investigation_passive_index.mjs",
+    git_blob_sha: "ba3ea46885ccaeb1735c2efaf3a142084f2513c3",
+  });
+  assert.equal(puts[1].attestation.algorithm, "HMAC-SHA256");
+  assert.equal(puts[1].attestation.issuer, "capability.private-runtime");
+  assert.equal(puts[1].attestation.key_id, "CAPRND_RUNTIME_RECEIPT_V1");
+  assert.equal(puts[1].attestation.purpose, "CAPABILITY_RND_RUNTIME_RECEIPT");
+  assert.equal(puts[1].attestation.issued_at, puts[1].completed_at);
+  assert.equal(puts[1].attestation.mac, expectedReceiptMac(puts[1]));
+  assert.equal(puts[1].result.parent_investigation_effect, "NONE_UNTIL_INDEPENDENT_CORROBORATION");
+  assert.equal(puts[1].result.quality_metrics.active_scans, 0);
+  assert.equal(puts[1].result.quality_metrics.raw_banners_persisted, 0);
   assert.doesNotMatch(JSON.stringify(puts[1]), /IGNORE PREVIOUS|shodan-secret|private-token/);
   assert.doesNotMatch(JSON.stringify(result), /example\.com|192\.0\.2\.10|443|CVE-2026-12345|shodan-secret|private-token/);
+});
+
+test("receipt signing uses only the fixed purpose-separated key and rejects tamper or invalid lifetime", () => {
+  const privateTask = task();
+  const startedAt = "2026-08-20T13:30:00.000Z";
+  const completedAt = "2026-08-20T13:31:00.000Z";
+  const providerResult = {
+    status: "COMPLETE",
+    error_code: null,
+    additional_monetary_spend_usd: 0,
+    provider_requests_sent: 1,
+    query_credits_spent: 0,
+    query_credit_min: 0,
+    query_credit_max: 0,
+    collected_at: completedAt,
+    observations: [],
+    quality_metrics: {
+      normalized_observations: 0,
+      dropped_out_of_exact_scope: 0,
+      active_scans: 0,
+      raw_banners_persisted: 0,
+    },
+  };
+  assert.throws(
+    () => buildCapabilityRndReceipt(privateTask, "a".repeat(64), providerResult, startedAt, completedAt, { env: {} }),
+    { code: "CAPRND_RUNTIME_RECEIPT_KEY_MISSING" },
+  );
+  const env = { [RECEIPT_KEY_ENV]: RECEIPT_KEY_HEX };
+  const receipt = buildCapabilityRndReceipt(
+    privateTask,
+    "a".repeat(64),
+    providerResult,
+    startedAt,
+    completedAt,
+    { env },
+  );
+  assert.equal(receipt.attestation.nonce, `receipt-${privateTask.task_id}`);
+  assert.equal(receipt.attestation.mac, "97605d02ca8524668ff45a7791dc32679c26c3e6170fad5ca35ac98531a510c3");
+  assert.equal(verifyCapabilityRndReceipt(receipt, { env }), receipt);
+
+  const tampered = structuredClone(receipt);
+  tampered.result.provider_requests_sent += 1;
+  assert.throws(
+    () => verifyCapabilityRndReceipt(tampered, { env }),
+    { code: "CAPRND_RECEIPT_ATTESTATION_INVALID" },
+  );
+  assert.throws(
+    () => verifyCapabilityRndReceipt(receipt, { env: { [RECEIPT_KEY_ENV]: "22".repeat(32) } }),
+    { code: "CAPRND_RECEIPT_ATTESTATION_INVALID" },
+  );
+
+  const overlong = structuredClone(receipt);
+  overlong.attestation.expires_at = "2026-08-20T15:31:00.000Z";
+  overlong.attestation.mac = expectedReceiptMac(overlong);
+  assert.throws(
+    () => verifyCapabilityRndReceipt(overlong, { env }),
+    { code: "CAPRND_RECEIPT_ATTESTATION_INVALID" },
+  );
+});
+
+test("missing runtime receipt key stops before any provider call or private write", async () => {
+  const privateTask = task();
+  let providerRequests = 0;
+  let writes = 0;
+  const fetchImpl = async (url, options = {}) => {
+    const parsed = new URL(url);
+    if (parsed.hostname !== "api.github.com") {
+      providerRequests += 1;
+      throw new Error("provider must not run");
+    }
+    if (options.method === "PUT") {
+      writes += 1;
+      throw new Error("private receipt must not be written without an attestation key");
+    }
+    if (parsed.pathname.endsWith("/runtime/investigation/queue/pending")) {
+      return jsonResponse([{ type: "file", name: `${privateTask.task_id}.json`, path: `runtime/investigation/queue/pending/${privateTask.task_id}.json` }]);
+    }
+    if (parsed.pathname.endsWith(`/runtime/investigation/queue/pending/${privateTask.task_id}.json`)) return jsonResponse(githubFile(privateTask));
+    if (parsed.pathname.endsWith(`/runtime/investigation/results/${privateTask.task_id}.json`)) return jsonResponse({ message: "not found" }, 404);
+    throw new Error(`unexpected path ${parsed.pathname}`);
+  };
+  await assert.rejects(
+    runOne({ env: { COMMAND_CENTER_TOKEN: "private-token", SHODAN_API_KEY: "shodan-secret" }, now, fetchImpl }),
+    { code: "CAPRND_RUNTIME_RECEIPT_KEY_MISSING" },
+  );
+  assert.equal(providerRequests, 0);
+  assert.equal(writes, 0);
 });
 
 test("existing STARTED receipt blocks duplicate provider execution", async () => {
