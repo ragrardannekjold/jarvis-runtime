@@ -10,15 +10,116 @@ permissions:
   contents: read
 
 jobs:
+  pixel-gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Set up Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: '24'
+          package-manager-cache: false
+
+      - name: Install pixel-verification clients
+        run: |
+          mkdir -p /tmp/fti-pixels
+          cd /tmp/fti-pixels
+          npm init -y >/dev/null 2>&1
+          npm install --silent @esri/wayback-core@1.1.0 sharp
+
+      - name: Verify VHR pixels plus location-specific capture metadata
+        working-directory: /tmp/fti-pixels
+        run: |
+          cat > pixel_gate.mjs <<'NODE'
+          import fs from 'node:fs';
+          import crypto from 'node:crypto';
+          import sharp from 'sharp';
+          import { getWaybackItems, getMetadata } from '@esri/wayback-core';
+
+          const point={longitude:37.6878,latitude:55.6405};
+          const aoi=[37.6719,55.6315,37.7037,55.6495];
+          const samplePoints=[
+            point,
+            {longitude:aoi[0],latitude:aoi[1]}, {longitude:aoi[2],latitude:aoi[1]},
+            {longitude:aoi[2],latitude:aoi[3]}, {longitude:aoi[0],latitude:aoi[3]},
+            {longitude:(aoi[0]+aoi[2])/2,latitude:aoi[1]}, {longitude:(aoi[0]+aoi[2])/2,latitude:aoi[3]},
+            {longitude:aoi[0],latitude:(aoi[1]+aoi[3])/2}, {longitude:aoi[2],latitude:(aoi[1]+aoi[3])/2}
+          ];
+          const iso=ms=>ms?new Date(ms).toISOString():null;
+          const tileXY=(lon,lat,z)=>{
+            const n=2**z;
+            const x=Math.floor((lon+180)/360*n);
+            const r=lat*Math.PI/180;
+            const y=Math.floor((1-Math.asinh(Math.tan(r))/Math.PI)/2*n);
+            return {x,y,z};
+          };
+          const hash=b=>crypto.createHash('sha256').update(b).digest('hex');
+          const items=await getWaybackItems();
+          const targetAcq=['2021-07-07','2024-09-17','2025-03-20'];
+          const found=[];
+          for(const item of items){
+            let m;
+            try{m=await getMetadata(point,18,item.releaseNum);}catch{continue;}
+            const date=iso(m?.date)?.slice(0,10);
+            if(!targetAcq.includes(date) || !(Number(m?.resolution)<=0.5)) continue;
+            if(found.some(x=>x.acquisition_date===date)) continue;
+            const samples=[];
+            for(const p of samplePoints){
+              try{
+                const sm=await getMetadata(p,18,item.releaseNum);
+                samples.push({lon:p.longitude,lat:p.latitude,acquisition_date:iso(sm?.date),provider:sm?.provider??null,sensor:sm?.source??null,resolution_m:sm?.resolution??null});
+              }catch(e){samples.push({lon:p.longitude,lat:p.latitude,error:String(e?.message||e)});}
+            }
+            const t=tileXY(point.longitude,point.latitude,18);
+            const url=item.itemURL.replace('{level}',String(t.z)).replace('{row}',String(t.y)).replace('{col}',String(t.x));
+            const r=await fetch(url);
+            if(!r.ok) throw new Error(`Wayback tile ${date} HTTP ${r.status}`);
+            const buf=Buffer.from(await r.arrayBuffer());
+            const im=sharp(buf);
+            const md=await im.metadata();
+            const stats=await im.stats();
+            const stdev=stats.channels.map(c=>c.stdev);
+            const nonblank=buf.length>5000 && md.width>=128 && md.height>=128 && stdev.some(v=>Number(v)>2);
+            const fname=`wayback_${date}_${m?.source??'sensor'}_z18.jpg`.replace(/[^A-Za-z0-9_.-]/g,'_');
+            fs.writeFileSync(fname,buf);
+            found.push({
+              acquisition_date:date,
+              release_date:item.releaseDateLabel,
+              release_num:item.releaseNum,
+              arcgis_item_id:item.itemID,
+              metadata_item_id:item.metadataLayerItemID,
+              provider:m?.provider??null,sensor:m?.source??null,resolution_m:m?.resolution??null,accuracy_m:m?.accuracy??null,
+              center_tile:{url,z:t.z,x:t.x,y:t.y,http_status:r.status,content_type:r.headers.get('content-type'),bytes:buf.length,width:md.width,height:md.height,sha256:hash(buf),channel_stdev:stdev,decoded_nonblank:nonblank,file:fname},
+              coverage_samples:samples,
+              full_aoi_same_capture:samples.every(s=>s.acquisition_date?.slice(0,10)===date && s.sensor===m?.source && Number(s.resolution_m)===Number(m?.resolution)),
+              pixel_status:nonblank?'VERIFIED_PIXELS':'PIXELS_FAILED_VALIDATION'
+            });
+          }
+          found.sort((a,b)=>a.acquisition_date.localeCompare(b.acquisition_date));
+          const out={generated_at:new Date().toISOString(),aoi:{point,bbox:aoi},source:'Esri World Imagery Wayback derivative tiles + location-specific Wayback metadata',classification:'VHR_DERIVATIVE_NOT_VENDOR_ORIGINAL',records:found,hard_gate_pass:found.length===3 && found.every(x=>x.pixel_status==='VERIFIED_PIXELS')};
+          fs.writeFileSync('vhr_pixel_gate.json',JSON.stringify(out,null,2));
+          console.log('FTI_PIXEL_RESULT_BEGIN');
+          console.log(JSON.stringify(out));
+          console.log('FTI_PIXEL_RESULT_END');
+          if(!out.hard_gate_pass) process.exitCode=2;
+          NODE
+          node pixel_gate.mjs
+
+      - name: Upload verified VHR pixel package
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: moskvorechye-vhr-pixel-gate
+          path: |
+            /tmp/fti-pixels/vhr_pixel_gate.json
+            /tmp/fti-pixels/wayback_*.jpg
+          if-no-files-found: warn
+          retention-days: 7
+
   audit:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - name: Checkout runtime
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with:
-          persist-credentials: false
-
       - name: Set up Node
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
         with:
@@ -32,158 +133,28 @@ jobs:
           npm init -y >/dev/null 2>&1
           npm install --silent @esri/wayback-core@1.1.0
 
-      - name: Audit VHR optical, open SAR and Sentinel metadata
+      - name: Recheck location-specific VHR metadata and open commercial SAR footprints
         working-directory: /tmp/fti-eo
         run: |
           cat > audit.mjs <<'NODE'
           import { getWaybackItems, getMetadata } from '@esri/wayback-core';
-
-          const point = { longitude: 37.6878, latitude: 55.6405 };
-          const aoi = [37.6719, 55.6315, 37.7037, 55.6495]; // ~2 km x 2 km around case AOI
-          const out = { generated_at: new Date().toISOString(), point, aoi };
-
-          const iso = ms => ms ? new Date(ms).toISOString() : null;
-          const geomBbox = geom => {
-            if (!geom) return null;
-            const pts = [];
-            const walk = x => Array.isArray(x) && typeof x[0] === 'number' ? pts.push(x) : Array.isArray(x) && x.forEach(walk);
-            walk(geom.coordinates);
-            if (!pts.length) return null;
-            return [Math.min(...pts.map(p=>p[0])), Math.min(...pts.map(p=>p[1])), Math.max(...pts.map(p=>p[0])), Math.max(...pts.map(p=>p[1]))];
-          };
-          const bboxOverlap = (a,b) => a && b && !(a[2] < b[0] || a[0] > b[2] || a[3] < b[1] || a[1] > b[3]);
-          const pointInRing = (pt, ring) => {
-            let inside=false; const [x,y]=pt;
-            for(let i=0,j=ring.length-1;i<ring.length;j=i++){
-              const [xi,yi]=ring[i], [xj,yj]=ring[j];
-              const hit=((yi>y)!==(yj>y)) && x < (xj-xi)*(y-yi)/((yj-yi)||1e-15)+xi;
-              if(hit) inside=!inside;
-            }
-            return inside;
-          };
-          const pointInPolygon = (pt, poly) => pointInRing(pt, poly[0]) && !poly.slice(1).some(r=>pointInRing(pt,r));
-          const pointInGeom = (pt, g) => g?.type==='Polygon' ? pointInPolygon(pt,g.coordinates) : g?.type==='MultiPolygon' ? g.coordinates.some(p=>pointInPolygon(pt,p)) : false;
-          const inBox = ([x,y],b)=>x>=b[0]&&x<=b[2]&&y>=b[1]&&y<=b[3];
-          const orient=(a,b,c)=>Math.sign((b[0]-a[0])*(c[1]-a[1])-(b[1]-a[1])*(c[0]-a[0]));
-          const onSeg=(a,b,p)=>Math.min(a[0],b[0])<=p[0]&&p[0]<=Math.max(a[0],b[0])&&Math.min(a[1],b[1])<=p[1]&&p[1]<=Math.max(a[1],b[1]);
-          const segInt=(a,b,c,d)=>{const o1=orient(a,b,c),o2=orient(a,b,d),o3=orient(c,d,a),o4=orient(c,d,b);if(o1!==o2&&o3!==o4)return true;if(o1===0&&onSeg(a,b,c))return true;if(o2===0&&onSeg(a,b,d))return true;if(o3===0&&onSeg(c,d,a))return true;if(o4===0&&onSeg(c,d,b))return true;return false;};
-          const polyIntersectsBox=(poly,b)=>{
-            const corners=[[b[0],b[1]],[b[2],b[1]],[b[2],b[3]],[b[0],b[3]]];
-            if(corners.some(c=>pointInPolygon(c,poly))) return true;
-            const ring=poly[0]; if(ring.some(p=>inBox(p,b))) return true;
-            const edges=[[corners[0],corners[1]],[corners[1],corners[2]],[corners[2],corners[3]],[corners[3],corners[0]]];
-            for(let i=1;i<ring.length;i++) for(const e of edges) if(segInt(ring[i-1],ring[i],e[0],e[1])) return true;
-            return false;
-          };
-          const geomIntersectsBox=(g,b)=>g?.type==='Polygon'?polyIntersectsBox(g.coordinates,b):g?.type==='MultiPolygon'?g.coordinates.some(p=>polyIntersectsBox(p,b)):false;
-
-          // 1) Esri World Imagery Wayback: actual capture metadata at exact point.
-          try {
-            const items = (await getWaybackItems()).filter(i => i.releaseDateLabel >= '2019-01-01');
-            const rows=[];
-            for (const item of items) {
-              try {
-                const m = await getMetadata(point, 18, item.releaseNum);
-                rows.push({
-                  release_date:item.releaseDateLabel,
-                  release_num:item.releaseNum,
-                  arcgis_item_id:item.itemID,
-                  metadata_item_id:item.metadataLayerItemID,
-                  acquisition_date:iso(m?.date),
-                  provider:m?.provider ?? null,
-                  sensor:m?.source ?? null,
-                  resolution_m:m?.resolution ?? null,
-                  accuracy_m:m?.accuracy ?? null,
-                });
-              } catch (e) {
-                rows.push({release_date:item.releaseDateLabel,release_num:item.releaseNum,error:String(e?.message||e).slice(0,180)});
-              }
-            }
-            const good=rows.filter(r=>r.acquisition_date);
-            const uniq=new Map();
-            for(const r of [...good].reverse()){
-              const k=[r.acquisition_date,r.provider,r.sensor,r.resolution_m].join('|');
-              const old=uniq.get(k);
-              if(!old) uniq.set(k,{...r,first_release:r.release_date,last_release:r.release_date});
-              else old.last_release=r.release_date;
-            }
-            out.wayback={release_count:items.length,successful_metadata:good.length,unique_acquisitions:[...uniq.values()].sort((a,b)=>a.acquisition_date.localeCompare(b.acquisition_date)),latest_release:good[0]??null};
-          } catch(e){ out.wayback={error:String(e?.stack||e)}; }
-
-          // Current Vantor/Maxar Vivid publication blocks around exact point.
-          async function queryArcgis(url){
-            const u=new URL(url+'/query');
-            u.search=new URLSearchParams({f:'json',where:'1=1',outFields:'*',returnGeometry:'true',geometry:`${point.longitude},${point.latitude}`,geometryType:'esriGeometryPoint',inSR:'4326',outSR:'4326',spatialRel:'esriSpatialRelIntersects'}).toString();
-            const r=await fetch(u); if(!r.ok) throw new Error(`${r.status} ${await r.text()}`); return r.json();
+          const point={longitude:37.6878,latitude:55.6405};
+          const aoi=[37.6719,55.6315,37.7037,55.6495];
+          const iso=ms=>ms?new Date(ms).toISOString():null;
+          const pointInRing=(pt,ring)=>{let inside=false;const[x,y]=pt;for(let i=0,j=ring.length-1;i<ring.length;j=i++){const[xi,yi]=ring[i],[xj,yj]=ring[j];const hit=((yi>y)!==(yj>y))&&x<(xj-xi)*(y-yi)/((yj-yi)||1e-15)+xi;if(hit)inside=!inside;}return inside;};
+          const pointInGeom=(pt,g)=>g?.type==='Polygon'?pointInRing(pt,g.coordinates[0]):g?.type==='MultiPolygon'?g.coordinates.some(p=>pointInRing(pt,p[0])):false;
+          const bbox=(g)=>{const p=[];const w=x=>Array.isArray(x)&&typeof x[0]==='number'?p.push(x):Array.isArray(x)&&x.forEach(w);w(g?.coordinates);return p.length?[Math.min(...p.map(x=>x[0])),Math.min(...p.map(x=>x[1])),Math.max(...p.map(x=>x[0])),Math.max(...p.map(x=>x[1]))]:null;};
+          const bbHit=(b,a)=>b&&!(b[2]<a[0]||b[0]>a[2]||b[3]<a[1]||b[1]>a[3]);
+          const out={generated_at:new Date().toISOString(),point,aoi,wayback:[],open_sar:{}};
+          for(const item of await getWaybackItems()){
+            if(item.releaseDateLabel<'2019-01-01') continue;
+            try{const m=await getMetadata(point,18,item.releaseNum);if(m?.date)out.wayback.push({release_date:item.releaseDateLabel,release_num:item.releaseNum,acquisition_date:iso(m.date),provider:m.provider??null,sensor:m.source??null,resolution_m:m.resolution??null,accuracy_m:m.accuracy??null});}catch{}
           }
-          out.vivid={};
-          for (const [k,url] of Object.entries({
-            advanced:'https://services.arcgis.com/jIL9msH9OI208GCb/ArcGIS/rest/services/Vivid_Advanced_Blocks_Publication_View/FeatureServer/0',
-            standard:'https://services.arcgis.com/jIL9msH9OI208GCb/ArcGIS/rest/services/Vivid_Standard_Blocks_Publication_View/FeatureServer/0'
-          })) {
-            try { const j=await queryArcgis(url); out.vivid[k]={count:j.features?.length??0,features:(j.features||[]).slice(0,20).map(f=>({attributes:f.attributes,geometry_bbox:geomBbox(f.geometry)})),error:j.error??null}; }
-            catch(e){ out.vivid[k]={error:String(e?.message||e)}; }
-          }
-
-          // 2) Open commercial SAR: exact polygon footprint scan over current normalized catalogue.
-          try {
-            const r=await fetch('https://raw.githubusercontent.com/pmuguda/open-sar-triad/main/data/scenes.geojson');
-            if(!r.ok) throw new Error(`HTTP ${r.status}`);
-            const fc=await r.json();
-            const providers={};
-            for(const f of fc.features||[]){
-              const p=f.properties?.provider||'unknown';
-              providers[p] ||= {total:0,point_hits:[],aoi_hits:[]}; providers[p].total++;
-              const bb=geomBbox(f.geometry);
-              if(pointInGeom([point.longitude,point.latitude],f.geometry)) providers[p].point_hits.push({properties:f.properties,geometry_bbox:bb});
-              if(bboxOverlap(bb,aoi) && geomIntersectsBox(f.geometry,aoi)) providers[p].aoi_hits.push({properties:f.properties,geometry_bbox:bb});
-            }
-            out.open_sar={generated_at:fc.generated_at??null,source:fc.source??null,providers};
-          } catch(e){ out.open_sar={error:String(e?.stack||e)}; }
-
-          // 3) Sentinel-2 L2A and Sentinel-1 GRD supporting candidates from Earth Search.
-          async function earthSearch(collection, start, end, limit=100){
-            const r=await fetch('https://earth-search.aws.element84.com/v1/search',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({collections:[collection],bbox:aoi,datetime:`${start}/${end}`,limit})});
-            if(!r.ok) throw new Error(`${collection} ${r.status}: ${await r.text()}`); return (await r.json()).features||[];
-          }
-          const windows={
-            pre_earthworks:['2020-05-01T00:00:00Z','2020-06-25T23:59:59Z'],
-            earthworks_2020:['2020-07-01T00:00:00Z','2020-11-30T23:59:59Z'],
-            post_work:['2021-05-01T00:00:00Z','2021-10-31T23:59:59Z'],
-            slope_model_period:['2022-04-01T00:00:00Z','2023-09-30T23:59:59Z'],
-            current:['2025-04-01T00:00:00Z','2026-08-27T23:59:59Z']
-          };
-          out.sentinel={};
-          for(const [phase,[start,end]] of Object.entries(windows)){
-            out.sentinel[phase]={};
-            try{
-              const f=await earthSearch('sentinel-2-l2a',start,end,100);
-              const rows=f.map(x=>({id:x.id,datetime:x.properties?.datetime,cloud:x.properties?.['eo:cloud_cover'],platform:x.properties?.platform,geometry_bbox:geomBbox(x.geometry),self:x.links?.find(l=>l.rel==='self')?.href??null}));
-              rows.sort((a,b)=>(a.cloud??999)-(b.cloud??999)||String(b.datetime).localeCompare(String(a.datetime)));
-              out.sentinel[phase].s2={count:f.length,best_low_cloud:rows.slice(0,8),latest:[...rows].sort((a,b)=>String(b.datetime).localeCompare(String(a.datetime))).slice(0,5)};
-            }catch(e){out.sentinel[phase].s2={error:String(e?.message||e)}}
-            try{
-              const f=await earthSearch('sentinel-1-grd',start,end,100);
-              const rows=f.map(x=>({id:x.id,datetime:x.properties?.datetime,mode:x.properties?.['sar:instrument_mode'],orbit:x.properties?.['sat:orbit_state'],polarizations:x.properties?.['sar:polarizations'],range_res_m:x.properties?.['sar:resolution_range'],azimuth_res_m:x.properties?.['sar:resolution_azimuth'],geometry_bbox:geomBbox(x.geometry),self:x.links?.find(l=>l.rel==='self')?.href??null}));
-              out.sentinel[phase].s1_grd={count:f.length,latest:rows.sort((a,b)=>String(b.datetime).localeCompare(String(a.datetime))).slice(0,8)};
-            }catch(e){out.sentinel[phase].s1_grd={error:String(e?.message||e)}}
-          }
-
-          // Sentinel-1 SLC metadata via ASF Search API for each phase (no download/auth needed for metadata search).
-          out.sentinel1_slc={};
-          for(const [phase,[start,end]] of Object.entries(windows)){
-            try{
-              const u=new URL('https://api.daac.asf.alaska.edu/services/search/param');
-              u.search=new URLSearchParams({dataset:'SENTINEL-1',processingLevel:'SLC',intersectsWith:`point(${point.longitude} ${point.latitude})`,start,end,output:'geojson',maxResults:'50'}).toString();
-              const r=await fetch(u); if(!r.ok) throw new Error(`${r.status}: ${await r.text()}`);
-              const j=await r.json();
-              const feats=Array.isArray(j)?j.flatMap(x=>x.features||[]):(j.features||[]);
-              out.sentinel1_slc[phase]={count:feats.length,latest:feats.map(x=>({id:x.properties?.fileID??x.properties?.sceneName??x.id,datetime:x.properties?.startTime??x.properties?.startTimeUTC??null,beamMode:x.properties?.beamModeType,polarization:x.properties?.polarization,flightDirection:x.properties?.flightDirection,geometry_bbox:geomBbox(x.geometry)})).sort((a,b)=>String(b.datetime).localeCompare(String(a.datetime))).slice(0,8)};
-            }catch(e){out.sentinel1_slc[phase]={error:String(e?.message||e)}}
-          }
-
-          console.log('FTI_RESULT_BEGIN');
-          console.log(JSON.stringify(out));
-          console.log('FTI_RESULT_END');
+          const r=await fetch('https://raw.githubusercontent.com/pmuguda/open-sar-triad/main/data/scenes.geojson');
+          if(!r.ok) throw new Error(`open-sar ${r.status}`);
+          const fc=await r.json();
+          for(const f of fc.features||[]){const p=f.properties?.provider||'unknown';out.open_sar[p]??={total:0,point_hits:0,aoi_bbox_candidates:0};out.open_sar[p].total++;if(pointInGeom([point.longitude,point.latitude],f.geometry))out.open_sar[p].point_hits++;if(bbHit(bbox(f.geometry),aoi))out.open_sar[p].aoi_bbox_candidates++;}
+          out.open_sar_catalog_generated_at=fc.generated_at??null;
+          console.log('FTI_AUDIT_RESULT_BEGIN');console.log(JSON.stringify(out));console.log('FTI_AUDIT_RESULT_END');
           NODE
           node audit.mjs
