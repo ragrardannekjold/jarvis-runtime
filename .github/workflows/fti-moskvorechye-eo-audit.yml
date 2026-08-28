@@ -12,22 +12,18 @@ permissions:
 jobs:
   pixel-gate:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 6
     steps:
-      - name: Set up Node
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
         with:
           node-version: '24'
           package-manager-cache: false
-
-      - name: Install pixel-verification clients
+      - name: Install bounded VHR verifier
         run: |
-          mkdir -p /tmp/fti-pixels
-          cd /tmp/fti-pixels
+          mkdir -p /tmp/fti-pixels && cd /tmp/fti-pixels
           npm init -y >/dev/null 2>&1
           npm install --silent @esri/wayback-core@1.1.0 sharp
-
-      - name: Verify VHR pixels plus location-specific capture metadata
+      - name: Verify pixels and capture metadata
         working-directory: /tmp/fti-pixels
         run: |
           cat > pixel_gate.mjs <<'NODE'
@@ -38,123 +34,97 @@ jobs:
 
           const point={longitude:37.6878,latitude:55.6405};
           const aoi=[37.6719,55.6315,37.7037,55.6495];
-          const samplePoints=[
-            point,
-            {longitude:aoi[0],latitude:aoi[1]}, {longitude:aoi[2],latitude:aoi[1]},
-            {longitude:aoi[2],latitude:aoi[3]}, {longitude:aoi[0],latitude:aoi[3]},
-            {longitude:(aoi[0]+aoi[2])/2,latitude:aoi[1]}, {longitude:(aoi[0]+aoi[2])/2,latitude:aoi[3]},
-            {longitude:aoi[0],latitude:(aoi[1]+aoi[3])/2}, {longitude:aoi[2],latitude:(aoi[1]+aoi[3])/2}
+          const targets=[
+            {release:17825,expected:'2021-07-07'},
+            {release:34007,expected:'2024-09-17'},
+            {release:26334,expected:'2025-03-20'}
           ];
+          const samplePoints=[point,
+            {longitude:aoi[0],latitude:aoi[1]},{longitude:aoi[2],latitude:aoi[1]},
+            {longitude:aoi[2],latitude:aoi[3]},{longitude:aoi[0],latitude:aoi[3]}];
           const iso=ms=>ms?new Date(ms).toISOString():null;
-          const tileXY=(lon,lat,z)=>{
-            const n=2**z;
-            const x=Math.floor((lon+180)/360*n);
-            const r=lat*Math.PI/180;
-            const y=Math.floor((1-Math.asinh(Math.tan(r))/Math.PI)/2*n);
-            return {x,y,z};
-          };
-          const hash=b=>crypto.createHash('sha256').update(b).digest('hex');
+          const xy=(lon,lat,z)=>{const n=2**z,r=lat*Math.PI/180;return{x:Math.floor((lon+180)/360*n),y:Math.floor((1-Math.asinh(Math.tan(r))/Math.PI)/2*n),z};};
+          const sha=b=>crypto.createHash('sha256').update(b).digest('hex');
           const items=await getWaybackItems();
-          const targetAcq=['2021-07-07','2024-09-17','2025-03-20'];
-          const found=[];
-          for(const item of items){
-            let m;
-            try{m=await getMetadata(point,18,item.releaseNum);}catch{continue;}
-            const date=iso(m?.date)?.slice(0,10);
-            if(!targetAcq.includes(date) || !(Number(m?.resolution)<=0.5)) continue;
-            if(found.some(x=>x.acquisition_date===date)) continue;
+          const byRelease=new Map(items.map(i=>[i.releaseNum,i]));
+          const records=[];
+
+          for(const target of targets){
+            const item=byRelease.get(target.release);
+            if(!item) throw new Error(`Missing Wayback release ${target.release}`);
+            const m=await getMetadata(point,18,item.releaseNum);
+            const acq=iso(m?.date)?.slice(0,10);
+            if(acq!==target.expected) throw new Error(`Capture mismatch release ${target.release}: ${acq}`);
+            if(!(Number(m?.resolution)<=0.5)) throw new Error(`Resolution gate failed ${target.release}: ${m?.resolution}`);
+
             const samples=[];
             for(const p of samplePoints){
-              try{
-                const sm=await getMetadata(p,18,item.releaseNum);
-                samples.push({lon:p.longitude,lat:p.latitude,acquisition_date:iso(sm?.date),provider:sm?.provider??null,sensor:sm?.source??null,resolution_m:sm?.resolution??null});
-              }catch(e){samples.push({lon:p.longitude,lat:p.latitude,error:String(e?.message||e)});}
+              try{const sm=await getMetadata(p,18,item.releaseNum);samples.push({lon:p.longitude,lat:p.latitude,acquisition_date:iso(sm?.date),provider:sm?.provider??null,sensor:sm?.source??null,resolution_m:sm?.resolution??null});}
+              catch(e){samples.push({lon:p.longitude,lat:p.latitude,error:String(e?.message||e)});}
             }
-            const t=tileXY(point.longitude,point.latitude,18);
-            const url=item.itemURL.replace('{level}',String(t.z)).replace('{row}',String(t.y)).replace('{col}',String(t.x));
-            const r=await fetch(url);
-            if(!r.ok) throw new Error(`Wayback tile ${date} HTTP ${r.status}`);
-            const buf=Buffer.from(await r.arrayBuffer());
-            const im=sharp(buf);
-            const md=await im.metadata();
-            const stats=await im.stats();
+
+            const t=xy(point.longitude,point.latitude,18);
+            const pieces=[];
+            for(let dy=-1;dy<=1;dy++) for(let dx=-1;dx<=1;dx++){
+              const url=item.itemURL.replace('{level}',String(t.z)).replace('{row}',String(t.y+dy)).replace('{col}',String(t.x+dx));
+              const r=await fetch(url); if(!r.ok) throw new Error(`tile ${target.expected} ${dx},${dy} HTTP ${r.status}`);
+              const b=Buffer.from(await r.arrayBuffer());
+              const md=await sharp(b).metadata();
+              pieces.push({input:b,left:(dx+1)*256,top:(dy+1)*256,url,bytes:b.length,width:md.width,height:md.height});
+            }
+            const composite=await sharp({create:{width:768,height:768,channels:3,background:{r:0,g:0,b:0}}}).composite(pieces.map(p=>({input:p.input,left:p.left,top:p.top}))).jpeg({quality:92}).toBuffer();
+            const stats=await sharp(composite).stats();
+            const md=await sharp(composite).metadata();
             const stdev=stats.channels.map(c=>c.stdev);
-            const nonblank=buf.length>5000 && md.width>=128 && md.height>=128 && stdev.some(v=>Number(v)>2);
-            const fname=`wayback_${date}_${m?.source??'sensor'}_z18.jpg`.replace(/[^A-Za-z0-9_.-]/g,'_');
-            fs.writeFileSync(fname,buf);
-            found.push({
-              acquisition_date:date,
-              release_date:item.releaseDateLabel,
-              release_num:item.releaseNum,
-              arcgis_item_id:item.itemID,
-              metadata_item_id:item.metadataLayerItemID,
+            const nonblank=composite.length>20000 && stdev.some(v=>Number(v)>2);
+            const fname=`moskvorechye_${target.expected}_${String(m?.source??'sensor').replace(/[^A-Za-z0-9_.-]/g,'_')}_vhr.jpg`;
+            fs.writeFileSync(fname,composite);
+            records.push({
+              acquisition_date:target.expected,release_date:item.releaseDateLabel,release_num:item.releaseNum,
+              arcgis_item_id:item.itemID,metadata_item_id:item.metadataLayerItemID,
               provider:m?.provider??null,sensor:m?.source??null,resolution_m:m?.resolution??null,accuracy_m:m?.accuracy??null,
-              center_tile:{url,z:t.z,x:t.x,y:t.y,http_status:r.status,content_type:r.headers.get('content-type'),bytes:buf.length,width:md.width,height:md.height,sha256:hash(buf),channel_stdev:stdev,decoded_nonblank:nonblank,file:fname},
+              pixel_product:{file:fname,width:md.width,height:md.height,bytes:composite.length,sha256:sha(composite),channel_stdev:stdev,decoded_nonblank:nonblank,webmercator_zoom:18,tile_grid:'3x3 around anchor'},
               coverage_samples:samples,
-              full_aoi_same_capture:samples.every(s=>s.acquisition_date?.slice(0,10)===date && s.sensor===m?.source && Number(s.resolution_m)===Number(m?.resolution)),
-              pixel_status:nonblank?'VERIFIED_PIXELS':'PIXELS_FAILED_VALIDATION'
+              full_aoi_same_capture:samples.every(s=>s.acquisition_date?.slice(0,10)===target.expected && s.sensor===m?.source && Number(s.resolution_m)===Number(m?.resolution)),
+              pixel_status:nonblank?'VERIFIED_PIXELS':'PIXELS_FAILED_VALIDATION',
+              provenance:'Esri World Imagery Wayback derivative pixels; location-specific metadata tied to same release'
             });
           }
-          found.sort((a,b)=>a.acquisition_date.localeCompare(b.acquisition_date));
-          const out={generated_at:new Date().toISOString(),aoi:{point,bbox:aoi},source:'Esri World Imagery Wayback derivative tiles + location-specific Wayback metadata',classification:'VHR_DERIVATIVE_NOT_VENDOR_ORIGINAL',records:found,hard_gate_pass:found.length===3 && found.every(x=>x.pixel_status==='VERIFIED_PIXELS')};
+          const out={generated_at:new Date().toISOString(),aoi:{point,bbox:aoi},classification:'VHR_DERIVATIVE_NOT_VENDOR_ORIGINAL',records,hard_gate_pass:records.length===3&&records.every(r=>r.pixel_status==='VERIFIED_PIXELS')};
           fs.writeFileSync('vhr_pixel_gate.json',JSON.stringify(out,null,2));
-          console.log('FTI_PIXEL_RESULT_BEGIN');
-          console.log(JSON.stringify(out));
-          console.log('FTI_PIXEL_RESULT_END');
+          console.log('FTI_PIXEL_RESULT_BEGIN');console.log(JSON.stringify(out));console.log('FTI_PIXEL_RESULT_END');
           if(!out.hard_gate_pass) process.exitCode=2;
           NODE
           node pixel_gate.mjs
-
-      - name: Upload verified VHR pixel package
+      - name: Upload VHR pixel package
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: moskvorechye-vhr-pixel-gate
           path: |
             /tmp/fti-pixels/vhr_pixel_gate.json
-            /tmp/fti-pixels/wayback_*.jpg
+            /tmp/fti-pixels/moskvorechye_*_vhr.jpg
           if-no-files-found: warn
           retention-days: 7
 
-  audit:
+  open-sar-negative:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 4
     steps:
-      - name: Set up Node
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
         with:
           node-version: '24'
           package-manager-cache: false
-
-      - name: Install Wayback core
+      - name: Spatially test current open commercial SAR catalogs
         run: |
-          mkdir -p /tmp/fti-eo
-          cd /tmp/fti-eo
-          npm init -y >/dev/null 2>&1
-          npm install --silent @esri/wayback-core@1.1.0
-
-      - name: Recheck location-specific VHR metadata and open commercial SAR footprints
-        working-directory: /tmp/fti-eo
-        run: |
-          cat > audit.mjs <<'NODE'
-          import { getWaybackItems, getMetadata } from '@esri/wayback-core';
-          const point={longitude:37.6878,latitude:55.6405};
-          const aoi=[37.6719,55.6315,37.7037,55.6495];
-          const iso=ms=>ms?new Date(ms).toISOString():null;
-          const pointInRing=(pt,ring)=>{let inside=false;const[x,y]=pt;for(let i=0,j=ring.length-1;i<ring.length;j=i++){const[xi,yi]=ring[i],[xj,yj]=ring[j];const hit=((yi>y)!==(yj>y))&&x<(xj-xi)*(y-yi)/((yj-yi)||1e-15)+xi;if(hit)inside=!inside;}return inside;};
-          const pointInGeom=(pt,g)=>g?.type==='Polygon'?pointInRing(pt,g.coordinates[0]):g?.type==='MultiPolygon'?g.coordinates.some(p=>pointInRing(pt,p[0])):false;
-          const bbox=(g)=>{const p=[];const w=x=>Array.isArray(x)&&typeof x[0]==='number'?p.push(x):Array.isArray(x)&&x.forEach(w);w(g?.coordinates);return p.length?[Math.min(...p.map(x=>x[0])),Math.min(...p.map(x=>x[1])),Math.max(...p.map(x=>x[0])),Math.max(...p.map(x=>x[1]))]:null;};
-          const bbHit=(b,a)=>b&&!(b[2]<a[0]||b[0]>a[2]||b[3]<a[1]||b[1]>a[3]);
-          const out={generated_at:new Date().toISOString(),point,aoi,wayback:[],open_sar:{}};
-          for(const item of await getWaybackItems()){
-            if(item.releaseDateLabel<'2019-01-01') continue;
-            try{const m=await getMetadata(point,18,item.releaseNum);if(m?.date)out.wayback.push({release_date:item.releaseDateLabel,release_num:item.releaseNum,acquisition_date:iso(m.date),provider:m.provider??null,sensor:m.source??null,resolution_m:m.resolution??null,accuracy_m:m.accuracy??null});}catch{}
-          }
-          const r=await fetch('https://raw.githubusercontent.com/pmuguda/open-sar-triad/main/data/scenes.geojson');
-          if(!r.ok) throw new Error(`open-sar ${r.status}`);
-          const fc=await r.json();
-          for(const f of fc.features||[]){const p=f.properties?.provider||'unknown';out.open_sar[p]??={total:0,point_hits:0,aoi_bbox_candidates:0};out.open_sar[p].total++;if(pointInGeom([point.longitude,point.latitude],f.geometry))out.open_sar[p].point_hits++;if(bbHit(bbox(f.geometry),aoi))out.open_sar[p].aoi_bbox_candidates++;}
-          out.open_sar_catalog_generated_at=fc.generated_at??null;
-          console.log('FTI_AUDIT_RESULT_BEGIN');console.log(JSON.stringify(out));console.log('FTI_AUDIT_RESULT_END');
+          node <<'NODE'
+          const pt=[37.6878,55.6405],aoi=[37.6719,55.6315,37.7037,55.6495];
+          const ringHit=(p,r)=>{let i=false;for(let a=0,b=r.length-1;a<r.length;b=a++){const[x,y]=p,[xi,yi]=r[a],[xj,yj]=r[b];if(((yi>y)!==(yj>y))&&x<(xj-xi)*(y-yi)/((yj-yi)||1e-15)+xi)i=!i;}return i;};
+          const geomPt=g=>g?.type==='Polygon'?ringHit(pt,g.coordinates[0]):g?.type==='MultiPolygon'?g.coordinates.some(p=>ringHit(pt,p[0])):false;
+          const coords=g=>{const o=[];const w=x=>Array.isArray(x)&&typeof x[0]==='number'?o.push(x):Array.isArray(x)&&x.forEach(w);w(g?.coordinates);return o;};
+          const bb=g=>{const p=coords(g);return p.length?[Math.min(...p.map(x=>x[0])),Math.min(...p.map(x=>x[1])),Math.max(...p.map(x=>x[0])),Math.max(...p.map(x=>x[1]))]:null;};
+          const hit=(b,a)=>b&&!(b[2]<a[0]||b[0]>a[2]||b[3]<a[1]||b[1]>a[3]);
+          const r=await fetch('https://raw.githubusercontent.com/pmuguda/open-sar-triad/main/data/scenes.geojson');if(!r.ok)throw new Error(String(r.status));const fc=await r.json();
+          const p={};for(const f of fc.features||[]){const k=f.properties?.provider||'unknown';p[k]??={total:0,point_hits:0,aoi_bbox_candidates:0};p[k].total++;if(geomPt(f.geometry))p[k].point_hits++;if(hit(bb(f.geometry),aoi))p[k].aoi_bbox_candidates++;}
+          console.log('FTI_OPEN_SAR_RESULT_BEGIN');console.log(JSON.stringify({catalog_generated_at:fc.generated_at??null,source:fc.source??null,providers:p}));console.log('FTI_OPEN_SAR_RESULT_END');
           NODE
-          node audit.mjs
