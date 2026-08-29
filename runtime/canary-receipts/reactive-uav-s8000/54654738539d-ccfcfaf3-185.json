@@ -1,0 +1,285 @@
+{
+  "commit_sha": "54654738539dbfacbc9b83ee46732c8a33ecec3b",
+  "executor": "CIRCLECI",
+  "gate": {
+    "all_terminal": true,
+    "candidate_only": true,
+    "failure_ceiling": true,
+    "hashes_present": true,
+    "no_raw_content": true,
+    "payload_floor": true,
+    "verified_floor": true
+  },
+  "generated_at": "2026-08-29T14:34:20.699604+00:00",
+  "independence_groups": 6,
+  "packet_hashes": [
+    "0e064d509e22590948acbdd82e7b2cebf38b48e1fc9a26f71af7bef464edc18a",
+    "22e56b516144517e47394e7b1e7412a5f5c1ab8f08b10e39b5e3269f39af65e9",
+    "384a9cf974106ddf24e62f7d7375842debfcf51b6a4e8f323e073b6b665c8234",
+    "55038a63cfe3d4552d7b8c8570862329019992963a5ad60c314ce6fcea2921c6",
+    "769f0282500b87fe330f0d3130ec326341b8735ed90ad7cbdc801fc1b9e4c3ac",
+    "8340fd603be51c79df24b5012052ae56db43ad2a63dc6f5bd04b0b862744a02c",
+    "a5dd317ccdc6bd04996e5cf47cb426f98422ba049955235f10a14e954e6e246e",
+    "b937beb4552dc761c0fc339cc0e2f4e20dab12c4053228085a7a3700403715ed",
+    "bfb1097d924c48e5b6c9509e68114dd265a299e69e93c5d38fce0cbb1a3506fd",
+    "c15fc3be4c620c017b83db22c557508e1f26abba9e156903e439bee181a743db",
+    "c6a1bbfccd762b8c3c4eddd48b1674502a7be4e0f2339d53c3bd178c232fdd45",
+    "f1ab0d9e5ca4746406a4185da84d32401ac432a89fed5ac29a95eb93a4fd2a66"
+  ],
+  "packets": [
+    {
+      "attempts": 1,
+      "bytes_read": 108972,
+      "content_hash": "bfb1097d924c48e5b6c9509e68114dd265a299e69e93c5d38fce0cbb1a3506fd",
+      "content_type": "text/html; charset=UTF-8",
+      "hash_scope": "first_1000000_bytes",
+      "http_status": 200,
+      "keyword_hits": [
+        "geran-4",
+        "герань-4"
+      ],
+      "latency_ms": 851.246,
+      "origin_lineage": "GUR_WAR_SANCTIONS",
+      "promotion_state": "LIVE_SHADOW_CANDIDATE",
+      "raw_content_persisted": false,
+      "source_class": "official_technical",
+      "source_id": "GUR-GERAN4",
+      "source_url": "https://war-sanctions.gur.gov.ua/page-geran-4",
+      "terminal_state": "VERIFIED_CANDIDATE"
+    },
+    {
+      "attempts": 1,
+      "bytes_read": 99087,
+      "content_hash": "22e56b516144517e47394e7b1e7412a5f5c1ab8f08b10e39b5e3269f39af65e9",
+      "content_type": "text/html; charset=UTF-8",
+      "hash_scope": "first_1000000_bytes",
+      "http_status": 200,
+      "keyword_hits": [
+        "geran-5",
+        "xk-f358"
+      ],
+      "latency_ms": 680.394,
+      "origin_lineage": "GUR_WAR_SANCTIONS",
+      "promotion_state": "LIVE_SHADOW_CANDIDATE",
+      "raw_content_persisted": false,
+      "source_class": "official_technical",
+      "source_id": "GUR-GERAN5",
+      "source_url": "https://war-sanctions.gur.gov.ua/en/page-geran-5",
+      "terminal_state": "VERIFIED_CANDIDATE"
+    },
+    {
+      "attempts": 1,
+      "bytes_read": 101124,
+      "content_hash": "c6a1bbfccd762b8c3c4eddd48b1674502a7be4e0f2339d53c3bd178c232fdd45",
+      "content_type": "text/html; charset=UTF-8",
+      "hash_scope": "first_1000000_bytes",
+      "http_status": 200,
+      "keyword_hits": [
+        "banderol",
+        "rfd900",
+        "s8000"
+      ],
+      "latency_ms": 777.823,
+      "origin_lineage": "GUR_WAR_SANCTIONS",
+      "promotion_state": "LIVE_SHADOW_CANDIDATE",
+      "raw_content_persisted": false,
+      "source_class": "official_technical",
+      "source_id": "GUR-S8000",
+      "source_url": "https://war-sanctions.gur.gov.ua/en/page-s8000-banderol",
+      "terminal_state": "VERIFIED_CANDIDATE"
+    },
+    {
+      "attempts": 1,
+      "bytes_read": 62996,
+      "content_hash": "769f0282500b87fe330f0d3130ec326341b8735ed90ad7cbdc801fc1b9e4c3ac",
+      "content_type": "text/html; charset=UTF-8",
+      "hash_scope": "first_1000000_bytes",
+      "http_status": 200,
+      "keyword_hits": [
+        "gerbera"
+      ],
+      "latency_ms": 542.761,
+      "origin_lineage": "GUR_WAR_SANCTIONS",
+      "promotion_state": "LIVE_SHADOW_CANDIDATE",
+      "raw_content_persisted": false,
+      "source_class": "official_technical",
+      "source_id": "GUR-GERBERA",
+      "source_url": "https://war-sanctions.gur.gov.ua/en/uav/329",
+      "terminal_state": "VERIFIED_CANDIDATE"
+    },
+    {
+      "attempts": 1,
+      "bytes_read": 21372,
+      "content_hash": "f1ab0d9e5ca4746406a4185da84d32401ac432a89fed5ac29a95eb93a4fd2a66",
+      "content_type": "text/html; charset=UTF-8",
+      "hash_scope": "first_1000000_bytes",
+      "http_status": 200,
+      "keyword_hits": [
+        "retransliator",
+        "герань",
+        "ретранслятор"
+      ],
+      "latency_ms": 30.228,
+      "origin_lineage": "GUR_NEWS",
+      "promotion_state": "LIVE_SHADOW_CANDIDATE",
+      "raw_content_persisted": false,
+      "source_class": "official",
+      "source_id": "GUR-RELAY-MARCH",
+      "source_url": "https://gur.gov.ua/content/podlot-kasta-ta-retransliatory-liutnevi-zhnyva-prymar-hur-u-krymu.html",
+      "terminal_state": "VERIFIED_CANDIDATE"
+    },
+    {
+      "attempts": 1,
+      "bytes_read": 21273,
+      "content_hash": "c15fc3be4c620c017b83db22c557508e1f26abba9e156903e439bee181a743db",
+      "content_type": "text/html; charset=UTF-8",
+      "hash_scope": "first_1000000_bytes",
+      "http_status": 200,
+      "keyword_hits": [
+        "ретранслятор"
+      ],
+      "latency_ms": 30.867,
+      "origin_lineage": "GUR_NEWS",
+      "promotion_state": "LIVE_SHADOW_CANDIDATE",
+      "raw_content_persisted": false,
+      "source_class": "official",
+      "source_id": "GUR-RELAY-MAY",
+      "source_url": "https://gur.gov.ua/content/rls-reb-anhary-naftobaza-prymary-hur-u-krymu-vidpratsiuvaly-po-krytychnykh-viiskovykh-obiektakh-okupantiv.html",
+      "terminal_state": "VERIFIED_CANDIDATE"
+    },
+    {
+      "attempts": 1,
+      "bytes_read": 124905,
+      "content_hash": "0e064d509e22590948acbdd82e7b2cebf38b48e1fc9a26f71af7bef464edc18a",
+      "content_type": "text/html; charset=UTF-8",
+      "hash_scope": "first_1000000_bytes",
+      "http_status": 200,
+      "keyword_hits": [
+        "shahed",
+        "бандерол",
+        "реактив"
+      ],
+      "latency_ms": 660.529,
+      "origin_lineage": "AIR_FORCE_VIA_ARMYINFORM",
+      "promotion_state": "LIVE_SHADOW_CANDIDATE",
+      "raw_content_persisted": false,
+      "source_class": "official_media",
+      "source_id": "ARMYINFORM-20260820",
+      "source_url": "https://armyinform.com.ua/2026/08/20/oniksy-czyrkony-ta-banderoli-podrobyczi-masovanogo-udaru-rf-po-kyyivshhyni/",
+      "terminal_state": "VERIFIED_CANDIDATE"
+    },
+    {
+      "attempts": 1,
+      "bytes_read": 128178,
+      "content_hash": "a5dd317ccdc6bd04996e5cf47cb426f98422ba049955235f10a14e954e6e246e",
+      "content_type": "text/html; charset=UTF-8",
+      "hash_scope": "first_1000000_bytes",
+      "http_status": 200,
+      "keyword_hits": [
+        "бандерол",
+        "реактив"
+      ],
+      "latency_ms": 664.215,
+      "origin_lineage": "AIR_FORCE_VIA_ARMYINFORM",
+      "promotion_state": "LIVE_SHADOW_CANDIDATE",
+      "raw_content_persisted": false,
+      "source_class": "official_media",
+      "source_id": "ARMYINFORM-20260827",
+      "source_url": "https://armyinform.com.ua/2026/08/27/syly-ppo-zbyly-vnochi-oniks-sim-balistychnyh-raket-ta-222-bpla/",
+      "terminal_state": "VERIFIED_CANDIDATE"
+    },
+    {
+      "attempts": 1,
+      "bytes_read": 124322,
+      "content_hash": "b937beb4552dc761c0fc339cc0e2f4e20dab12c4053228085a7a3700403715ed",
+      "content_type": "text/html; charset=UTF-8",
+      "hash_scope": "first_1000000_bytes",
+      "http_status": 200,
+      "keyword_hits": [
+        "s8000",
+        "бандерол",
+        "реактив"
+      ],
+      "latency_ms": 635.86,
+      "origin_lineage": "AIR_FORCE_VIA_ARMYINFORM",
+      "promotion_state": "LIVE_SHADOW_CANDIDATE",
+      "raw_content_persisted": false,
+      "source_class": "official_media",
+      "source_id": "ARMYINFORM-20260828",
+      "source_url": "https://armyinform.com.ua/2026/08/28/protyagom-dnya-vorog-atakuvav-ukrayinu-96-udarnymy-bpla/",
+      "terminal_state": "VERIFIED_CANDIDATE"
+    },
+    {
+      "attempts": 1,
+      "bytes_read": 112571,
+      "content_hash": "8340fd603be51c79df24b5012052ae56db43ad2a63dc6f5bd04b0b862744a02c",
+      "content_type": "text/html; charset=UTF-8",
+      "hash_scope": "first_1000000_bytes",
+      "http_status": 200,
+      "keyword_hits": [
+        "бандерол",
+        "підприємств",
+        "реактив"
+      ],
+      "latency_ms": 210.179,
+      "origin_lineage": "SUSPILNE_CHERNIHIV",
+      "promotion_state": "LIVE_SHADOW_CANDIDATE",
+      "raw_content_persisted": false,
+      "source_class": "independent_public_broadcaster",
+      "source_id": "SUSPILNE-CHERNIHIV-20260813",
+      "source_url": "https://suspilne.media/chernihiv/1377778-pid-udarom-rf-opinilosa-se-odne-pidpriemstvo-cernigova/",
+      "terminal_state": "VERIFIED_CANDIDATE"
+    },
+    {
+      "attempts": 1,
+      "bytes_read": 212596,
+      "content_hash": "384a9cf974106ddf24e62f7d7375842debfcf51b6a4e8f323e073b6b665c8234",
+      "content_type": "text/html; charset=UTF-8",
+      "hash_scope": "first_1000000_bytes",
+      "http_status": 200,
+      "keyword_hits": [
+        "modem",
+        "rfd900",
+        "telemetry"
+      ],
+      "latency_ms": 1433.124,
+      "origin_lineage": "RFDESIGN",
+      "promotion_state": "LIVE_SHADOW_CANDIDATE",
+      "raw_content_persisted": false,
+      "source_class": "manufacturer_technical",
+      "source_id": "RFDESIGN-MODEMS",
+      "source_url": "https://rfdesign.com.au/modems/",
+      "terminal_state": "VERIFIED_CANDIDATE"
+    },
+    {
+      "attempts": 1,
+      "bytes_read": 634334,
+      "content_hash": "55038a63cfe3d4552d7b8c8570862329019992963a5ad60c314ce6fcea2921c6",
+      "content_type": "text/html",
+      "hash_scope": "first_1000000_bytes",
+      "http_status": 200,
+      "keyword_hits": [
+        "air defence",
+        "geran",
+        "gerbera"
+      ],
+      "latency_ms": 33.527,
+      "origin_lineage": "RUSI",
+      "promotion_state": "LIVE_SHADOW_CANDIDATE",
+      "raw_content_persisted": false,
+      "source_class": "independent_research",
+      "source_id": "RUSI-AIR-WAR-2026",
+      "source_url": "https://www.rusi.org/explore-our-research/publications/commentary/four-years-update-air-war-over-ukraine",
+      "terminal_state": "VERIFIED_CANDIDATE"
+    }
+  ],
+  "promotion_state": "LIVE_SHADOW_CANDIDATE",
+  "receipt_hash": "faf909d09460ee9e6d6f500ea178fbeb4a6f6f387f624a9eee1225dc7e4b56e2",
+  "result": "PASS",
+  "retry_exhausted": 0,
+  "run_id": "ccfcfaf3-185c-4508-b0ee-1f7a491d5a73",
+  "schema": "REACTIVE_UAV_S8000_LIVE_RECEIPT_V1",
+  "source_blocked": 0,
+  "sources_total": 12,
+  "verified_candidates": 12
+}
