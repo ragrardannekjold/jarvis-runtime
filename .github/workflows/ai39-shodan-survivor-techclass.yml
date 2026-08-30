@@ -1,0 +1,48 @@
+name: AI39 Shodan aggregate geolocation validity check
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  analyze:
+    runs-on: ubuntu-latest
+    timeout-minutes: 6
+    env:
+      SHODAN_API_KEY: ${{ secrets.SHODAN_API_KEY }}
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install --disable-pip-version-check requests
+      - name: Top city and region facets for AS202279 only
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          python - <<'PY'
+          import json,os,datetime,requests
+          K=os.environ.get('SHODAN_API_KEY','').strip(); Q='asn:AS202279'; H={'User-Agent':'AI39-aggregate-passive-research/1.0'}
+          out={'generated_utc':datetime.datetime.now(datetime.timezone.utc).isoformat(),'scope':'Aggregate Shodan geolocation-facet validity check for AS202279 only; no IPs, hosts, banners, exact coordinates or target records retained.','status':'UNKNOWN'}
+          def info():
+              r=requests.get('https://api.shodan.io/api-info',params={'key':K},timeout=30,headers=H);r.raise_for_status();return r.json().get('query_credits')
+          if not K:out['status']='NO_SECRET'
+          else:
+              b=info();r=requests.get('https://api.shodan.io/shodan/host/count',params={'key':K,'query':Q,'facets':'city:30,region:20,country:10'},timeout=60,headers=H);r.raise_for_status();j=r.json();a=info()
+              out['status']='MEASURED';out['current_total']=j.get('total');out['credits_delta']=(b-a) if isinstance(b,int) and isinstance(a,int) else None
+              out['facets']={}
+              for f in ('city','region','country'):
+                  out['facets'][f]=[{'value':str(x.get('value')),'count':int(x['count'])} for x in (j.get('facets') or {}).get(f,[])[:30] if isinstance(x.get('count'),(int,float))]
+          out['interpretation_limit']='Shodan city/region is provider geolocation metadata and can be stale, centralized or inaccurate. It is evaluated here only to decide whether Shodan can localize the regional infrastructure signal at broad-city level.'
+          with open('out/shodan_geo_validity.json','w') as f:json.dump(out,f,indent=2)
+          print(json.dumps(out,indent=2))
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ai39-shodan-geo-validity
+          path: out/shodan_geo_validity.json
+          if-no-files-found: error
+          retention-days: 2
