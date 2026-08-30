@@ -1,0 +1,49 @@
+{
+  "schema_version": 1,
+  "source_path": "plugin/utility-search/lib/public-catalog.js",
+  "source_sha256": "8102e67608a18df56c31164ff8688dc70c40648afd628aa107c67fa6c30e866c",
+  "utilities": [
+    {
+      "id": "github.repo_ops",
+      "name": "GitHub Repository Operations",
+      "url": "https://github.com/ragrardannekjold/jarvis-command-center",
+      "aliases": ["github", "git", "repository", "репозиторій", "гітхаб"],
+      "intents": ["repository work", "code search", "issue triage", "pull request"],
+      "capabilities": ["repository search", "file search", "issue operations", "branch operations"],
+      "cost_class": "included",
+      "max_usd_per_run": 0,
+      "risk_mode": "controlled_write",
+      "confirmation_required": true,
+      "health": "healthy",
+      "priority": 95
+    },
+    {
+      "id": "google_drive.search",
+      "name": "Google Drive Search",
+      "url": "https://drive.google.com/",
+      "aliases": ["google drive", "drive search", "диск", "recovery snapshot"],
+      "intents": ["find file", "search registry snapshot", "fallback utility discovery"],
+      "capabilities": ["file search", "document discovery", "recovery snapshot search"],
+      "cost_class": "included",
+      "max_usd_per_run": 0,
+      "risk_mode": "read_only",
+      "confirmation_required": false,
+      "health": "healthy",
+      "priority": 92
+    },
+    {
+      "id": "chatgpt.web_search",
+      "name": "ChatGPT Web Search",
+      "url": "https://chatgpt.com/",
+      "aliases": ["web search", "internet search", "веб пошук", "пошук в інтернеті"],
+      "intents": ["current information", "external verification", "fresh research"],
+      "capabilities": ["web search", "source verification", "current information", "citations"],
+      "cost_class": "included",
+      "max_usd_per_run": 0,
+      "risk_mode": "read_only",
+      "confirmation_required": false,
+      "health": "healthy",
+      "priority": 85
+    }
+  ]
+}
