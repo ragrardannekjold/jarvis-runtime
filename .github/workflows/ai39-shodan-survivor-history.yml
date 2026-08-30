@@ -1,0 +1,79 @@
+name: AI39 RIPE routing-history correction
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  analyze:
+    runs-on: ubuntu-latest
+    timeout-minutes: 6
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install --disable-pip-version-check requests
+      - name: Aggregate monthly routing history
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          python - <<'PY'
+          import json, datetime, requests
+          ASN='AS202279'
+          OUT={
+            'generated_utc':datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            'scope':'Aggregate RIPE routing-history correction only; no prefix identities, IPs, hosts or exact locations retained.',
+            'asn':ASN,
+            'status':'UNKNOWN'
+          }
+          def parse_dt(s):
+              x=datetime.datetime.fromisoformat(s.replace('Z','+00:00'))
+              if x.tzinfo is None:
+                  x=x.replace(tzinfo=datetime.timezone.utc)
+              return x.astimezone(datetime.timezone.utc)
+          try:
+              r=requests.get('https://stat.ripe.net/data/routing-history/data.json',params={
+                'resource':ASN,
+                'starttime':'2026-01-01T00:00:00',
+                'endtime':'2026-08-23T00:00:00',
+                'min_peers':5
+              },timeout=90,headers={'User-Agent':'AI39-aggregate-passive-research/1.0'})
+              r.raise_for_status(); data=(r.json().get('data') or {})
+              timelines=[]
+              for origin in data.get('by_origin') or []:
+                  for pref in origin.get('prefixes') or []:
+                      tls=[]
+                      for tl in pref.get('timelines') or []:
+                          s=tl.get('starttime'); e=tl.get('endtime')
+                          if isinstance(s,str) and isinstance(e,str):
+                              try: tls.append((parse_dt(s),parse_dt(e)))
+                              except Exception: pass
+                      if tls: timelines.append(tls)
+              months=['2026-01-15','2026-02-15','2026-03-15','2026-04-15','2026-05-15','2026-06-15','2026-07-15','2026-08-15']
+              monthly=[]
+              for day in months:
+                  t=parse_dt(day+'T12:00:00+00:00')
+                  n=sum(1 for tls in timelines if any(s<=t<=e for s,e in tls))
+                  monthly.append({'month':day[:7],'active_prefix_count':n})
+              OUT.update({
+                'status':'MEASURED',
+                'monthly_active_prefix_count':monthly,
+                'prefix_records_with_timeline':len(timelines),
+                'monthly_prefix_count_range':[min(x['active_prefix_count'] for x in monthly),max(x['active_prefix_count'] for x in monthly)] if monthly else None,
+                'interpretation_limit':'Routing visibility is an infrastructure signal, not proof of people, military use, ownership, operational control or physical location.'
+              })
+          except Exception as e:
+              OUT['status']='ERROR'; OUT['error_class']=type(e).__name__
+          with open('out/ripe_routing_history.json','w') as f: json.dump(OUT,f,indent=2)
+          print(json.dumps(OUT,indent=2))
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ai39-ripe-routing-history
+          path: out/ripe_routing_history.json
+          if-no-files-found: error
+          retention-days: 2
