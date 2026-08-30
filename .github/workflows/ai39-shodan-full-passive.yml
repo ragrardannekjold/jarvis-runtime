@@ -1,0 +1,13 @@
+name: AI39 Shodan full passive telecom cluster
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  completed-probe:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo 'Completed as PR #43 run 32615425977; frozen to prevent duplicate paid queries.'

@@ -1,0 +1,13 @@
+name: AI39 Shodan negative controls
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  completed-probe:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo 'Completed as PR #43 run 32615517310; frozen to prevent duplicate queries.'

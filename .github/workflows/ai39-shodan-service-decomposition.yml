@@ -1,0 +1,107 @@
+name: AI39 Shodan service decomposition
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  services:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      SHODAN_API_KEY: ${{ secrets.SHODAN_API_KEY }}
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install --disable-pip-version-check requests
+      - name: Decompose cluster exposure collapse by passive service families
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          python - <<'PY'
+          import json, os, time
+          from datetime import datetime, timezone
+          import requests
+
+          key=os.environ.get('SHODAN_API_KEY','').strip()
+          asns=['AS202279','AS206810','AS39089','AS201776','AS35273']
+          services=[
+            {'port':53,'class':'DNS'},
+            {'port':80,'class':'HTTP'},
+            {'port':443,'class':'HTTPS'},
+            {'port':22,'class':'SSH'},
+            {'port':23,'class':'TELNET'},
+            {'port':161,'class':'SNMP'},
+            {'port':179,'class':'BGP'},
+            {'port':554,'class':'RTSP'},
+            {'port':1701,'class':'L2TP'},
+            {'port':1723,'class':'PPTP'},
+            {'port':2000,'class':'MIKROTIK_BW_TEST'},
+            {'port':8291,'class':'MIKROTIK_WINBOX'},
+          ]
+          out={'generated_utc':datetime.now(timezone.utc).isoformat(),'status':'UNKNOWN','asns':{},'credits_before':None,'credits_after':None,'credits_delta':None,
+               'purpose':'Determine whether the 2026 Shodan collapse is broad physical/service loss or selective de-exposure/hardening of management/CPE classes.',
+               'safety':'Aggregate Shodan Trends/count queries only; no host identifiers, banners, screenshots, vulnerabilities or exact locations.'}
+
+          def info():
+            r=requests.get('https://api.shodan.io/api-info',params={'key':key},timeout=30); r.raise_for_status(); return r.json()
+          def trend(query):
+            r=requests.get('https://trends.shodan.io/api/v1/search',params={'key':key,'query':query},timeout=90)
+            if r.status_code!=200: return {'http':r.status_code,'monthly':[]}
+            j=r.json(); months=[]
+            for m in j.get('matches',[]):
+              if isinstance(m.get('month'),str) and isinstance(m.get('count'),(int,float)):
+                months.append({'month':m['month'],'count':int(m['count'])})
+            months.sort(key=lambda x:x['month'])
+            return {'http':200,'monthly':months[-24:]}
+          def current_count(query):
+            r=requests.get('https://api.shodan.io/shodan/host/count',params={'key':key,'query':query},timeout=60); r.raise_for_status(); return r.json().get('total')
+          def pct(a,b):
+            return round((b-a)/a*100,2) if isinstance(a,int) and a>0 and isinstance(b,int) else None
+
+          if not key:
+            out['status']='NO_SECRET'
+          else:
+            b=info().get('query_credits'); out['credits_before']=b if isinstance(b,int) else None
+            for asn in asns:
+              total=trend('asn:'+asn); td={x['month']:x['count'] for x in total['monthly']}
+              rec={'total_monthly':total['monthly'],'total_current':None,'service_classes':[]}
+              try: rec['total_current']=current_count('asn:'+asn)
+              except Exception as e: rec['count_error']=type(e).__name__
+              for s in services:
+                q=f"asn:{asn} port:{s['port']}"
+                t=trend(q); d={x['month']:x['count'] for x in t['monthly']}
+                jan=d.get('2026-01'); mar=d.get('2026-03'); aug=d.get('2026-08')
+                tj=td.get('2026-01'); ta=td.get('2026-08')
+                row={'port':s['port'],'class':s['class'],'trend_http_status':t['http'],'jan':jan,'mar':mar,'aug':aug,
+                     'jan_to_mar_pct':pct(jan,mar),'jan_to_aug_pct':pct(jan,aug),
+                     'share_jan_pct':round(jan/tj*100,2) if isinstance(jan,int) and isinstance(tj,int) and tj>0 else None,
+                     'share_aug_pct':round(aug/ta*100,2) if isinstance(aug,int) and isinstance(ta,int) and ta>0 else None}
+                try: row['current_count']=current_count(q)
+                except Exception as e: row['count_error']=type(e).__name__
+                rec['service_classes'].append(row)
+                time.sleep(0.12)
+              out['asns'][asn]=rec
+            a=info().get('query_credits'); out['credits_after']=a if isinstance(a,int) else None
+            if isinstance(out['credits_before'],int) and isinstance(out['credits_after'],int): out['credits_delta']=out['credits_before']-out['credits_after']
+            out['status']='VERIFIED_SERVICE_DECOMPOSITION'
+          with open('out/services.json','w') as f: json.dump(out,f,indent=2)
+          compact={'status':out['status'],'credits_delta':out.get('credits_delta'),'asns':{}}
+          for asn,rec in out.get('asns',{}).items():
+            compact['asns'][asn]=[
+              {'class':x['class'],'jan':x['jan'],'mar':x['mar'],'aug':x['aug'],'jan_to_aug_pct':x['jan_to_aug_pct'],'share_jan_pct':x['share_jan_pct'],'share_aug_pct':x['share_aug_pct']}
+              for x in rec['service_classes'] if any(isinstance(x.get(k),int) and x.get(k)>0 for k in ('jan','mar','aug'))
+            ]
+          print(json.dumps(compact,indent=2))
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ai39-shodan-service-decomposition
+          path: out/services.json
+          if-no-files-found: error
+          retention-days: 2
