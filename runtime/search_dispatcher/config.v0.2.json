@@ -1,0 +1,79 @@
+{
+  "schema_version": 2,
+  "capacity": {
+    "logical_total": 15,
+    "protected_reserve": 5,
+    "physical_running": 2
+  },
+  "lease_seconds": 300,
+  "routes": [
+    {
+      "route_id": "utility-search.local.background",
+      "executor_id": "utility-search.local-catalog",
+      "capability": "utility.catalog.search",
+      "lane": "background",
+      "priority": 100,
+      "failure_domain": "local-runtime",
+      "verification_state": "VERIFIED",
+      "health": "HEALTHY",
+      "execution_context": "COMPATIBLE_NONINTERACTIVE",
+      "zero_spend": true,
+      "read_only": true,
+      "idempotent": true,
+      "effect_scope": "local_pure",
+      "timeout_seconds": 20,
+      "max_parallel": 10
+    },
+    {
+      "route_id": "utility-search.snapshot.background",
+      "executor_id": "utility-search.bundled-snapshot",
+      "capability": "utility.catalog.search",
+      "lane": "background",
+      "priority": 90,
+      "failure_domain": "bundled-snapshot-python",
+      "verification_state": "VERIFIED",
+      "health": "HEALTHY",
+      "execution_context": "COMPATIBLE_NONINTERACTIVE",
+      "zero_spend": true,
+      "read_only": true,
+      "idempotent": true,
+      "effect_scope": "local_pure",
+      "timeout_seconds": 10,
+      "max_parallel": 10
+    },
+    {
+      "route_id": "utility-search.local.protected",
+      "executor_id": "utility-search.local-catalog",
+      "capability": "utility.catalog.search",
+      "lane": "protected",
+      "priority": 100,
+      "failure_domain": "local-runtime",
+      "verification_state": "VERIFIED",
+      "health": "HEALTHY",
+      "execution_context": "COMPATIBLE_NONINTERACTIVE",
+      "zero_spend": true,
+      "read_only": true,
+      "idempotent": true,
+      "effect_scope": "local_pure",
+      "timeout_seconds": 20,
+      "max_parallel": 5
+    },
+    {
+      "route_id": "utility-search.snapshot.protected",
+      "executor_id": "utility-search.bundled-snapshot",
+      "capability": "utility.catalog.search",
+      "lane": "protected",
+      "priority": 90,
+      "failure_domain": "bundled-snapshot-python",
+      "verification_state": "VERIFIED",
+      "health": "HEALTHY",
+      "execution_context": "COMPATIBLE_NONINTERACTIVE",
+      "zero_spend": true,
+      "read_only": true,
+      "idempotent": true,
+      "effect_scope": "local_pure",
+      "timeout_seconds": 10,
+      "max_parallel": 5
+    }
+  ]
+}

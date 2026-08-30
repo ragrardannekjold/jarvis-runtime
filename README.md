@@ -42,6 +42,8 @@ Historical public-queue canary [issue #278](https://github.com/ragrardannekjold/
 
 Runtime Anomaly Sentinel v0.1 lives at `runtime/anomaly-sentinel/`. It observes GitHub Actions at the source, collapses repeated active failures into one sanitized `[ANOMALY]` issue, and closes the issue after a newer successful run. Expected concurrency cancellations remain distinct from outages. The hourly worker never reads mailbox content and never retries failed workflows.
 
+Search Dispatcher v0.2 lives at `runtime/search_dispatcher/`. It is a contained SQLite/WAL control-plane core with canonical intent deduplication, 15/5 logical capacity, leases and crash fencing, immutable result/terminal receipts, a real allowlisted Utility Search catalog executor, and truth-guarded terminal readback. Its checked-in CI proves 13 behavioral invariants, a real executor smoke, and a five-process local restart canary. It is **not** a remotely persistent private production queue: no new shared-token lane is enabled, `DISPATCH_READY` and `RUNNING` are never completion, and `CONTROL_PLANE_PERSISTENT` remains unavailable until an authorized durable backend passes a fresh-runtime readback without lost or duplicate work.
+
 Phase 1 restores **independent control-plane validation** outside the private repository's billing-blocked GitHub-hosted Actions.
 
 It does **not yet** execute project-native workflows locally. The heartbeat therefore explicitly reports:
