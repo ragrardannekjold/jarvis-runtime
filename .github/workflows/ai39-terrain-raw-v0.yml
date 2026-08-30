@@ -1,0 +1,186 @@
+name: AI39 Terrain Raw v0
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  terrain_raw:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install --disable-pip-version-check numpy scipy rasterio pillow pystac-client planetary-computer
+      - name: Build Terrain Raw v0
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p out/lod
+          python - <<'PY'
+          import json, math, os
+          from datetime import datetime, timezone
+          import numpy as np
+          from scipy.ndimage import gaussian_filter
+          import rasterio
+          from rasterio.warp import reproject
+          from rasterio.enums import Resampling
+          from rasterio.transform import from_bounds
+          from PIL import Image, ImageEnhance
+          from pystac_client import Client
+          import planetary_computer
+
+          # Same broad AI-39 terrain AOI already used by the verified DEM pass.
+          BBOX=[37.65,48.45,38.25,48.90]
+          W,H=1800,1350
+          tr=from_bounds(*BBOX,W,H)
+          dem=np.full((H,W),np.nan,np.float32)
+          ids=[]
+
+          cat=Client.open('https://planetarycomputer.microsoft.com/api/stac/v1')
+          items=list(cat.search(collections=['cop-dem-glo-30'],bbox=BBOX).items())
+          for it in items[:20]:
+              planetary_computer.sign_inplace(it)
+              asset=it.assets.get('data') or next((a for a in it.assets.values() if 'tif' in a.href.lower()),None)
+              if not asset:
+                  continue
+              tmp=np.full((H,W),np.nan,np.float32)
+              try:
+                  with rasterio.open(asset.href) as ds:
+                      reproject(
+                          source=rasterio.band(ds,1), destination=tmp,
+                          src_transform=ds.transform, src_crs=ds.crs, src_nodata=ds.nodata,
+                          dst_transform=tr, dst_crs='EPSG:4326', dst_nodata=np.nan,
+                          resampling=Resampling.bilinear)
+                  m=np.isfinite(tmp)
+                  dem[m]=tmp[m]
+                  ids.append(it.id)
+              except Exception:
+                  pass
+
+          valid=np.isfinite(dem)
+          if valid.mean()<0.95:
+              raise RuntimeError(f'insufficient DEM coverage: {valid.mean():.3f}')
+          fill=float(np.nanmedian(dem[valid]))
+          d=np.where(valid,dem,fill).astype(np.float32)
+
+          lat=(BBOX[1]+BBOX[3])/2
+          dx=((BBOX[2]-BBOX[0])*111320*math.cos(math.radians(lat)))/W
+          dy=((BBOX[3]-BBOX[1])*110540)/H
+          gy,gx=np.gradient(d,dy,dx)
+          slope_rad=np.arctan(np.hypot(gx,gy))
+          aspect=np.arctan2(-gx,gy)
+
+          # Multi-directional hillshade reduces dependence on one synthetic sun azimuth.
+          alt=math.radians(35)
+          hill=[]
+          for az_deg in (45,135,225,315):
+              az=math.radians(az_deg)
+              h=(np.sin(alt)*np.cos(slope_rad)+
+                 np.cos(alt)*np.sin(slope_rad)*np.cos(az-aspect))
+              hill.append(np.clip(h,0,1))
+          hs=np.mean(hill,axis=0)
+          hs8=np.clip((hs**0.85)*255,0,255).astype(np.uint8)
+
+          # Gentle hypsometric tint; geometry remains DEM truth, tint is visualization only.
+          p02,p98=np.percentile(d[valid],[2,98])
+          zn=np.clip((d-p02)/(p98-p02+1e-6),0,1)
+          # muted lowland -> upland palette
+          stops=np.array([
+              [0.00, 67, 88, 72],
+              [0.25, 93,112, 80],
+              [0.50,128,126, 91],
+              [0.75,145,126,102],
+              [1.00,162,151,134]],dtype=float)
+          rgb=np.zeros((H,W,3),dtype=float)
+          for i in range(len(stops)-1):
+              a,b=stops[i],stops[i+1]
+              lo,hi=a[0],b[0]
+              m=(zn>=lo)&(zn<=hi)
+              t=np.clip((zn-lo)/(hi-lo+1e-9),0,1)
+              for c in range(3):
+                  rgb[:,:,c][m]=a[c+1]+(b[c+1]-a[c+1])*t[m]
+          # terrain tint multiplied by hillshade, not vice versa
+          shade=(0.50+0.50*hs)[:,:,None]
+          terrain_rgb=np.clip(rgb*shade,0,255).astype(np.uint8)
+
+          # COG writer with overviews = native deep-zoom-ready raw layer.
+          def write_cog(path,arr,dtype,nodata=None,resampling='average'):
+              count=1 if arr.ndim==2 else arr.shape[2]
+              profile={
+                  'driver':'GTiff','width':W,'height':H,'count':count,'dtype':dtype,
+                  'crs':'EPSG:4326','transform':tr,'tiled':True,
+                  'blockxsize':256,'blockysize':256,'compress':'DEFLATE','predictor':2,
+                  'BIGTIFF':'IF_SAFER'
+              }
+              if nodata is not None: profile['nodata']=nodata
+              with rasterio.open(path,'w',**profile) as dst:
+                  if count==1:
+                      dst.write(arr.astype(dtype),1)
+                  else:
+                      for i in range(count): dst.write(arr[:,:,i].astype(dtype),i+1)
+                  factors=[2,4,8,16]
+                  rs=Resampling.average if resampling=='average' else Resampling.bilinear
+                  dst.build_overviews(factors,rs)
+                  dst.update_tags(ns='rio_overview',resampling=resampling)
+
+          write_cog('out/terrain_dem_cog.tif',d,'float32',nodata=None,resampling='bilinear')
+          write_cog('out/terrain_hillshade_cog.tif',hs8,'uint8',nodata=0,resampling='average')
+          write_cog('out/terrain_tint_cog.tif',terrain_rgb,'uint8',nodata=0,resampling='average')
+
+          # Human-friendly previews and LOD textures.
+          Image.fromarray(terrain_rgb).save('out/terrain_preview.webp','WEBP',quality=88,method=6)
+          Image.fromarray(hs8).save('out/hillshade_preview.webp','WEBP',quality=90,method=6)
+
+          for target_w in (225,450,900,1800):
+              target_h=round(H*target_w/W)
+              im=Image.fromarray(terrain_rgb).resize((target_w,target_h),Image.Resampling.LANCZOS)
+              im.save(f'out/lod/terrain_{target_w}.webp','WEBP',quality=86,method=6)
+              him=Image.fromarray(hs8).resize((target_w,target_h),Image.Resampling.LANCZOS)
+              him.save(f'out/lod/hillshade_{target_w}.webp','WEBP',quality=88,method=6)
+
+          # Compact normalized height texture for browser/WebGL proof-of-concept.
+          dmin,dmax=float(np.min(d[valid])),float(np.max(d[valid]))
+          q=np.clip(np.round((d-dmin)/(dmax-dmin+1e-6)*65535),0,65535).astype(np.uint16)
+          Image.fromarray(q,mode='I;16').save('out/height_u16.png')
+
+          meta={
+              'generated_utc':datetime.now(timezone.utc).isoformat(),
+              'product':'AI39 Terrain Raw v0',
+              'source':'Copernicus DEM GLO-30 via Microsoft Planetary Computer',
+              'dem_ids':ids,
+              'native_source_class':'~30 m DEM; reprojection grid does not create finer real detail',
+              'grid':[W,H],
+              'bbox_internal':BBOX,
+              'valid_percent':round(float(valid.mean()*100),3),
+              'elevation_min_m':round(dmin,2),
+              'elevation_max_m':round(dmax,2),
+              'elevation_p02_p98_m':[round(float(p02),2),round(float(p98),2)],
+              'pixel_size_approx_m':[round(dx,2),round(dy,2)],
+              'layers':{
+                  'terrain_dem_cog.tif':'scientific geometry/raw elevation with internal overviews',
+                  'terrain_hillshade_cog.tif':'multi-directional hillshade visualization',
+                  'terrain_tint_cog.tif':'muted hypsometric tint + hillshade visualization',
+                  'height_u16.png':'normalized browser height texture; decode with elevation_min/max',
+                  'lod/':'lightweight progressive textures for mobile preview'
+              },
+              'truth_boundary':[
+                  'No generative detail or AI super-resolution is used to define terrain geometry.',
+                  'Deep zoom preserves native DEM information but cannot reveal true sub-30 m terrain detail.',
+                  'Future higher-resolution DSM/DEM patches may replace local tiles without changing the layer contract.',
+                  'No intelligence overlays, exact current unit positions, routes, emitters or targeting layers are included.'
+              ]
+          }
+          json.dump(meta,open('out/terrain_meta.json','w'),ensure_ascii=False,indent=2)
+          print(json.dumps({k:meta[k] for k in ('product','source','valid_percent','elevation_min_m','elevation_max_m','pixel_size_approx_m')},indent=2))
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ai39-terrain-raw-v0
+          path: out
+          if-no-files-found: error
+          retention-days: 2
