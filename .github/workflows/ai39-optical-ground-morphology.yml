@@ -1,0 +1,181 @@
+name: AI39 optical ground morphology
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  morphology:
+    runs-on: ubuntu-latest
+    timeout-minutes: 22
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install --disable-pip-version-check requests numpy scipy rasterio pystac-client planetary-computer
+      - name: Broad persistent noncrop component morphology
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          python - <<'PY'
+          import json, math, warnings
+          from datetime import datetime, timezone
+          import numpy as np, requests, rasterio
+          from scipy import ndimage
+          from rasterio.warp import reproject
+          from rasterio.enums import Resampling
+          from rasterio.transform import from_bounds
+          from pystac_client import Client
+          import planetary_computer
+
+          warnings.filterwarnings('ignore')
+          BBOX=[37.65,48.45,38.25,48.90]
+          W,H=1600,1200
+          TR=from_bounds(*BBOX,W,H)
+          DATES=['2026-07-28','2026-07-31','2026-08-05','2026-08-15','2026-08-17','2026-08-20']
+          STAC='https://earth-search.aws.element84.com/v1/search'
+
+          lat=(BBOX[1]+BBOX[3])/2
+          px_x=((BBOX[2]-BBOX[0])*111320*math.cos(math.radians(lat)))/W
+          px_y=((BBOX[3]-BBOX[1])*110540)/H
+          px_m=(px_x*px_y)**0.5
+          minor_floor_m=0.5*min(px_x,px_y)
+
+          def rp(href,dtype='float32',resampling=Resampling.bilinear,nodata=0):
+              out=np.full((H,W),nodata,dtype=dtype)
+              with rasterio.Env(AWS_NO_SIGN_REQUEST='YES',GDAL_DISABLE_READDIR_ON_OPEN='EMPTY_DIR'):
+                  with rasterio.open(href) as ds:
+                      reproject(source=rasterio.band(ds,1),destination=out,src_transform=ds.transform,src_crs=ds.crs,
+                                src_nodata=ds.nodata,dst_transform=TR,dst_crs='EPSG:4326',dst_nodata=nodata,resampling=resampling)
+              return out
+
+          pc=Client.open('https://planetarycomputer.microsoft.com/api/stac/v1',modifier=planetary_computer.sign_inplace)
+          lc_items=list(pc.search(collections=['io-lulc-9-class'],bbox=BBOX,datetime='2023-01-01/2023-12-31').items())
+          lc=np.zeros((H,W),np.uint8); lc_ids=[]
+          for it in lc_items:
+              a=it.assets.get('data') or it.assets.get('map') or next((x for x in it.assets.values() if x.href.lower().endswith(('.tif','.tiff'))),None)
+              if not a: continue
+              try:
+                  t=rp(a.href,'uint8',Resampling.nearest,0);m=t>0;lc[m]=t[m];lc_ids.append(it.id)
+              except Exception: pass
+          if (lc>0).mean()<0.5: raise RuntimeError('insufficient landcover')
+
+          def search_day(day):
+              r=requests.post(STAC,json={'collections':['sentinel-2-c1-l2a'],'bbox':BBOX,'datetime':day+'T00:00:00Z/'+day+'T23:59:59Z','limit':100},timeout=90)
+              r.raise_for_status();return r.json().get('features',[])
+
+          def scene(day):
+              red=np.zeros((H,W),np.float32);blue=np.zeros_like(red);nir=np.zeros_like(red);s16=np.zeros_like(red);s22=np.zeros_like(red);scl=np.zeros((H,W),np.uint8);ids=[]
+              for it in search_day(day):
+                  a=it.get('assets',{});keys=['red','blue','nir08','swir16','swir22','scl']
+                  if not all((a.get(k) or {}).get('href') for k in keys):continue
+                  try:
+                      rr=rp(a['red']['href']);bb=rp(a['blue']['href']);nn=rp(a['nir08']['href']);x16=rp(a['swir16']['href']);x22=rp(a['swir22']['href']);cc=rp(a['scl']['href'],'uint8',Resampling.nearest,0)
+                  except Exception:continue
+                  m=(rr>0)&(bb>0)&(nn>0)&(x16>0)&(x22>0)
+                  red[m]=rr[m];blue[m]=bb[m];nir[m]=nn[m];s16[m]=x16[m];s22[m]=x22[m];scl[m]=cc[m];ids.append(it.get('id'))
+              valid=(red>0)&(blue>0)&(nir>0)&(s16>0)&(s22>0)
+              clear=valid & np.isin(scl,[2,4,5,6,7])
+              def idx(num,den):
+                  o=np.full((H,W),np.nan,np.float32);o[clear]=num[clear]/(den[clear]+1e-6);return o
+              return {'date':day,'ids':ids,'clear':clear,'ndvi':idx(nir-red,nir+red),'nbr':idx(nir-s22,nir+s22),'bsi':idx((s16+red)-(nir+blue),(s16+red)+(nir+blue))}
+
+          scenes=[scene(d) for d in DATES]
+          usable=[s for s in scenes if s['ids']]
+          if len(usable)<5: raise RuntimeError('insufficient optical dates')
+          early=usable[:3];late=usable[-3:]
+          def comp(key,arr):
+              st=np.stack([s[key] for s in arr]);cnt=np.isfinite(st).sum(0);med=np.nanmedian(st,axis=0);med[cnt<2]=np.nan;return med
+          e={k:comp(k,early) for k in ['ndvi','nbr','bsi']}; l={k:comp(k,late) for k in ['ndvi','nbr','bsi']}
+          valid=np.isfinite(e['ndvi'])&np.isfinite(e['nbr'])&np.isfinite(e['bsi'])&np.isfinite(l['ndvi'])&np.isfinite(l['nbr'])&np.isfinite(l['bsi'])
+          bare=(lc==8);range_=(lc==11);noncrop=bare|range_
+          base=valid&noncrop&((l['ndvi']-e['ndvi'])<=-0.08)&((l['nbr']-e['nbr'])<=-0.08)&((l['bsi']-e['bsi'])>=0.08)
+          persist=np.zeros((H,W),np.uint8)
+          for s in late:
+              m=s['clear']&np.isfinite(e['ndvi'])&np.isfinite(e['bsi'])
+              persist += (m&((s['ndvi']-e['ndvi'])<=-0.06)&((s['bsi']-e['bsi'])>=0.06)).astype(np.uint8)
+          mask=base&(persist>=2)
+
+          def morph_metrics(sec_mask):
+              lab,n=ndimage.label(sec_mask,structure=np.ones((3,3),int))
+              comps=[]
+              for i in range(1,n+1):
+                  yy,xx=np.nonzero(lab==i);area=len(xx)
+                  if area<3:continue
+                  pts=np.column_stack((xx*px_x,yy*px_y)).astype(float)
+                  ctr=pts-pts.mean(0)
+                  cov=np.cov(ctr,rowvar=False)
+                  vals=np.sort(np.maximum(np.linalg.eigvalsh(cov),0))[::-1]
+                  major_sigma=float(np.sqrt(vals[0])) if len(vals) else 0.0
+                  minor_sigma=float(np.sqrt(vals[1])) if len(vals)>1 else 0.0
+                  effective_minor=max(minor_sigma,minor_floor_m)
+                  aspect=min(20.0,major_sigma/max(effective_minor,1e-6))
+                  major=float(4*major_sigma)
+                  er=ndimage.binary_erosion(lab==i,structure=np.ones((3,3),int),border_value=0)
+                  perimeter=int(((lab==i)&~er).sum())
+                  compact=float(4*math.pi*area/max(perimeter*perimeter,1))
+                  comps.append({'pixels':area,'aspect':aspect,'major_m':major,'compactness':compact})
+              if not comps:
+                  return {'components_ge3px':0,'components_ge6px':0,'linear_components':0,'linear_candidate_pixel_share_percent':0,'largest_component_pixels':0,'max_aspect_ratio':0,'median_aspect_ratio':0,'max_major_axis_class':'NONE'}
+              pix=sum(c['pixels'] for c in comps)
+              # Require enough support for a broad shape claim: >=6 pixels, regularized aspect >=3, approx major axis >=150 m.
+              lin=[c for c in comps if c['pixels']>=6 and c['aspect']>=3.0 and c['major_m']>=150]
+              maxmajor=max(c['major_m'] for c in comps)
+              cls='SHORT' if maxmajor<150 else ('MEDIUM' if maxmajor<400 else 'LONG')
+              return {
+                'components_ge3px':len(comps),
+                'components_ge6px':sum(c['pixels']>=6 for c in comps),
+                'linear_components':len(lin),
+                'linear_candidate_pixel_share_percent':round(sum(c['pixels'] for c in lin)/max(pix,1)*100,1),
+                'largest_component_pixels':max(c['pixels'] for c in comps),
+                'max_aspect_ratio':round(max(c['aspect'] for c in comps),2),
+                'median_aspect_ratio':round(float(np.median([c['aspect'] for c in comps])),2),
+                'max_major_axis_class':cls,
+              }
+
+          cells=[]
+          for rr in range(4):
+              for cc in range(4):
+                  sec=f"{'ABCD'[cc]}{rr+1}";ys=slice(rr*H//4,(rr+1)*H//4);xs=slice(cc*W//4,(cc+1)*W//4)
+                  nc=noncrop[ys,xs]&valid[ys,xs];m=mask[ys,xs]
+                  pct=float(m.sum()/nc.sum()*100) if nc.sum()>100 else 0
+                  mm=morph_metrics(m)
+                  cells.append({'sector':sec,'persistent_noncrop_percent':round(pct,3),**mm})
+
+          # Transparent AOI-relative ranking, no arbitrary confidence formula.
+          ranked=sorted(range(len(cells)),key=lambda i:(cells[i]['linear_candidate_pixel_share_percent'],cells[i]['linear_components'],cells[i]['persistent_noncrop_percent'],cells[i]['largest_component_pixels']))
+          rankpos={idx:pos for pos,idx in enumerate(ranked)}
+          for i,c in enumerate(cells): c['morphology_percentile']=round(rankpos[i]/max(len(cells)-1,1)*100,1)
+          cells.sort(key=lambda c:(c['morphology_percentile'],c['persistent_noncrop_percent']),reverse=True)
+
+          out={
+            'status':'MEASURED','generated_utc':datetime.now(timezone.utc).isoformat(),
+            'scope':'AI-39 broad 4x4 persistent non-crop ground-change morphology only; no component coordinates, trench lines, routes or target-level output',
+            'pixel_scale_m_approx':round(px_m,1),'minor_axis_regularization_floor_m':round(minor_floor_m,1),
+            'usable_dates':[s['date'] for s in usable],'early_dates':[s['date'] for s in early],'late_dates':[s['date'] for s in late],
+            'landcover_ids':lc_ids,'sector_summary':cells,
+            'method':{
+              'candidate':'historic bare/rangeland prior + early-to-late dNDVI<=-0.08, dNBR<=-0.08, dBSI>=0.08 + persistence on >=2/3 late dates',
+              'component_minimum':'3 connected pixels; broad linear candidate >=6 pixels, regularized PCA aspect >=3.0, approximate major axis >=150 m',
+              'regularization':'PCA minor sigma cannot be smaller than half the physical pixel scale; aspect capped at 20 to prevent tiny collinear components from numerical blow-up',
+              'ranking':'lexicographic AOI-relative percentile by linear pixel share, linear component count, persistent noncrop percent, largest component; no absolute human/fortification confidence derived'
+            },
+            'interpretation_rules':[
+              'At ~20-40m effective pixels, individual narrow trenches cannot be resolved reliably.',
+              'Elongated persistent non-crop components can prioritize broad earthwork/linear-disturbance review but are not trench evidence.',
+              'A high morphology percentile requires independent SAR/VHR/document evidence before human attribution.',
+              'No component coordinates are emitted.'
+            ]}
+          json.dump(out,open('out/morphology.json','w'),indent=2)
+          print(json.dumps({'pixel_scale_m_approx':out['pixel_scale_m_approx'],'minor_axis_floor_m':out['minor_axis_regularization_floor_m'],'top':cells[:8]},indent=2))
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ai39-optical-ground-morphology
+          path: out/morphology.json
+          if-no-files-found: error
+          retention-days: 2
