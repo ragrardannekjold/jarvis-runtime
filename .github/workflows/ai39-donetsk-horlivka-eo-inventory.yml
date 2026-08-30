@@ -1,0 +1,107 @@
+name: AI39 Donetsk Horlivka EO inventory
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  inventory:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install --disable-pip-version-check requests
+      - name: Metadata-only fresh EO inventory
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          python - <<'PY'
+          import json, requests
+          from collections import defaultdict
+          from datetime import datetime, timezone
+
+          # Broad Donetsk–Horlivka regional research contour. Exact geometry is not emitted in output.
+          BBOX=[37.55,47.82,38.30,48.40]
+          START='2026-07-24T00:00:00Z'; END='2026-08-23T23:59:59Z'
+          STAC='https://earth-search.aws.element84.com/v1/search'
+
+          def search(collection,limit=500):
+              r=requests.post(STAC,json={'collections':[collection],'bbox':BBOX,'datetime':START+'/'+END,'limit':limit},timeout=90)
+              r.raise_for_status();return r.json().get('features',[])
+
+          s2=search('sentinel-2-c1-l2a')
+          s1=search('sentinel-1-grd')
+
+          optical=[]
+          for it in s2:
+              p=it.get('properties',{}) or {}; dt=p.get('datetime') or ''
+              cloud=p.get('eo:cloud_cover')
+              assets=it.get('assets',{}) or {}
+              usable=all(k in assets for k in ['red','green','blue','nir08','swir16','swir22'])
+              optical.append({'date':dt[:10],'acquisition_utc':dt,'platform':p.get('platform'),'cloud_percent':cloud,'usable_multispectral_assets':usable,'id':it.get('id')})
+          optical.sort(key=lambda x:x['acquisition_utc'],reverse=True)
+
+          sar=[]
+          for it in s1:
+              p=it.get('properties',{}) or {}; dt=p.get('datetime') or ''
+              orbit=p.get('sat:relative_orbit') or p.get('sat:relative_orbit_number')
+              direction=p.get('sat:orbit_state')
+              pols=p.get('sar:polarizations') or []
+              sar.append({'date':dt[:10],'acquisition_utc':dt,'platform':p.get('platform'),'relative_orbit':orbit,'orbit_state':direction,'polarizations':pols,'id':it.get('id')})
+          sar.sort(key=lambda x:x['acquisition_utc'],reverse=True)
+
+          groups=defaultdict(list)
+          for x in sar:
+              groups[(str(x.get('relative_orbit')),str(x.get('orbit_state')),','.join(sorted(x.get('polarizations') or [])))].append(x)
+
+          pairs=[]
+          for key,arr in groups.items():
+              arr=sorted(arr,key=lambda x:x['acquisition_utc'])
+              for a,b in zip(arr[:-1],arr[1:]):
+                  try:
+                      da=datetime.fromisoformat(a['acquisition_utc'].replace('Z','+00:00'))
+                      db=datetime.fromisoformat(b['acquisition_utc'].replace('Z','+00:00'))
+                      delta=(db-da).total_seconds()/86400
+                  except Exception: continue
+                  if 5 <= delta <= 18:
+                      pairs.append({'before_date':a['date'],'after_date':b['date'],'days':round(delta,1),'relative_orbit':a['relative_orbit'],'orbit_state':a['orbit_state'],'polarizations':a['polarizations'],'before_id':a['id'],'after_id':b['id']})
+          pairs.sort(key=lambda x:x['after_date'],reverse=True)
+
+          # Deduplicate optical by date, keep best cloud item as a familiarization candidate.
+          byday={}
+          for x in optical:
+              d=x['date']; c=x['cloud_percent'] if isinstance(x['cloud_percent'],(int,float)) else 999
+              if d not in byday or c < (byday[d]['cloud_percent'] if isinstance(byday[d]['cloud_percent'],(int,float)) else 999): byday[d]=x
+          optical_days=sorted(byday.values(),key=lambda x:x['acquisition_utc'],reverse=True)
+          good=[x for x in optical_days if x['usable_multispectral_assets'] and isinstance(x['cloud_percent'],(int,float)) and x['cloud_percent']<=35]
+
+          out={
+            'status':'MEASURED','generated_utc':datetime.now(timezone.utc).isoformat(),
+            'scope':'Broad Donetsk-Horlivka EO metadata inventory only; exact AOI geometry omitted from output; no military positions or target-level interpretation',
+            'window':['2026-07-24','2026-08-23'],
+            'sentinel2_item_count':len(s2),'sentinel1_item_count':len(s1),
+            'fresh_optical_candidates':good[:8],
+            'freshest_usable_single_optical':good[0] if good else None,
+            'same_geometry_sar_pair_candidates':pairs[:12],
+            'freshest_sar_items':sar[:12],
+            'decision_rules':[
+              'Use a valid same-geometry SAR pair for change analysis only after actual overlap/quality readback.',
+              'If no useful pair exists, a strong single optical scene remains a familiarization/lead asset, not change evidence.',
+              'Metadata availability is not evidence of activity.',
+              'Any later raster analysis must emit only broad non-targetable sector statistics.'
+            ]}
+          json.dump(out,open('out/inventory.json','w'),indent=2)
+          print(json.dumps({'sentinel2_item_count':out['sentinel2_item_count'],'sentinel1_item_count':out['sentinel1_item_count'],'freshest_usable_single_optical':out['freshest_usable_single_optical'],'top_sar_pairs':out['same_geometry_sar_pair_candidates'][:5]},indent=2))
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ai39-donetsk-horlivka-eo-inventory
+          path: out/inventory.json
+          if-no-files-found: error
+          retention-days: 2
