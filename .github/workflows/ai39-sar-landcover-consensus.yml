@@ -1,0 +1,158 @@
+name: AI39 SAR localized landcover consensus
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  analyze:
+    runs-on: ubuntu-latest
+    timeout-minutes: 24
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install --disable-pip-version-check numpy scipy rasterio pystac-client planetary-computer
+      - name: Localized SAR repeat consensus by landcover class
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          python - <<'PY'
+          import json, math, warnings
+          from collections import defaultdict
+          from datetime import datetime, timezone
+          import numpy as np, rasterio
+          from scipy import ndimage as ndi
+          from rasterio.vrt import WarpedVRT
+          from rasterio.enums import Resampling
+          from rasterio.transform import from_bounds
+          from rasterio.warp import reproject
+          from pystac_client import Client
+          import planetary_computer
+
+          warnings.filterwarnings('ignore')
+          BBOX=[37.65,48.45,38.25,48.90]
+          START='2026-07-24'; END='2026-08-23'; W,H=1000,750
+          TR=from_bounds(*BBOX,W,H)
+          cat=Client.open('https://planetarycomputer.microsoft.com/api/stac/v1',modifier=planetary_computer.sign_inplace)
+
+          def rp(href,dtype='float32',resampling=Resampling.bilinear,nodata=0):
+              out=np.full((H,W),nodata,dtype=dtype)
+              with rasterio.open(href) as ds:
+                  reproject(source=rasterio.band(ds,1),destination=out,src_transform=ds.transform,src_crs=ds.crs,
+                    src_nodata=ds.nodata,dst_transform=TR,dst_crs='EPSG:4326',dst_nodata=nodata,resampling=resampling)
+              return out
+
+          lc=np.zeros((H,W),np.uint8); lc_ids=[]
+          for it in cat.search(collections=['io-lulc-9-class'],bbox=BBOX,datetime='2023-01-01/2023-12-31').items():
+              a=it.assets.get('data') or it.assets.get('map') or next((x for x in it.assets.values() if x.href.lower().endswith(('.tif','.tiff'))),None)
+              if not a: continue
+              try:
+                  tmp=rp(a.href,'uint8',Resampling.nearest,0); m=tmp>0; lc[m]=tmp[m]; lc_ids.append(it.id)
+              except Exception: pass
+          if (lc>0).mean()<0.5: raise SystemExit('insufficient landcover coverage')
+          crop=(lc==5); built=(lc==7); bare=(lc==8); rangeland=(lc==11); noncrop=(built|bare|rangeland)
+
+          items=list(cat.search(collections=['sentinel-1-rtc'],bbox=BBOX,datetime=START+'/'+END,max_items=400).items())
+          groups=defaultdict(lambda:defaultdict(list))
+          for it in items:
+              p=it.properties; dt=it.datetime; date=dt.date().isoformat() if dt else (p.get('datetime') or '')[:10]
+              platform=str(p.get('platform') or '').lower(); rel=p.get('sat:relative_orbit'); state=p.get('sat:orbit_state')
+              if date and platform and rel is not None and 'vv' in it.assets and 'vh' in it.assets:
+                  groups[(platform,int(rel),state)][date].append(it)
+          cand=[]
+          for geom,dates in groups.items():
+              ds=sorted(dates)
+              for i,a in enumerate(ds):
+                  for b in ds[i+1:]:
+                      sep=(datetime.fromisoformat(b)-datetime.fromisoformat(a)).days
+                      if 10<=sep<=14: cand.append((b,a,geom,dates[a],dates[b]))
+          cand.sort(reverse=True,key=lambda x:(x[0],x[1]))
+          chosen=[]; seen=set()
+          for rec in cand:
+              key=(rec[2],rec[1],rec[0])
+              if key in seen: continue
+              seen.add(key); chosen.append(rec)
+              if len(chosen)>=10: break
+
+          def mosaic(its,key):
+              dst=np.full((H,W),np.nan,np.float32)
+              for it in its:
+                  try:
+                      with rasterio.open(it.assets[key].href) as ds:
+                          with WarpedVRT(ds,crs='EPSG:4326',transform=TR,width=W,height=H,resampling=Resampling.bilinear,nodata=np.nan) as vrt:
+                              a=vrt.read(1).astype(np.float32)
+                      m=np.isfinite(a)&(a!=0); both=m&np.isfinite(dst); dst[both]=(dst[both]+a[both])/2; dst[m&~np.isfinite(dst)]=a[m&~np.isfinite(dst)]
+                  except Exception: pass
+              return dst
+          def db(x,v):
+              med=float(np.nanmedian(x[v])); return x.copy() if med<0 else 10*np.log10(np.maximum(x,1e-12))
+
+          pair_masks=[]; pairs=[]
+          for b,a,geom,ia,ib in chosen:
+              va=mosaic(ia,'vv'); ha=mosaic(ia,'vh'); vb=mosaic(ib,'vv'); hb=mosaic(ib,'vh')
+              v=np.isfinite(va)&np.isfinite(ha)&np.isfinite(vb)&np.isfinite(hb)&(va!=0)&(ha!=0)&(vb!=0)&(hb!=0)
+              if v.mean()<0.35:
+                  pairs.append({'pair':[a,b],'geometry':[geom[0],geom[1],geom[2]],'status':'INSUFFICIENT_OVERLAP'}); continue
+              av=db(va,v); ah=db(ha,v); bv=db(vb,v); bh=db(hb,v); mag=np.sqrt(((bv-av)**2+(bh-ah)**2)/2)
+              raw_hit=v&(mag>=3.0); raw_pct=float(raw_hit.sum()/v.sum()*100)
+              if raw_pct>=25.0:
+                  pairs.append({'pair':[a,b],'geometry':[geom[0],geom[1],geom[2]],'status':'GLOBAL_NOISE_EXCLUDED','valid_percent':round(float(v.mean()*100),2),'raw_ge3db_percent':round(raw_pct,3)})
+                  continue
+              q90=float(np.nanpercentile(mag[v],90)); thr=max(3.0,q90); hit=v&(mag>=thr)
+              pair_masks.append((v,hit))
+              pairs.append({'pair':[a,b],'geometry':[geom[0],geom[1],geom[2]],'status':'LOCALIZED_MEASURED','valid_percent':round(float(v.mean()*100),2),'raw_ge3db_percent':round(raw_pct,3),'localized_threshold_db':round(thr,3),'localized_hit_percent':round(float(hit.sum()/v.sum()*100),3)})
+
+          active=np.zeros((H,W),np.uint8); support=np.zeros((H,W),np.uint8)
+          for v,h in pair_masks: support+=v.astype(np.uint8); active+=h.astype(np.uint8)
+          enough=support>=min(3,max(1,len(pair_masks)))
+          rep2=enough&(active>=2); rep3=enough&(active>=3)
+
+          def pct(mask,den):
+              n=int(den.sum()); return float((mask&den).sum()/n*100) if n>100 else 0.0
+          def morph(mask):
+              lab,n=ndi.label(mask,structure=np.ones((3,3),int)); rows=[]
+              for i,sl in enumerate(ndi.find_objects(lab),1):
+                  if sl is None: continue
+                  c=(lab[sl]==i); area=int(c.sum())
+                  if area<4: continue
+                  yy,xx=np.where(c); h=sl[0].stop-sl[0].start; w=sl[1].stop-sl[1].start; elong=1.0
+                  if area>=3:
+                      vals=np.linalg.eigvalsh(np.cov(np.vstack([xx,yy]))); elong=float(math.sqrt((vals.max()+1e-9)/(vals.min()+1e-9)))
+                  rows.append((area,elong,area/(w*h)))
+              big=[x for x in rows if x[0]>=8]
+              return {'components_ge8':len(big),'largest_component_px':max((x[0] for x in big),default=0),'max_elongation_ge8':round(max((x[1] for x in big),default=0),2),'median_fill_ge8':round(float(np.median([x[2] for x in big])),3) if big else None}
+
+          sectors=[]
+          for rr in range(4):
+              for cc in range(4):
+                  sec=f"{'ABCD'[cc]}{rr+1}"; ys=slice(rr*H//4,(rr+1)*H//4); xs=slice(cc*W//4,(cc+1)*W//4)
+                  sup=enough[ys,xs]; r2=rep2[ys,xs]; r3=rep3[ys,xs]; c=crop[ys,xs]&sup; n=noncrop[ys,xs]&sup; b=built[ys,xs]&sup
+                  p2=pct(r2,sup); p3=pct(r3,sup); pc=pct(r2,c); pn=pct(r2,n); pb=pct(r2,b)
+                  total_sup=max(int(sup.sum()),1); total_hit=max(int(r2.sum()),1)
+                  crop_sup_share=float(c.sum()/total_sup*100); noncrop_sup_share=float(n.sum()/total_sup*100)
+                  crop_hit_share=float((r2&c).sum()/total_hit*100); noncrop_hit_share=float((r2&n).sum()/total_hit*100)
+                  crop_enrich=crop_hit_share/max(crop_sup_share,0.01); noncrop_enrich=noncrop_hit_share/max(noncrop_sup_share,0.01)
+                  mm=morph(r2&n)
+                  status='LOW'
+                  if p2>=0.25:
+                      status='MIXED_UNRESOLVED'
+                      if crop_enrich>=1.15 and noncrop_enrich<0.95: status='CROP_FAVORED_REPEAT'
+                      if noncrop_enrich>=1.20 and pn>=0.50 and mm['components_ge8']>=1: status='NONCROP_LOCALIZED_CANDIDATE'
+                  score=min(10,max(0,(noncrop_enrich-0.8)*2.5)+min(pn,3)*0.8+min(p3,2)*0.7+min(mm['max_elongation_ge8'],6)*0.15)
+                  sectors.append({'sector':sec,'repeat2_percent':round(p2,3),'repeat3_percent':round(p3,3),'repeat2_crop_rate_percent':round(pc,3),'repeat2_noncrop_rate_percent':round(pn,3),'repeat2_built_rate_percent':round(pb,3),'crop_support_share_percent':round(crop_sup_share,1),'crop_hit_share_percent':round(crop_hit_share,1),'crop_enrichment':round(crop_enrich,2),'noncrop_enrichment':round(noncrop_enrich,2),'noncrop_morphology':mm,'lead_score_0_10':round(score,2),'status':status})
+          sectors.sort(key=lambda x:x['lead_score_0_10'],reverse=True)
+          out={'status':'MEASURED','generated_utc':datetime.now(timezone.utc).isoformat(),'scope':'Broad 4x4 localized SAR repeat-consensus by historical landcover; no coordinates, maps, routes or target-level output','window':[START,END],'localized_pairs':len(pair_masks),'pair_summary':pairs,'landcover_items':lc_ids,'sector_summary':sectors,'method_limit':['Pairs with >=25% AOI-wide >=3 dB change are excluded as global-noise/confound candidates.','Remaining pairs contribute only their top localized change tail: max(3 dB, pair 90th percentile).','2023 landcover is a historical prior, not 2026 ground truth.','Linearity at this broad resolution is a lead, not proof of trenching or fortification.']}
+          with open('out/analysis.json','w') as f: json.dump(out,f,indent=2)
+          print(json.dumps({'localized_pairs':len(pair_masks),'excluded_pairs':[p for p in pairs if p['status']=='GLOBAL_NOISE_EXCLUDED'],'top':sectors[:10]},indent=2))
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ai39-sar-landcover-consensus
+          path: out/analysis.json
+          if-no-files-found: error
+          retention-days: 2
