@@ -1,0 +1,77 @@
+name: AI39 Airbus July broad-sector coverage screen
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  screen:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install --disable-pip-version-check requests
+      - name: Compare known July archive footprints at broad 4x4 level
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          python - <<'PY'
+          import json, requests, hashlib, datetime, time
+          AOI=[37.65,48.45,38.25,48.90]
+          H={'User-Agent':'AI39-airbus-broad-coverage/1.0'}
+          BASE='https://portal.intelligence-airbusds.com/arcgis/rest/services/OneAtlas/OADConstellationArchive/MapServer'
+          scenes=[
+            {'layer':9,'sensor':'Pleiades_50cm','date':'2026-07-31','cloud':20.56,'id':'DS_PHR1B_202607310827434_FR1_PX_E037N48_0724_01769'},
+            {'layer':9,'sensor':'Pleiades_50cm','date':'2026-07-31','cloud':8.62,'id':'DS_PHR1B_202607310827289_FR1_PX_E037N49_1004_04826'},
+            {'layer':9,'sensor':'Pleiades_50cm','date':'2026-07-28','cloud':17.0,'id':'DS_PHR1A_202607280850241_FR1_PX_E037N48_0724_01787'},
+            {'layer':14,'sensor':'SPOT_1.5m','date':'2026-07-31','cloud':3.32,'id':'DS_SPOT6_202607310800374_FR1_FR1_SV1_SV1_E038N49_01871'},
+            {'layer':14,'sensor':'SPOT_1.5m','date':'2026-07-31','cloud':10.7,'id':'DS_SPOT6_202607310800144_FR1_FR1_FR1_FR1_E037N49_03089'}]
+          OUT={'generated_utc':datetime.datetime.now(datetime.timezone.utc).isoformat(),'scope':'Known July Airbus archive footprints compared only at broad AI-39 4x4 sector level; no exact geometry, coordinates or target-level output retained.','scenes':[]}
+          cw=(AOI[2]-AOI[0])/4; ch=(AOI[3]-AOI[1])/4
+          cells=[]
+          for r in range(4):
+              for c in range(4):
+                  x0=AOI[0]+c*cw; x1=x0+cw; y0=AOI[1]+r*ch; y1=y0+ch
+                  cells.append((f"{'ABCD'[c]}{r+1}",[x0,y0,x1,y1]))
+          for s in scenes:
+              rec={'scene_hash':hashlib.sha256(s['id'].encode()).hexdigest()[:16],'sensor':s['sensor'],'date':s['date'],'cloud_percent':s['cloud'],'status':'UNKNOWN','broad_sector_bbox_overlap':[]}
+              try:
+                  url=f"{BASE}/{s['layer']}/query"
+                  q=None
+                  for attempt in range(2):
+                      r=requests.get(url,params={'f':'json','where':f"parentidentifier='{s['id']}'",'outFields':'parentidentifier','returnGeometry':'true','outSR':'4326','geometryPrecision':4,'resultRecordCount':1},timeout=45,headers=H)
+                      if r.status_code==200:
+                          q=r.json(); break
+                      rec['http_status']=r.status_code; time.sleep(1.0)
+                  fs=q.get('features',[]) if isinstance(q,dict) else []
+                  if not fs: rec['status']='NO_GEOMETRY_FEATURE'
+                  else:
+                      rings=(fs[0].get('geometry') or {}).get('rings') or []; pts=[p for ring in rings for p in ring if isinstance(p,list) and len(p)>=2]
+                      if not pts: rec['status']='NO_GEOMETRY'
+                      else:
+                          xs=[float(p[0]) for p in pts]; ys=[float(p[1]) for p in pts]; bb=[min(xs),min(ys),max(xs),max(ys)]
+                          aoi_ix=max(0,min(bb[2],AOI[2])-max(bb[0],AOI[0])); aoi_iy=max(0,min(bb[3],AOI[3])-max(bb[1],AOI[1])); rec['broad_aoi_bbox_overlap_proxy_percent']=round(aoi_ix*aoi_iy/((AOI[2]-AOI[0])*(AOI[3]-AOI[1]))*100,2)
+                          for name,cb in cells:
+                              ix=max(0,min(bb[2],cb[2])-max(bb[0],cb[0])); iy=max(0,min(bb[3],cb[3])-max(bb[1],cb[1])); pct=ix*iy/max(cw*ch,1e-12)*100
+                              if pct>=0.5: rec['broad_sector_bbox_overlap'].append({'sector':name,'cell_bbox_overlap_proxy_percent':round(min(pct,100),1)})
+                          rec['status']='MEASURED'; rec['ring_count']=len(rings)
+              except Exception as e:rec.update({'status':'ERROR','error_class':type(e).__name__})
+              OUT['scenes'].append(rec)
+          OUT['scenes'].sort(key=lambda x:(x.get('broad_aoi_bbox_overlap_proxy_percent',0),-x.get('cloud_percent',100)),reverse=True)
+          OUT['summary']={'best_by_broad_overlap':OUT['scenes'][0] if OUT['scenes'] else None,'scenes_covering_D4':[x['scene_hash'] for x in OUT['scenes'] if any(y['sector']=='D4' for y in x.get('broad_sector_bbox_overlap',[]))],'scenes_covering_D2':[x['scene_hash'] for x in OUT['scenes'] if any(y['sector']=='D2' for y in x.get('broad_sector_bbox_overlap',[]))],'scenes_covering_D3':[x['scene_hash'] for x in OUT['scenes'] if any(y['sector']=='D3' for y in x.get('broad_sector_bbox_overlap',[]))]}
+          OUT['interpretation_limit']='Coverage is a bounding-box overlap proxy for scene selection, not evidence of activity. Single-scene imagery can support orientation/lead generation but cannot by itself establish change or attribution.'
+          with open('out/airbus_broad_coverage.json','w') as f:json.dump(OUT,f,indent=2)
+          print(json.dumps(OUT,indent=2))
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ai39-airbus-broad-coverage
+          path: out/airbus_broad_coverage.json
+          if-no-files-found: error
+          retention-days: 2
