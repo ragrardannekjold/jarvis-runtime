@@ -9,7 +9,7 @@ import { fileURLToPath } from "node:url";
 export const CONTRACT_PATH = "runtime/security/token_cutover_contract.json";
 export const MANIFEST_PATH = "PUBLIC_EXPORT_MANIFEST.json";
 export const EXPECTED_CONTRACT_SHA256 =
-  "92eb3a561655a15d532c7094e02f48d7b94ade005177d97351d0bbda8931be28";
+  "e93d9b122eede0c3151d2442155cd56675c3783f8743b4fcf804b5f9e746575c";
 const CONTAIN_PHASE_INDEX = 2;
 const OFFICIAL_NODE24_ACTION_PINS = new Map([
   ["actions/checkout", "3d3c42e5aac5ba805825da76410c181273ba90b1"],
@@ -92,7 +92,7 @@ const FIXED_LOCAL_EXECUTION_BLOBS = new Map([
   ["runtime/continuous-queue/worker.mjs", "3525aba2f971040c6324686023ff67230a9e336f"],
   ["runtime/anomaly-sentinel/sentinel.mjs", "f84b48da1c4b13a9fbf8c998457dfe5fa443ce62"],
   ["runtime/anomaly-sentinel/worker.mjs", "22407b4e7cb137c8d88e1c5c7d91ef1b5beb768e"],
-  ["runtime/anomaly-sentinel/liveness-contracts.json", "6e04d147f6d6be9ca6c022647c7985964bc8ac55"],
+  ["runtime/anomaly-sentinel/liveness-contracts.json", "14f90b745ec0657552ef9996ffbe5314f9cfdc40"],
 ]);
 
 function invariant(condition, message) {
