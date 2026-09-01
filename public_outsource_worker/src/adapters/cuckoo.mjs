@@ -1,16 +1,35 @@
-import { sha256Text } from "../canonical.mjs";
+import { sha256Bytes } from "../canonical.mjs";
 import { fail } from "../errors.mjs";
 import { assertExactKeys } from "../security.mjs";
 
 const RECORD_ID = /^[0-9a-fA-F]{32}$/;
-const API_ROOT = "https://public.api.openprocurement.org/api/2.5/tenders";
+const API_ROOT = "https://public-api.prozorro.gov.ua/api/2.5/tenders";
 const MAX_RESPONSE_BYTES = 10 * 1024 * 1024;
+const MAX_AWARDS = 100;
+const MAX_CONTRACTS = 100;
+const MAX_SUPPLIERS_PER_AWARD = 20;
+
+function boundedString(value, maxLength, label) {
+  if (typeof value !== "string") return null;
+  if (value.length > maxLength) {
+    fail("SOURCE_PROJECTION_TOO_LARGE", `${label} exceeds projection limit`);
+  }
+  return value;
+}
+
+function boundedArray(value, maxLength, label) {
+  if (!Array.isArray(value)) return [];
+  if (value.length > maxLength) {
+    fail("SOURCE_PROJECTION_TOO_LARGE", `${label} exceeds projection limit`);
+  }
+  return value;
+}
 
 function compactValue(value) {
   if (!value || typeof value !== "object") return null;
   return {
     amount: typeof value.amount === "number" ? value.amount : null,
-    currency: typeof value.currency === "string" ? value.currency : null,
+    currency: boundedString(value.currency, 16, "currency"),
     value_added_tax_included:
       typeof value.valueAddedTaxIncluded === "boolean"
         ? value.valueAddedTaxIncluded
@@ -21,38 +40,40 @@ function compactValue(value) {
 function compactPeriod(period) {
   if (!period || typeof period !== "object") return null;
   return {
-    start_date: typeof period.startDate === "string" ? period.startDate : null,
-    end_date: typeof period.endDate === "string" ? period.endDate : null,
+    start_date: boundedString(period.startDate, 64, "period start"),
+    end_date: boundedString(period.endDate, 64, "period end"),
   };
 }
 
 function compactOrganization(entity) {
   const identifier = entity?.identifier;
   return {
+    legal_name: boundedString(entity?.name, 512, "organization name"),
     identifier:
       identifier && typeof identifier === "object"
         ? {
             scheme:
-              typeof identifier.scheme === "string" ? identifier.scheme : null,
-            id: typeof identifier.id === "string" ? identifier.id : null,
+              boundedString(identifier.scheme, 32, "identifier scheme"),
+            id: boundedString(identifier.id, 128, "identifier id"),
           }
         : null,
-    kind: typeof entity?.kind === "string" ? entity.kind : null,
+    kind: boundedString(entity?.kind, 64, "organization kind"),
   };
 }
 
 export function normalizeTender(data) {
+  const awards = boundedArray(data.awards, MAX_AWARDS, "awards");
+  const contracts = boundedArray(data.contracts, MAX_CONTRACTS, "contracts");
   return {
     record_id: data.id,
-    tender_id: typeof data.tenderID === "string" ? data.tenderID : null,
-    status: typeof data.status === "string" ? data.status : null,
+    tender_id: boundedString(data.tenderID, 128, "tender id"),
+    status: boundedString(data.status, 64, "tender status"),
     procurement_method_type:
-      typeof data.procurementMethodType === "string"
-        ? data.procurementMethodType
-        : null,
-    date_created: typeof data.date === "string" ? data.date : null,
+      boundedString(data.procurementMethodType, 128, "procurement method"),
+    date_created:
+      boundedString(data.dateCreated, 64, "date created"),
     date_modified:
-      typeof data.dateModified === "string" ? data.dateModified : null,
+      boundedString(data.dateModified, 64, "date modified"),
     value: compactValue(data.value),
     tender_period: compactPeriod(data.tenderPeriod),
     procuring_entity: compactOrganization(data.procuringEntity),
@@ -64,18 +85,72 @@ export function normalizeTender(data) {
       documents: Array.isArray(data.documents) ? data.documents.length : 0,
       items: Array.isArray(data.items) ? data.items.length : 0,
     },
-    contract_summaries: Array.isArray(data.contracts)
-      ? data.contracts.map((contract) => ({
-          id: typeof contract.id === "string" ? contract.id : null,
+    award_summaries: awards.map((award) => ({
+          id: boundedString(award.id, 128, "award id"),
+          status: boundedString(award.status, 64, "award status"),
+          date: boundedString(award.date, 64, "award date"),
+          value: compactValue(award.value),
+          suppliers: boundedArray(
+            award.suppliers,
+            MAX_SUPPLIERS_PER_AWARD,
+            "award suppliers",
+          ).map(compactOrganization),
+        })),
+    contract_summaries: contracts.map((contract) => ({
+          id: boundedString(contract.id, 128, "contract id"),
           award_id:
-            typeof contract.awardID === "string" ? contract.awardID : null,
-          status: typeof contract.status === "string" ? contract.status : null,
+            boundedString(contract.awardID, 128, "contract award id"),
+          status: boundedString(contract.status, 64, "contract status"),
           date_signed:
-            typeof contract.dateSigned === "string" ? contract.dateSigned : null,
+            boundedString(contract.dateSigned, 64, "contract date signed"),
           value: compactValue(contract.value),
-        }))
-      : [],
+        })),
   };
+}
+
+async function readBoundedBody(response) {
+  const declaredLength = Number(response.headers?.get?.("content-length"));
+  if (Number.isFinite(declaredLength) && declaredLength > MAX_RESPONSE_BYTES) {
+    fail("SOURCE_RESPONSE_TOO_LARGE", "Official response exceeds size limit");
+  }
+
+  if (typeof response.body?.getReader === "function") {
+    const reader = response.body.getReader();
+    const chunks = [];
+    let total = 0;
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        const chunk = Buffer.from(value);
+        total += chunk.length;
+        if (total > MAX_RESPONSE_BYTES) {
+          await reader.cancel();
+          fail("SOURCE_RESPONSE_TOO_LARGE", "Official response exceeds size limit");
+        }
+        chunks.push(chunk);
+      }
+    } catch (error) {
+      if (error?.code === "SOURCE_RESPONSE_TOO_LARGE") throw error;
+      fail("SOURCE_UNAVAILABLE", "Official response body could not be read", {
+        cause: error?.name ?? "Error",
+      });
+    }
+    return Buffer.concat(chunks, total);
+  }
+
+  try {
+    const rawBytes = Buffer.from(await response.arrayBuffer());
+    if (rawBytes.length > MAX_RESPONSE_BYTES) {
+      fail("SOURCE_RESPONSE_TOO_LARGE", "Official response exceeds size limit");
+    }
+    return rawBytes;
+  } catch (error) {
+    if (error?.code === "SOURCE_RESPONSE_TOO_LARGE") throw error;
+    fail("SOURCE_UNAVAILABLE", "Official response body could not be read", {
+      cause: error?.name ?? "Error",
+    });
+  }
 }
 
 export function createCuckooAdapter({
@@ -102,20 +177,24 @@ export function createCuckooAdapter({
         signal: AbortSignal.timeout(15_000),
       });
     } catch (error) {
-      fail("SOURCE_UNAVAILABLE", "Official OpenProcurement API fetch failed", {
+      fail("SOURCE_UNAVAILABLE", "Official Prozorro public API fetch failed", {
         cause: error?.name ?? "Error",
       });
     }
 
     if (!response?.ok) {
-      fail("SOURCE_HTTP_ERROR", "Official OpenProcurement API returned an error", {
+      fail("SOURCE_HTTP_ERROR", "Official Prozorro public API returned an error", {
         status: response?.status ?? null,
       });
     }
 
-    const rawText = await response.text();
-    if (Buffer.byteLength(rawText, "utf8") > MAX_RESPONSE_BYTES) {
-      fail("SOURCE_RESPONSE_TOO_LARGE", "Official response exceeds size limit");
+    const rawBytes = await readBoundedBody(response);
+
+    let rawText;
+    try {
+      rawText = new TextDecoder("utf-8", { fatal: true }).decode(rawBytes);
+    } catch {
+      fail("SOURCE_INVALID_UTF8", "Official response is not valid UTF-8");
     }
 
     let body;
@@ -137,14 +216,15 @@ export function createCuckooAdapter({
       candidate_only: true,
       record_id: recordId,
       source: {
-        authority: "OpenProcurement public API",
-        family_id: "openprocurement_official_api",
+        authority: "Prozorro public API",
+        family_id: "prozorro_official_public_api",
         url: sourceUrl,
         retrieved_at: now(),
       },
       raw_commitment: {
-        sha256: sha256Text(rawText),
-        bytes: Buffer.byteLength(rawText, "utf8"),
+        sha256: sha256Bytes(rawBytes),
+        bytes: rawBytes.length,
+        archive_status: "NOT_ARCHIVED_PUBLIC_CANARY",
       },
       normalized: normalizeTender(data),
     };

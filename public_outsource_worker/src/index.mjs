@@ -10,20 +10,19 @@ export {
   TERMINAL_BEGIN,
   TERMINAL_END,
   TERMINAL_SCHEMA,
+  assertTaskBoundToIssue,
   coordinateIssueTask,
   createTerminal,
   findCurrentTerminal,
+  findUniqueTaskIssue,
   formatTerminalComment,
   parseBotTerminalComment,
   parseOwnerTaskIssue,
   planNextIssue,
   resolveRuntimeEnvelope,
+  taskIssueTitle,
   validateIssueDescriptor,
   validateTerminal,
 } from "./github_issue_coordinator.mjs";
-export {
-  EVENT_TYPE,
-  handleRepositoryDispatch,
-  repositoryDispatchToEnvelope,
-} from "./public_event.mjs";
 export { createPublicRuntime } from "./runtime.mjs";
+export { runBoundedIssueChain } from "./github_issue_run.mjs";

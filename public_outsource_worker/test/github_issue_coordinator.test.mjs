@@ -12,11 +12,12 @@ import {
   parseBotTerminalComment,
   parseOwnerTaskIssue,
   planNextIssue,
+  resolveRuntimeEnvelope,
 } from "../src/index.mjs";
 
 const OWNER = "repository-owner";
 const BOT = "outsource-bot";
-const RECORD_ID = "0123456789abcdef0123456789abcdef";
+const RECORD_ID = "267a034fb6674d629db7aaacddff36b8";
 
 const rawTender = JSON.stringify({
   data: {
@@ -60,10 +61,19 @@ function issueEvent(value = descriptor(), overrides = {}) {
 }
 
 function runtime(onFetch = () => {}) {
+  const rawBytes = Buffer.from(rawTender);
   return createPublicRuntime({
     fetchImpl: async () => {
       onFetch();
-      return { ok: true, status: 200, text: async () => rawTender };
+      return {
+        ok: true,
+        status: 200,
+        arrayBuffer: async () =>
+          rawBytes.buffer.slice(
+            rawBytes.byteOffset,
+            rawBytes.byteOffset + rawBytes.byteLength,
+          ),
+      };
     },
     now: () => "2026-09-01T12:00:00.000Z",
   });
@@ -119,6 +129,34 @@ test("terminal marker is immutable and validates its configured bot author", asy
   });
 });
 
+test("terminal encoding contains official text without allowing HTML-marker injection", async () => {
+  const { dispatcher } = runtime();
+  const result = await dispatcher.dispatch(descriptor().envelope);
+  result.result.normalized.procuring_entity = {
+    legal_name: "Injected --> @everyone",
+    identifier: null,
+    kind: null,
+  };
+  const terminal = createTerminal(result);
+  const body = formatTerminalComment(terminal);
+  assert.equal((body.match(/-->/g) ?? []).length, 1);
+  assert.equal(body.includes("@everyone"), false);
+  assert.deepEqual(
+    parseBotTerminalComment({ user: { login: BOT }, body }, BOT),
+    terminal,
+  );
+});
+
+test("terminal comment size is bounded before GitHub posting", async () => {
+  const { dispatcher } = runtime();
+  const result = await dispatcher.dispatch(descriptor().envelope);
+  result.result.padding = "x".repeat(50_000);
+  const terminal = createTerminal(result);
+  assert.throws(() => formatTerminalComment(terminal), {
+    code: "TERMINAL_TOO_LARGE",
+  });
+});
+
 test("Cuckoo issue emits one terminal and one deterministic BUBO plan", async () => {
   let fetches = 0;
   const { dispatcher } = runtime(() => {
@@ -140,7 +178,9 @@ test("Cuckoo issue emits one terminal and one deterministic BUBO plan", async ()
     dispatcher,
     botLogin: BOT,
     existingComments: [existingComment],
-    existingIssues: [first.next_issue],
+    existingIssues: [
+      { number: 42, user: { login: BOT }, ...first.next_issue },
+    ],
   });
   assert.equal(replay.action, "NOOP_ALREADY_TERMINAL");
   assert.equal(replay.next_issue, null);
@@ -151,13 +191,16 @@ test("Cuckoo issue emits one terminal and one deterministic BUBO plan", async ()
       descriptor: descriptor(),
       issueNumber: 41,
       terminal: first.terminal,
-      existingIssues: [first.next_issue],
+      existingIssues: [
+        { number: 42, user: { login: BOT }, ...first.next_issue },
+      ],
+      generatedByLogin: BOT,
     }),
     null,
   );
 });
 
-test("configured bot may create only the provenance-pinned BUBO child", async () => {
+test("generated BUBO child cannot independently trigger the owner-only workflow", async () => {
   const { dispatcher } = runtime();
   const parent = await coordinateIssueTask({
     event: issueEvent(),
@@ -173,15 +216,14 @@ test("configured bot may create only the provenance-pinned BUBO child", async ()
       user: { login: BOT },
     },
   });
-  assert.equal(
-    parseOwnerTaskIssue(childEvent, { generatedBotLogin: BOT }).envelope.worker,
-    "bubo",
-  );
+  assert.throws(() => parseOwnerTaskIssue(childEvent), {
+    code: "ISSUE_AUTHOR_REJECTED",
+  });
 
   const botCuckoo = issueEvent();
   botCuckoo.issue.user.login = BOT;
   assert.throws(
-    () => parseOwnerTaskIssue(botCuckoo, { generatedBotLogin: BOT }),
+    () => parseOwnerTaskIssue(botCuckoo),
     { code: "ISSUE_AUTHOR_REJECTED" },
   );
 });
@@ -199,10 +241,71 @@ test("same deterministic BUBO title with altered body is a hard conflict", async
         descriptor: descriptor(),
         issueNumber: 41,
         terminal: first.terminal,
-        existingIssues: [{ title: first.next_issue.title, body: "{}" }],
+        existingIssues: [
+          {
+            number: 42,
+            title: first.next_issue.title,
+            body: "{}",
+            user: { login: BOT },
+          },
+        ],
+        generatedByLogin: BOT,
       }),
     { code: "NEXT_ISSUE_CONFLICT" },
   );
+});
+
+test("parent terminal case must match the BUBO child case", async () => {
+  const { dispatcher } = runtime();
+  const parent = await coordinateIssueTask({
+    event: issueEvent(),
+    dispatcher,
+    botLogin: BOT,
+  });
+  const child = JSON.parse(parent.next_issue.body);
+  child.envelope.case_id = "OTHER-CASE";
+  assert.throws(
+    () =>
+      resolveRuntimeEnvelope(
+        child,
+        [{ user: { login: BOT }, body: parent.comment_body }],
+        BOT,
+      ),
+    { code: "DEPENDENCY_CASE_MISMATCH" },
+  );
+});
+
+test("task_id is globally bound to one issue number", async (t) => {
+  const { dispatcher } = runtime();
+  const event = issueEvent();
+  const current = {
+    number: 41,
+    title: event.issue.title,
+    body: event.issue.body,
+    user: { login: OWNER },
+  };
+  const duplicate = { ...current, number: 99 };
+  await expectCode(
+    coordinateIssueTask({
+      event,
+      dispatcher,
+      botLogin: BOT,
+      existingIssues: [current, duplicate],
+    }),
+    "DUPLICATE_TASK_ISSUE",
+  );
+
+  await t.test("same title already bound to another issue", async () => {
+    await expectCode(
+      coordinateIssueTask({
+        event,
+        dispatcher,
+        botLogin: BOT,
+        existingIssues: [duplicate],
+      }),
+      "DUPLICATE_TASK_ISSUE",
+    );
+  });
 });
 
 test("BUBO resolves only a validated prior bot terminal and emits evidence packet", async () => {

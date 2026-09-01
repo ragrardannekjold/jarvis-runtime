@@ -9,10 +9,12 @@ import {
 export const ISSUE_TITLE_PREFIX = "[OUTSOURCE-TASK] ";
 export const ISSUE_SCHEMA = "public.outsource_issue.v1";
 export const TERMINAL_SCHEMA = "public.outsource_issue_result.v1";
-export const TERMINAL_BEGIN = "<!-- OUTSOURCE_RESULT_V1\n";
+export const TERMINAL_BEGIN = "<!-- OUTSOURCE_RESULT_V1_BASE64URL\n";
 export const TERMINAL_END = "\nOUTSOURCE_RESULT_V1_END -->";
 
 const SHA256 = /^[0-9a-f]{64}$/;
+const BASE64URL = /^[A-Za-z0-9_-]+$/;
+const MAX_TERMINAL_COMMENT_BYTES = 60 * 1024;
 
 function validateNext(next, envelope) {
   if (next === null) return;
@@ -67,7 +69,7 @@ export function validateIssueDescriptor(input) {
   return structuredClone(input);
 }
 
-export function parseOwnerTaskIssue(event, { generatedBotLogin = null } = {}) {
+export function parseOwnerTaskIssue(event) {
   assertPlainObject(event, "INVALID_ISSUE_EVENT");
   if (event.action !== "opened") {
     fail("ISSUE_ACTION_REJECTED", "Only newly opened task issues are accepted");
@@ -93,19 +95,8 @@ export function parseOwnerTaskIssue(event, { generatedBotLogin = null } = {}) {
   descriptor = validateIssueDescriptor(descriptor);
   const ownerLogin = event.repository?.owner?.login;
   const authorLogin = event.issue?.user?.login;
-  const ownerCreated = Boolean(ownerLogin && authorLogin === ownerLogin);
-  const coordinatorGeneratedBubo = Boolean(
-    generatedBotLogin &&
-      authorLogin === generatedBotLogin &&
-      descriptor.envelope.worker === "bubo" &&
-      descriptor.envelope.capability === "evidence_packet_v1" &&
-      descriptor.depends_on,
-  );
-  if (!ownerCreated && !coordinatorGeneratedBubo) {
-    fail(
-      "ISSUE_AUTHOR_REJECTED",
-      "Task issue must be owner-created or a provenance-pinned BUBO child created by the configured bot",
-    );
+  if (!ownerLogin || authorLogin !== ownerLogin) {
+    fail("ISSUE_AUTHOR_REJECTED", "Initial task issue must be created by repository owner");
   }
   if (event.issue.title !== `${ISSUE_TITLE_PREFIX}${descriptor.envelope.task_id}`) {
     fail("ISSUE_TITLE_MISMATCH", "Issue title must end with the exact task_id");
@@ -128,7 +119,14 @@ export function createTerminal(result) {
 
 export function formatTerminalComment(terminal) {
   validateTerminal(terminal);
-  return `${TERMINAL_BEGIN}${stableStringify(terminal)}${TERMINAL_END}`;
+  const encoded = Buffer.from(stableStringify(terminal), "utf8").toString(
+    "base64url",
+  );
+  const comment = `${TERMINAL_BEGIN}${encoded}${TERMINAL_END}`;
+  if (Buffer.byteLength(comment, "utf8") > MAX_TERMINAL_COMMENT_BYTES) {
+    fail("TERMINAL_TOO_LARGE", "Terminal result exceeds GitHub comment limit");
+  }
+  return comment;
 }
 
 export function validateTerminal(input) {
@@ -175,7 +173,24 @@ export function parseBotTerminalComment(comment, botLogin) {
   ) {
     fail("INVALID_TERMINAL_MARKER", "Terminal comment marker is missing or ambiguous");
   }
-  const raw = comment.body.slice(TERMINAL_BEGIN.length, -TERMINAL_END.length);
+  const encoded = comment.body.slice(
+    TERMINAL_BEGIN.length,
+    -TERMINAL_END.length,
+  );
+  if (!BASE64URL.test(encoded)) {
+    fail("INVALID_TERMINAL", "Terminal payload is not canonical base64url");
+  }
+  let raw;
+  try {
+    const bytes = Buffer.from(encoded, "base64url");
+    if (bytes.toString("base64url") !== encoded) {
+      fail("INVALID_TERMINAL", "Terminal payload is not canonical base64url");
+    }
+    raw = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+  } catch (error) {
+    if (error?.code === "INVALID_TERMINAL") throw error;
+    fail("INVALID_TERMINAL", "Terminal payload is not valid UTF-8");
+  }
   let parsed;
   try {
     parsed = JSON.parse(raw);
@@ -218,6 +233,9 @@ export function resolveRuntimeEnvelope(descriptor, priorComments, botLogin) {
   if (prior.result_sha256 !== dependency.result_sha256) {
     fail("DEPENDENCY_HASH_MISMATCH", "Referenced terminal hash does not match issue");
   }
+  if (prior.case_id !== validated.envelope.case_id) {
+    fail("DEPENDENCY_CASE_MISMATCH", "Parent terminal and BUBO child belong to different cases");
+  }
   if (
     prior.worker !== "cuckoo" ||
     prior.capability !== "prozorro_snapshot_v1" ||
@@ -238,11 +256,53 @@ function childTaskId(parentTaskId) {
   return `bubo.${sha256Object(parentTaskId).slice(0, 32)}`;
 }
 
+export function taskIssueTitle(taskId) {
+  return `${ISSUE_TITLE_PREFIX}${taskId}`;
+}
+
+export function findUniqueTaskIssue(existingIssues, taskId, trustedAuthorLogin) {
+  if (typeof trustedAuthorLogin !== "string" || trustedAuthorLogin.length === 0) {
+    fail("INVALID_ISSUE_INDEX", "Trusted issue author is required");
+  }
+  const title = taskIssueTitle(taskId);
+  const matches = (existingIssues ?? []).filter(
+    (issue) =>
+      issue?.title === title && issue?.user?.login === trustedAuthorLogin,
+  );
+  for (const issue of matches) {
+    if (!Number.isSafeInteger(issue.number) || issue.number <= 0) {
+      fail("INVALID_ISSUE_INDEX", "Task issue index must carry a positive issue number");
+    }
+  }
+  if (matches.length > 1) {
+    fail("DUPLICATE_TASK_ISSUE", `task_id is bound to more than one issue: ${taskId}`);
+  }
+  return matches[0] ? structuredClone(matches[0]) : null;
+}
+
+export function assertTaskBoundToIssue(
+  existingIssues,
+  taskId,
+  issueNumber,
+  trustedAuthorLogin,
+) {
+  const bound = findUniqueTaskIssue(
+    existingIssues,
+    taskId,
+    trustedAuthorLogin,
+  );
+  if (bound && bound.number !== issueNumber) {
+    fail("DUPLICATE_TASK_ISSUE", `task_id is already bound to issue #${bound.number}`);
+  }
+  return bound;
+}
+
 export function planNextIssue({
   descriptor,
   issueNumber,
   terminal,
   existingIssues = [],
+  generatedByLogin,
 }) {
   const validated = validateIssueDescriptor(descriptor);
   const checkedTerminal = validateTerminal(terminal);
@@ -274,13 +334,17 @@ export function planNextIssue({
   };
   validateIssueDescriptor(child);
   const planned = {
-    title: `${ISSUE_TITLE_PREFIX}${taskId}`,
+    title: taskIssueTitle(taskId),
     body: JSON.stringify(child, null, 2),
   };
 
-  for (const issue of existingIssues) {
-    if (issue?.title !== planned.title) continue;
-    if (issue.body === planned.body) return null;
+  const existing = findUniqueTaskIssue(
+    existingIssues,
+    taskId,
+    generatedByLogin,
+  );
+  if (existing) {
+    if (existing.body === planned.body) return null;
     fail("NEXT_ISSUE_CONFLICT", "Deterministic BUBO issue title already has different body");
   }
   return planned;
@@ -294,8 +358,14 @@ export async function coordinateIssueTask({
   priorComments = [],
   existingIssues = [],
 }) {
-  const descriptor = parseOwnerTaskIssue(event, { generatedBotLogin: botLogin });
+  const descriptor = parseOwnerTaskIssue(event);
   const taskId = descriptor.envelope.task_id;
+  assertTaskBoundToIssue(
+    existingIssues,
+    taskId,
+    event.issue.number,
+    event.repository.owner.login,
+  );
   const terminal = findCurrentTerminal(existingComments, taskId, botLogin);
   if (terminal) {
     return {
@@ -307,8 +377,22 @@ export async function coordinateIssueTask({
         issueNumber: event.issue.number,
         terminal,
         existingIssues,
+        generatedByLogin: botLogin,
       }),
     };
+  }
+  if (descriptor.next !== null) {
+    const preexistingChild = findUniqueTaskIssue(
+      existingIssues,
+      childTaskId(taskId),
+      botLogin,
+    );
+    if (preexistingChild) {
+      fail(
+        "PREEXISTING_CHILD_WITHOUT_TERMINAL",
+        "A trusted child exists before its parent terminal",
+      );
+    }
   }
 
   const runtimeEnvelope = resolveRuntimeEnvelope(
@@ -327,6 +411,7 @@ export async function coordinateIssueTask({
       issueNumber: event.issue.number,
       terminal: newTerminal,
       existingIssues,
+      generatedByLogin: botLogin,
     }),
   };
 }

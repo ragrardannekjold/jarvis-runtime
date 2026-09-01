@@ -9,7 +9,7 @@ import { fileURLToPath } from "node:url";
 export const CONTRACT_PATH = "runtime/security/token_cutover_contract.json";
 export const MANIFEST_PATH = "PUBLIC_EXPORT_MANIFEST.json";
 export const EXPECTED_CONTRACT_SHA256 =
-  "e93d9b122eede0c3151d2442155cd56675c3783f8743b4fcf804b5f9e746575c";
+  "92266cd172db18b27e7c48bd42ea302addc9a90719f46f59b3cac664530c49ec";
 const CONTAIN_PHASE_INDEX = 2;
 const OFFICIAL_NODE24_ACTION_PINS = new Map([
   ["actions/checkout", "3d3c42e5aac5ba805825da76410c181273ba90b1"],
@@ -26,6 +26,7 @@ const EXPECTED_GUARD_WORKFLOW_BLOB = "4c94795b74ee4417c5e60a4da6f1138f97e3a4ee";
 const ISSUE_TRIGGER_WORKFLOW_ALLOWLIST = new Set([
   ".github/workflows/async-job-worker.yml",
   ".github/workflows/continuous-external-queue.yml",
+  ".github/workflows/public-outsource-worker.yml",
 ]);
 const SCRAPEABLE_PUBLIC_INPUT_TRIGGERS = new Set([
   "issues",
@@ -45,6 +46,7 @@ const WRITE_AUTHORITY_SCOPES = new Set([
   ".github/workflows/kyiv-cdse-event-queue.yml|jobs/drain/permissions|actions",
   ".github/workflows/async-job-worker.yml|permissions|issues",
   ".github/workflows/continuous-external-queue.yml|permissions|issues",
+  ".github/workflows/public-outsource-worker.yml|permissions|issues",
 ]);
 const ASYNC_TOKEN_WORKER_JOB_TYPES = [
   "heartbeat_probe",
@@ -56,6 +58,82 @@ const CONTINUOUS_TOKEN_WORKER_JOB_TYPES = [
   "async_contract_self_test",
   "runtime_syntax_self_test",
   "sustained_rhythm_verification",
+];
+const PUBLIC_OUTSOURCE_WORKFLOW_PATH = ".github/workflows/public-outsource-worker.yml";
+const PUBLIC_OUTSOURCE_CI_WORKFLOW_PATH = ".github/workflows/public-outsource-worker-ci.yml";
+const PUBLIC_OUTSOURCE_SOURCE_IMPORTS = new Map([
+  ["public_outsource_worker/integration/github_action_entry.mjs", [
+    "node:fs/promises",
+    "../src/github_issue_run.mjs",
+    "../src/runtime.mjs",
+    "./github_api_client.mjs",
+  ]],
+  ["public_outsource_worker/integration/github_api_client.mjs", []],
+  ["public_outsource_worker/src/adapters/bubo.mjs", [
+    "../canonical.mjs",
+    "../errors.mjs",
+    "../security.mjs",
+  ]],
+  ["public_outsource_worker/src/adapters/cuckoo.mjs", [
+    "../canonical.mjs",
+    "../errors.mjs",
+    "../security.mjs",
+  ]],
+  ["public_outsource_worker/src/canonical.mjs", ["node:crypto"]],
+  ["public_outsource_worker/src/dispatcher.mjs", [
+    "./canonical.mjs",
+    "./errors.mjs",
+    "./ledger.mjs",
+    "./security.mjs",
+  ]],
+  ["public_outsource_worker/src/errors.mjs", []],
+  ["public_outsource_worker/src/github_issue_coordinator.mjs", [
+    "./canonical.mjs",
+    "./errors.mjs",
+    "./security.mjs",
+  ]],
+  ["public_outsource_worker/src/github_issue_run.mjs", [
+    "./errors.mjs",
+    "./github_issue_coordinator.mjs",
+  ]],
+  ["public_outsource_worker/src/ledger.mjs", [
+    "node:crypto",
+    "./canonical.mjs",
+    "./errors.mjs",
+  ]],
+  ["public_outsource_worker/src/registry.mjs", ["./errors.mjs"]],
+  ["public_outsource_worker/src/runtime.mjs", [
+    "./adapters/bubo.mjs",
+    "./adapters/cuckoo.mjs",
+    "./dispatcher.mjs",
+    "./registry.mjs",
+  ]],
+  ["public_outsource_worker/src/security.mjs", ["./errors.mjs"]],
+]);
+const PUBLIC_OUTSOURCE_EXPORT_PATHS = [
+  PUBLIC_OUTSOURCE_WORKFLOW_PATH,
+  PUBLIC_OUTSOURCE_CI_WORKFLOW_PATH,
+  "public_outsource_worker/README.md",
+  "public_outsource_worker/integration/GITHUB_ISSUE_CONTRACT.md",
+  "public_outsource_worker/integration/github_action_entry.mjs",
+  "public_outsource_worker/integration/github_api_client.mjs",
+  "public_outsource_worker/package.json",
+  "public_outsource_worker/src/adapters/bubo.mjs",
+  "public_outsource_worker/src/adapters/cuckoo.mjs",
+  "public_outsource_worker/src/canonical.mjs",
+  "public_outsource_worker/src/dispatcher.mjs",
+  "public_outsource_worker/src/errors.mjs",
+  "public_outsource_worker/src/github_issue_coordinator.mjs",
+  "public_outsource_worker/src/github_issue_run.mjs",
+  "public_outsource_worker/src/index.mjs",
+  "public_outsource_worker/src/ledger.mjs",
+  "public_outsource_worker/src/registry.mjs",
+  "public_outsource_worker/src/runtime.mjs",
+  "public_outsource_worker/src/security.mjs",
+  "public_outsource_worker/test/github_api_client.test.mjs",
+  "public_outsource_worker/test/github_issue_coordinator.test.mjs",
+  "public_outsource_worker/test/github_issue_run.test.mjs",
+  "public_outsource_worker/test/runtime.test.mjs",
 ];
 const FIXED_LOCAL_EXECUTION_BLOBS = new Map([
   [".github/workflows/kyiv-fast-watch.yml", "cc6a7e0b31b35015b4449867117213d7e6809311"],
@@ -92,7 +170,21 @@ const FIXED_LOCAL_EXECUTION_BLOBS = new Map([
   ["runtime/continuous-queue/worker.mjs", "3525aba2f971040c6324686023ff67230a9e336f"],
   ["runtime/anomaly-sentinel/sentinel.mjs", "f84b48da1c4b13a9fbf8c998457dfe5fa443ce62"],
   ["runtime/anomaly-sentinel/worker.mjs", "22407b4e7cb137c8d88e1c5c7d91ef1b5beb768e"],
-  ["runtime/anomaly-sentinel/liveness-contracts.json", "14f90b745ec0657552ef9996ffbe5314f9cfdc40"],
+  ["runtime/anomaly-sentinel/liveness-contracts.json", "7eeeae512a3de295ae33da46994847abe7b9c0ef"],
+  [PUBLIC_OUTSOURCE_WORKFLOW_PATH, "10a203e1c9d3345d99fe0ff556ffcd818c9a2287"],
+  ["public_outsource_worker/integration/github_action_entry.mjs", "b85534af4794c64b7d96da63a7297866a74f6893"],
+  ["public_outsource_worker/integration/github_api_client.mjs", "c3f776fa3de7b15efd3ce9945e147787a1cce67c"],
+  ["public_outsource_worker/src/adapters/bubo.mjs", "ee86fa9490dc73809cede8b5c2de555b8a3b3926"],
+  ["public_outsource_worker/src/adapters/cuckoo.mjs", "3ff9f1ed9612e16e2f29ddda515157e13c0b50be"],
+  ["public_outsource_worker/src/canonical.mjs", "3d83c75f46696e95315b82737257f6dcfc4cbf4d"],
+  ["public_outsource_worker/src/dispatcher.mjs", "97bdbc919474e28deb61b486aa8915ba8779fa01"],
+  ["public_outsource_worker/src/errors.mjs", "6fb71def764521e6e5817d5b56c09eec98431d72"],
+  ["public_outsource_worker/src/github_issue_coordinator.mjs", "f7ae8d14e9bef8bfd1420f9a7b2711ff001f9c67"],
+  ["public_outsource_worker/src/github_issue_run.mjs", "1b036607ac274521a5ab2869944e613da484b3ae"],
+  ["public_outsource_worker/src/ledger.mjs", "c3901e502015c05d26fa622c76d5214243ba571f"],
+  ["public_outsource_worker/src/registry.mjs", "cd7b1dbcf8ba54d4050b70613bf2a0db71187d25"],
+  ["public_outsource_worker/src/runtime.mjs", "98fe626c4a7faa28b56e3361c665a2778c2a8fe2"],
+  ["public_outsource_worker/src/security.mjs", "8724b173352c7060cf263dc18dcbc99c7cc18dee"],
 ]);
 
 function invariant(condition, message) {
@@ -199,7 +291,7 @@ function validateManualTombstones(workflows, contract) {
 function validatePinnedWorkflows(workflows, contract) {
   const pins = contract.workflow_pins;
   invariant(pins && typeof pins === "object" && !Array.isArray(pins), "workflow pins are missing");
-  invariant(Object.keys(pins).length === 7, "seven privileged workflow pins are required");
+  invariant(Object.keys(pins).length === 8, "eight privileged workflow pins are required");
   for (const [workflowPath, pin] of Object.entries(pins)) {
     invariant(workflows.has(workflowPath), `pinned workflow is missing: ${workflowPath}`);
     invariant(
@@ -212,7 +304,7 @@ function validatePinnedWorkflows(workflows, contract) {
 function validatePinnedSources(files, contract) {
   const pins = contract.privileged_source_pins;
   invariant(pins && typeof pins === "object" && !Array.isArray(pins), "privileged source pins are missing");
-  invariant(Object.keys(pins).length === 28, "twenty-eight privileged source pins are required");
+  invariant(Object.keys(pins).length === 41, "forty-one privileged source pins are required");
   for (const [sourcePath, expectedBlob] of Object.entries(pins)) {
     invariant(files.has(sourcePath), `privileged source is missing: ${sourcePath}`);
     invariant(/^[0-9a-f]{40}$/.test(expectedBlob), `privileged source pin is invalid: ${sourcePath}`);
@@ -249,6 +341,7 @@ function validatePrivilegedLocalExecutionClosure(files, contract) {
     "runtime/async-jobs/contract.mjs",
     "runtime/async-jobs/contract.test.mjs",
     "runtime/continuous-queue/worker.mjs",
+    ...PUBLIC_OUTSOURCE_SOURCE_IMPORTS.keys(),
   ];
   for (const sourcePath of requiredPins) {
     invariant(contract.privileged_source_pins?.[sourcePath], `privileged local source is not pinned: ${sourcePath}`);
@@ -401,6 +494,223 @@ function validatePrivilegedLocalExecutionClosure(files, contract) {
       && continuousWorker.includes('exactStatusField(lines, "task_identity")')
       && !continuousWorker.includes("historicalSeen"),
     "Continuous queue public-input and producer gates drifted",
+  );
+}
+
+function staticModuleSpecifiers(source) {
+  return [...source.matchAll(
+    /(?:^|\n)(?:import|export)\s+(?:[\s\S]*?\s+from\s+)?["']([^"']+)["'];/g,
+  )].map((match) => match[1]);
+}
+
+export function validatePublicOutsourceBoundary(files, contract) {
+  const workflow = files.get(PUBLIC_OUTSOURCE_WORKFLOW_PATH);
+  const ciWorkflow = files.get(PUBLIC_OUTSOURCE_CI_WORKFLOW_PATH);
+  invariant(
+    typeof workflow === "string" && typeof ciWorkflow === "string",
+    "public outsource workflow closure is missing",
+  );
+
+  const authority = validateWorkflowAuthority(workflow, PUBLIC_OUTSOURCE_WORKFLOW_PATH);
+  validatePrivilegedExecutionEnvironment(workflow, PUBLIC_OUTSOURCE_WORKFLOW_PATH);
+  validatePinnedExecutableReferences(
+    authority.executableReferences,
+    authority.checkoutCredentialDisabledSteps,
+    authority.nodeTarget24Steps,
+    authority.packageManagerCacheDisabledSteps,
+    PUBLIC_OUTSOURCE_WORKFLOW_PATH,
+  );
+  const references = authority.executableReferences.map(({ rawReference }) => {
+    const decoded = decodeYamlScalar(rawReference);
+    return typeof decoded === "string" ? decoded : rawReference.trim();
+  });
+  invariant(
+    JSON.stringify(references) === JSON.stringify([
+      "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+      "actions/setup-node@820762786026740c76f36085b0efc47a31fe5020",
+    ]),
+    "public outsource lane must use only the reviewed Node 24 action runtime closure",
+  );
+  invariant(
+    authority.hasExplicitTopLevelPermissions
+      && authority.hasWriteAuthority
+      && JSON.stringify(topLevelChildren(workflow, "permissions"))
+        === JSON.stringify(["contents", "issues"])
+      && JSON.stringify(topLevelChildren(workflow, "on")) === JSON.stringify(["issues"])
+      && JSON.stringify(topLevelChildren(workflow, "jobs")) === JSON.stringify(["dispatch"])
+      && workflow.includes("  issues:\n    types: [opened]")
+      && !/schedule|workflow_dispatch|repository_dispatch|pull_request|issue_comment|discussion/.test(workflow),
+    "public outsource trigger and authority boundary drifted",
+  );
+  invariant(
+    workflow.includes("startsWith(github.event.issue.title, '[OUTSOURCE-TASK] ')")
+      && workflow.includes("github.event.issue.user.login == github.repository_owner")
+      && !workflow.includes("github.actor == 'github-actions[bot]'")
+      && workflow.includes("group: public-outsource-${{ github.event.issue.title }}")
+      && workflow.includes("cancel-in-progress: false"),
+    "public outsource owner gate or issue-scoped concurrency drifted",
+  );
+  const runs = yamlMappingEntries(workflow, PUBLIC_OUTSOURCE_WORKFLOW_PATH)
+    .filter(({ key }) => key === "run");
+  invariant(
+    runs.length === 1
+      && runs[0].value === "node public_outsource_worker/integration/github_action_entry.mjs"
+      && (workflow.match(/GITHUB_TOKEN:\s*\$\{\{ github\.token \}\}/g) ?? []).length === 1
+      && workflow.includes("OUTSOURCE_BOT_LOGIN: github-actions[bot]"),
+    "public outsource execution command and native-token closure drifted",
+  );
+
+  const ciAuthority = validateWorkflowAuthority(ciWorkflow, PUBLIC_OUTSOURCE_CI_WORKFLOW_PATH);
+  validatePrivilegedExecutionEnvironment(ciWorkflow, PUBLIC_OUTSOURCE_CI_WORKFLOW_PATH);
+  validatePinnedExecutableReferences(
+    ciAuthority.executableReferences,
+    ciAuthority.checkoutCredentialDisabledSteps,
+    ciAuthority.nodeTarget24Steps,
+    ciAuthority.packageManagerCacheDisabledSteps,
+    PUBLIC_OUTSOURCE_CI_WORKFLOW_PATH,
+  );
+  const ciReferences = ciAuthority.executableReferences.map(({ rawReference }) => {
+    const decoded = decodeYamlScalar(rawReference);
+    return typeof decoded === "string" ? decoded : rawReference.trim();
+  });
+  invariant(
+    ciAuthority.hasExplicitTopLevelPermissions
+      && !ciAuthority.hasWriteAuthority
+      && JSON.stringify(topLevelChildren(ciWorkflow, "permissions")) === JSON.stringify(["contents"])
+      && JSON.stringify(topLevelChildren(ciWorkflow, "on"))
+        === JSON.stringify(["pull_request", "workflow_dispatch"])
+      && JSON.stringify(ciReferences) === JSON.stringify([
+        "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+        "actions/setup-node@820762786026740c76f36085b0efc47a31fe5020",
+      ])
+      && ciWorkflow.includes("working-directory: public_outsource_worker")
+      && ciWorkflow.includes("run: node --test"),
+    "public outsource CI boundary drifted",
+  );
+
+  for (const [sourcePath, expectedSpecifiers] of PUBLIC_OUTSOURCE_SOURCE_IMPORTS) {
+    const source = files.get(sourcePath);
+    invariant(typeof source === "string", `public outsource source is missing: ${sourcePath}`);
+    invariant(
+      contract.privileged_source_pins?.[sourcePath],
+      `public outsource source is not privileged-pinned: ${sourcePath}`,
+    );
+    invariant(
+      JSON.stringify(staticModuleSpecifiers(source)) === JSON.stringify(expectedSpecifiers),
+      `public outsource import closure drifted: ${sourcePath}`,
+    );
+    invariant(
+      !/node:child_process|\bexecFile\b|\bspawn\b|\bnpm\b|\bimport\s*\(|\brequire\s*\(|\beval\s*\(|\bnew\s+Function\b/.test(source),
+      `public outsource source can execute an unreviewed command or dynamic module: ${sourcePath}`,
+    );
+    invariant(
+      !/\bopenai\b|\bgpt(?:-[0-9.]+)?\b/i.test(source),
+      `public outsource privileged closure cannot depend on GPT: ${sourcePath}`,
+    );
+    if (sourcePath !== "public_outsource_worker/integration/github_action_entry.mjs") {
+      invariant(
+        !/process\.env/.test(source),
+        `public outsource environment authority escaped its entrypoint: ${sourcePath}`,
+      );
+    }
+  }
+
+  const privilegedText = [...PUBLIC_OUTSOURCE_SOURCE_IMPORTS.keys()]
+    .map((sourcePath) => files.get(sourcePath))
+    .join("\n");
+  const urls = [...privilegedText.matchAll(/https:\/\/[^\s"'`]+/g)].map((match) => match[0]);
+  invariant(
+    JSON.stringify(urls) === JSON.stringify([
+      "https://api.github.com",
+      "https://public-api.prozorro.gov.ua/api/2.5/tenders",
+    ]),
+    "public outsource network authority escaped its two reviewed public APIs",
+  );
+  invariant(
+    !/(?:^|[^s])http:|\b(?:ftp|file|data|ws|wss):|\bnew\s+URL\s*\(/i.test(privilegedText),
+    "public outsource privileged closure contains an unreviewed URL scheme",
+  );
+
+  const entry = files.get("public_outsource_worker/integration/github_action_entry.mjs");
+  const githubClient = files.get("public_outsource_worker/integration/github_api_client.mjs");
+  const coordinator = files.get("public_outsource_worker/src/github_issue_coordinator.mjs");
+  const issueRun = files.get("public_outsource_worker/src/github_issue_run.mjs");
+  const security = files.get("public_outsource_worker/src/security.mjs");
+  const cuckoo = files.get("public_outsource_worker/src/adapters/cuckoo.mjs");
+  const bubo = files.get("public_outsource_worker/src/adapters/bubo.mjs");
+  const runtime = files.get("public_outsource_worker/src/runtime.mjs");
+  invariant(
+    entry.includes('requiredEnv("GITHUB_EVENT_PATH")')
+      && entry.includes('requiredEnv("GITHUB_REPOSITORY")')
+      && entry.includes('requiredEnv("GITHUB_TOKEN")')
+      && JSON.stringify([...entry.matchAll(/requiredEnv\("([A-Z_]+)"\)/g)].map((match) => match[1]))
+        === JSON.stringify(["GITHUB_EVENT_PATH", "GITHUB_REPOSITORY", "GITHUB_TOKEN"])
+      && (entry.match(/await runBoundedIssueChain\s*\(/g) ?? []).length === 1
+      && (entry.match(/process\.env\.OUTSOURCE_BOT_LOGIN/g) ?? []).length === 1,
+    "public outsource action entry escaped the bounded issue chain",
+  );
+  invariant(
+    githubClient.includes('const GITHUB_API = "https://api.github.com";')
+      && githubClient.includes("if (!path.startsWith(`${repoRoot}/`))")
+      && githubClient.includes('redirect: "error"')
+      && githubClient.includes("for (let page = 1; page <= 10; page += 1)")
+      && githubClient.includes('method: "POST"')
+      && (githubClient.match(/await fetchImpl\s*\(/g) ?? []).length === 1
+      && !/\/dispatches|\/actions\/workflows|graphql|contents\//i.test(githubClient),
+    "public outsource GitHub client escaped repository-scoped issue I/O",
+  );
+  invariant(
+    coordinator.includes('if (event.action !== "opened")')
+      && coordinator.includes("event.repository?.private !== false")
+      && coordinator.includes("authorLogin !== ownerLogin")
+      && coordinator.includes('envelope.worker !== "cuckoo"')
+      && coordinator.includes('next.worker !== "bubo"')
+      && coordinator.includes("findCurrentTerminal")
+      && coordinator.includes("result_sha256")
+      && coordinator.includes("issue?.user?.login === trustedAuthorLogin")
+      && coordinator.includes("event.repository.owner.login")
+      && coordinator.includes("generatedByLogin: botLogin")
+      && (coordinator.match(/await dispatcher\.dispatch\(runtimeEnvelope\)/g) ?? []).length === 1,
+    "public outsource descriptor, owner, or immutable-terminal gate drifted",
+  );
+  invariant(
+    issueRun.includes('rootDescriptor.envelope.worker !== "cuckoo"')
+      && issueRun.includes('rootDescriptor.envelope.capability !== "prozorro_snapshot_v1"')
+      && issueRun.includes("let adapterExecutions = parentDecision.comment_body ? 1 : 0")
+      && issueRun.includes("if (!childTerminal)")
+      && issueRun.includes("adapterExecutions += 1")
+      && issueRun.includes("resolveRuntimeEnvelope(")
+      && issueRun.includes("findUniqueTaskIssue(freshIssues, childTaskId, botLogin)")
+      && issueRun.includes("created.user?.login !== botLogin")
+      && issueRun.includes("const afterCreateIssues = await github.issues()")
+      && issueRun.includes("const authoritative = findUniqueTaskIssue(")
+      && (issueRun.match(/const verified = parseBotTerminalComment\(/g) ?? []).length === 2
+      && (issueRun.match(/await coordinateIssueTask\s*\(/g) ?? []).length === 1
+      && (issueRun.match(/await dispatcher\.dispatch\(buboEnvelope\)/g) ?? []).length === 1,
+    "public outsource same-run chain is no longer bounded to Cuckoo then BUBO",
+  );
+  invariant(
+    security.includes('input.sensitivity !== "PUBLIC"')
+      && security.includes("assertNoForbiddenFields(input.payload)")
+      && security.includes('"coordinates"')
+      && security.includes('"targeting"')
+      && security.includes('"private_communication"'),
+    "public outsource PUBLIC-only payload boundary drifted",
+  );
+  invariant(
+    cuckoo.includes('const RECORD_ID = /^[0-9a-fA-F]{32}$/;')
+      && cuckoo.includes('const API_ROOT = "https://public-api.prozorro.gov.ua/api/2.5/tenders";')
+      && cuckoo.includes('redirect: "error"')
+      && cuckoo.includes("AbortSignal.timeout(15_000)")
+      && (cuckoo.match(/await fetchImpl\s*\(/g) ?? []).length === 1
+      && cuckoo.includes("candidate_only: true")
+      && cuckoo.includes("sha256Bytes(rawBytes)")
+      && cuckoo.includes('archive_status: "NOT_ARCHIVED_PUBLIC_CANARY"')
+      && bubo.includes('canonical_admission: "PENDING_VERIFIER"')
+      && bubo.includes("no inference of wrongdoing is made")
+      && runtime.includes('"cuckoo",\n      "prozorro_snapshot_v1"')
+      && runtime.includes('.register("bubo", "evidence_packet_v1"'),
+    "public outsource capability, official-source, or verifier gate drifted",
   );
 }
 
@@ -884,7 +1194,7 @@ function validateAnomalySentinelBoundary(files) {
       && /^[0-9a-f]{40}$/.test(liveness.baseline_ref ?? "")
       && liveness.incident_closure_mode === "quarantine"
       && Array.isArray(liveness.contracts)
-      && liveness.contracts.length === 30,
+      && liveness.contracts.length === 32,
     "anomaly sentinel liveness contract boundary drifted",
   );
   const paths = liveness.contracts.map((item) => item.workflow_path);
@@ -907,6 +1217,21 @@ function validateAnomalySentinelBoundary(files) {
       && observer?.mode === "observer"
       && observer?.workflow_blob_sha === gitBlobSha1(workflow),
     "anomaly sentinel liveness self-pin drifted",
+  );
+  const publicWorker = liveness.contracts.find(
+    (item) => item.workflow_path === PUBLIC_OUTSOURCE_WORKFLOW_PATH,
+  );
+  const publicCi = liveness.contracts.find(
+    (item) => item.workflow_path === PUBLIC_OUTSOURCE_CI_WORKFLOW_PATH,
+  );
+  invariant(
+    publicWorker?.workflow_name === "Public outsource worker"
+      && publicWorker?.mode === "event_driven"
+      && publicWorker?.workflow_blob_sha === gitBlobSha1(files.get(PUBLIC_OUTSOURCE_WORKFLOW_PATH) ?? "")
+      && publicCi?.workflow_name === "Public outsource worker CI"
+      && publicCi?.mode === "event_driven"
+      && publicCi?.workflow_blob_sha === gitBlobSha1(files.get(PUBLIC_OUTSOURCE_CI_WORKFLOW_PATH) ?? ""),
+    "public outsource workflows are not exact-pinned in the liveness registry",
   );
 }
 
@@ -1452,6 +1777,7 @@ function validatePublicManifest(manifest, contract) {
   requiredAllowlist.push(...contract.manual_tombstones.map((spec) => spec.path));
   requiredAllowlist.push(...Object.keys(contract.workflow_pins));
   requiredAllowlist.push(...Object.keys(contract.privileged_source_pins));
+  requiredAllowlist.push(...PUBLIC_OUTSOURCE_EXPORT_PATHS);
   invariant(Array.isArray(manifest.allowlist), "public manifest allowlist is missing");
   for (const requiredPath of requiredAllowlist) {
     invariant(manifest.allowlist.includes(requiredPath), `public manifest omits ${requiredPath}`);
@@ -1466,6 +1792,7 @@ export function validateSnapshot(workflows, contract, manifest = undefined) {
   validatePinnedSources(workflows, contract);
   validatePrivilegedLocalExecutionClosure(workflows, contract);
   validateGlobalWorkflowBoundary(workflows, contract);
+  validatePublicOutsourceBoundary(workflows, contract);
   validateAnomalySentinelBoundary(workflows);
   validateGuardWorkflow(workflows.get(".github/workflows/token-cutover-guard-ci.yml"));
   validateFixedReadOnlyKsbClosure(workflows);

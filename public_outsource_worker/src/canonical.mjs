@@ -17,7 +17,11 @@ function sortValue(value) {
 }
 
 export function sha256Text(value) {
-  return createHash("sha256").update(value, "utf8").digest("hex");
+  return sha256Bytes(Buffer.from(value, "utf8"));
+}
+
+export function sha256Bytes(value) {
+  return createHash("sha256").update(value).digest("hex");
 }
 
 export function sha256Object(value) {
