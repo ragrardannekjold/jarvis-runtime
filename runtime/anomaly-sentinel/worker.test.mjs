@@ -80,6 +80,7 @@ function fakeGithub({
   truncated = false,
   workflowState = "active",
   workflowStates = null,
+  orphanedApiWorkflows = [],
   generalRuns = [],
   scheduleRuns = [],
   generalRunReads = null,
@@ -114,15 +115,16 @@ function fakeGithub({
       return { truncated, tree: [{ path: PATH, type: "blob", sha: treeBlob }] };
     }
     if (path.startsWith("/repos/owner/repo/actions/workflows?")) {
+      const workflows = [{
+        id: 100,
+        name: NAME,
+        path: PATH,
+        html_url: "https://github.com/owner/repo/actions/workflows/example.yml",
+        state: workflowState,
+      }, ...orphanedApiWorkflows];
       return {
-        total_count: 1,
-        workflows: [{
-          id: 100,
-          name: NAME,
-          path: PATH,
-          html_url: "https://github.com/owner/repo/actions/workflows/example.yml",
-          state: workflowState,
-        }],
+        total_count: workflows.length,
+        workflows,
       };
     }
     if (path === "/repos/owner/repo/actions/workflows/100") {
@@ -234,6 +236,43 @@ test("snapshot uses a dedicated event=schedule query even after ten issue runs",
   assert.equal(snapshot.scheduled_runs.length, 1);
   assert.equal(snapshot.scheduled_runs[0].id, 1);
   assert.equal(fake.calls.filter((call) => call.path.includes("event=schedule")).length, 1);
+});
+
+test("active API workflow absent from the pinned tree becomes RED historical rerun evidence", async () => {
+  const older = apiRun({ id: 1, created_at: "2026-08-26T11:50:00.000Z" });
+  const newer = apiRun({ id: 2, created_at: "2026-08-26T11:55:00.000Z" });
+  const orphan = {
+    id: 901,
+    name: "Deleted Historical Workflow",
+    path: ".github/workflows/deleted-historical.yml",
+    state: "active",
+  };
+  const fake = fakeGithub({
+    generalRuns: [newer, older],
+    scheduleRuns: [newer, older],
+    orphanedApiWorkflows: [orphan],
+  });
+  const readback = await runSentinelCycle({
+    request: fake.request,
+    repository: REPOSITORY,
+    defaultBranch: BRANCH,
+    pinnedCommit: COMMIT,
+    runId: "api-orphan",
+    contractText: manifestText(),
+    now: NOW,
+    clock: () => NOW,
+  });
+  assert.equal(readback.overall_state, "RED");
+  assert.equal(readback.api_inventory_tree_consistent, false);
+  assert.equal(readback.api_orphaned_active_count, 1);
+  assert.deepEqual(readback.api_orphaned_active_sample, [{
+    workflow_id: 901,
+    workflow_name: "Deleted Historical Workflow",
+    workflow_path: ".github/workflows/deleted-historical.yml",
+    workflow_state: "active",
+  }]);
+  assert.equal(readback.historical_rerun_surface_neutralized, false);
+  assert.equal(fake.calls.every((call) => call.method === "GET"), true);
 });
 
 test("truncated workflow tree and source SHA mismatch stop before mutation", async () => {
