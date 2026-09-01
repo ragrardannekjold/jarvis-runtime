@@ -79,9 +79,13 @@ and independently recompute the source in an approved evidence store.
 
 The repository-root `.github/workflows/public-outsource-worker.yml` is the
 event-only canary. It has
-no `schedule`, static commands only, a five-minute ceiling, per-task-title concurrency,
+no `schedule`, static commands only, a five-minute ceiling, owner-and-task concurrency,
 SHA-pinned checkout/setup actions, disabled credential persistence/package
-manager caching, and the minimum repository permissions needed to read and write issues. The
+manager caching, and the minimum repository permissions needed to read and write issues.
+Recovery uses exact task-title lookups constrained to the trusted owner or bot
+author, so unrelated public issues do not enter the dispatch index. Root and
+child task conversations are locked before recovery comments are read, keeping
+untrusted public comments outside the terminal journal. The
 process-local ledger is explicitly ephemeral; issue history and immutable result
 markers supply redelivery idempotency across fresh runners.
 Adapter execution itself remains at-least-once if a process stops between a

@@ -11,6 +11,7 @@ export {
   TERMINAL_END,
   TERMINAL_SCHEMA,
   assertTaskBoundToIssue,
+  childTaskId,
   coordinateIssueTask,
   createTerminal,
   findCurrentTerminal,

@@ -65,6 +65,14 @@ test("public outsource workflow rejects owner-gate, trigger, and command expansi
       /owner gate or issue-scoped concurrency drifted/,
     ],
     [
+      "title-only concurrency",
+      (workflow) => workflow.replace(
+        "group: public-outsource-${{ github.event.issue.user.login }}-${{ github.event.issue.title }}",
+        "group: public-outsource-${{ github.event.issue.title }}",
+      ),
+      /owner gate or issue-scoped concurrency drifted/,
+    ],
+    [
       "schedule trigger",
       (workflow) => workflow.replace("on:\n  issues:", "on:\n  schedule:\n    - cron: '*/5 * * * *'\n  issues:"),
       /trigger and authority boundary drifted|scrapeable public-content trigger is not allowlisted/,
@@ -138,6 +146,38 @@ test("public outsource transitive source closure rejects dynamic execution and a
       "public_outsource_worker/src/security.mjs",
       (source) => source.replace('input.sensitivity !== "PUBLIC"', 'input.sensitivity !== "PRIVATE"'),
       /PUBLIC-only payload boundary drifted/,
+    ],
+    [
+      "public_outsource_worker/integration/github_api_client.mjs",
+      (source) => source.replace(
+        "creator=${encodeURIComponent(trustedAuthorLogin)}&",
+        "",
+      ),
+      /GitHub client escaped repository-scoped issue I\/O/,
+    ],
+    [
+      "public_outsource_worker/integration/github_api_client.mjs",
+      (source) => source.replace(
+        "item?.user?.login === trustedAuthorLogin",
+        "true",
+      ),
+      /GitHub client escaped repository-scoped issue I\/O/,
+    ],
+    [
+      "public_outsource_worker/integration/github_api_client.mjs",
+      (source) => source.replace(
+        'const ACTIONS_BOT_LOGIN = "github-actions[bot]";',
+        'const ACTIONS_BOT_LOGIN = "disabled-bot";',
+      ),
+      /GitHub client escaped repository-scoped issue I\/O/,
+    ],
+    [
+      "public_outsource_worker/src/github_issue_run.mjs",
+      (source) => source.replace(
+        "await github.lockIssue(event.issue.number);",
+        "// root lock removed",
+      ),
+      /same-run chain is no longer bounded/,
     ],
   ]) {
     const snapshot = await fresh();

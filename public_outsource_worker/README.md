@@ -89,5 +89,5 @@ itself uses only Node.js standard APIs.
 
 Adapter execution is at-least-once: a runner failure after a read but before its
 terminal comment can repeat the read. Committed terminal results are
-content-addressed and deduplicated; the adapters are read-only and deterministic
-for a fixed source response.
+content-addressed and deduplicated. Cuckoo records a fresh retrieval time for
+each official read; BUBO is deterministic for one exact Cuckoo snapshot.

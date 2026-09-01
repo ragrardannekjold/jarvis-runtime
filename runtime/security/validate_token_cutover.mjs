@@ -9,7 +9,7 @@ import { fileURLToPath } from "node:url";
 export const CONTRACT_PATH = "runtime/security/token_cutover_contract.json";
 export const MANIFEST_PATH = "PUBLIC_EXPORT_MANIFEST.json";
 export const EXPECTED_CONTRACT_SHA256 =
-  "695e5148d94b2705a2c4818a998ab764ebf68783cf963861d64496622bbe36ee";
+  "b1e5f2cc67fbf898ccc615e2841d937149e9cb7efb8dc3e83e66307cef8f653a";
 const CONTAIN_PHASE_INDEX = 2;
 const OFFICIAL_NODE24_ACTION_PINS = new Map([
   ["actions/checkout", "3d3c42e5aac5ba805825da76410c181273ba90b1"],
@@ -170,17 +170,17 @@ const FIXED_LOCAL_EXECUTION_BLOBS = new Map([
   ["runtime/continuous-queue/worker.mjs", "3525aba2f971040c6324686023ff67230a9e336f"],
   ["runtime/anomaly-sentinel/sentinel.mjs", "f84b48da1c4b13a9fbf8c998457dfe5fa443ce62"],
   ["runtime/anomaly-sentinel/worker.mjs", "22407b4e7cb137c8d88e1c5c7d91ef1b5beb768e"],
-  ["runtime/anomaly-sentinel/liveness-contracts.json", "4e6fe8abb7226a398e3b083a5a8af70228cf34ee"],
-  [PUBLIC_OUTSOURCE_WORKFLOW_PATH, "10a203e1c9d3345d99fe0ff556ffcd818c9a2287"],
+  ["runtime/anomaly-sentinel/liveness-contracts.json", "83916f457a9607ae420e34308a08d0ee904a229c"],
+  [PUBLIC_OUTSOURCE_WORKFLOW_PATH, "d3a607060a451edcc8a4db4807f5091035fe9413"],
   ["public_outsource_worker/integration/github_action_entry.mjs", "b85534af4794c64b7d96da63a7297866a74f6893"],
-  ["public_outsource_worker/integration/github_api_client.mjs", "c3f776fa3de7b15efd3ce9945e147787a1cce67c"],
+  ["public_outsource_worker/integration/github_api_client.mjs", "8e1b800313f359f0216aae12978b1433bb85cb79"],
   ["public_outsource_worker/src/adapters/bubo.mjs", "ee86fa9490dc73809cede8b5c2de555b8a3b3926"],
   ["public_outsource_worker/src/adapters/cuckoo.mjs", "3ff9f1ed9612e16e2f29ddda515157e13c0b50be"],
   ["public_outsource_worker/src/canonical.mjs", "3d83c75f46696e95315b82737257f6dcfc4cbf4d"],
   ["public_outsource_worker/src/dispatcher.mjs", "97bdbc919474e28deb61b486aa8915ba8779fa01"],
   ["public_outsource_worker/src/errors.mjs", "6fb71def764521e6e5817d5b56c09eec98431d72"],
-  ["public_outsource_worker/src/github_issue_coordinator.mjs", "f7ae8d14e9bef8bfd1420f9a7b2711ff001f9c67"],
-  ["public_outsource_worker/src/github_issue_run.mjs", "1b036607ac274521a5ab2869944e613da484b3ae"],
+  ["public_outsource_worker/src/github_issue_coordinator.mjs", "6300d9ddaadf713d9b864cd496c808a3c0e1128c"],
+  ["public_outsource_worker/src/github_issue_run.mjs", "5301a57d83407ff2b33727dd019e80f269d03505"],
   ["public_outsource_worker/src/ledger.mjs", "c3901e502015c05d26fa622c76d5214243ba571f"],
   ["public_outsource_worker/src/registry.mjs", "cd7b1dbcf8ba54d4050b70613bf2a0db71187d25"],
   ["public_outsource_worker/src/runtime.mjs", "98fe626c4a7faa28b56e3361c665a2778c2a8fe2"],
@@ -546,7 +546,7 @@ export function validatePublicOutsourceBoundary(files, contract) {
     workflow.includes("startsWith(github.event.issue.title, '[OUTSOURCE-TASK] ')")
       && workflow.includes("github.event.issue.user.login == github.repository_owner")
       && !workflow.includes("github.actor == 'github-actions[bot]'")
-      && workflow.includes("group: public-outsource-${{ github.event.issue.title }}")
+      && workflow.includes("group: public-outsource-${{ github.event.issue.user.login }}-${{ github.event.issue.title }}")
       && workflow.includes("cancel-in-progress: false"),
     "public outsource owner gate or issue-scoped concurrency drifted",
   );
@@ -654,7 +654,15 @@ export function validatePublicOutsourceBoundary(files, contract) {
       && githubClient.includes("if (!path.startsWith(`${repoRoot}/`))")
       && githubClient.includes('redirect: "error"')
       && githubClient.includes("for (let page = 1; page <= 10; page += 1)")
+      && githubClient.includes("async taskIssues(taskId, trustedAuthorLogin)")
+      && githubClient.includes('const ACTIONS_BOT_LOGIN = "github-actions[bot]";')
+      && githubClient.includes("trustedAuthorLogin !== ACTIONS_BOT_LOGIN")
+      && githubClient.includes("creator=${encodeURIComponent(trustedAuthorLogin)}")
+      && githubClient.includes("item?.user?.login === trustedAuthorLogin")
+      && !githubClient.includes("async issues()")
       && githubClient.includes('method: "POST"')
+      && githubClient.includes('method: "PUT"')
+      && githubClient.includes("`${repoRoot}/issues/${issueNumber}/lock`")
       && (githubClient.match(/await fetchImpl\s*\(/g) ?? []).length === 1
       && !/\/dispatches|\/actions\/workflows|graphql|contents\//i.test(githubClient),
     "public outsource GitHub client escaped repository-scoped issue I/O",
@@ -680,10 +688,16 @@ export function validatePublicOutsourceBoundary(files, contract) {
       && issueRun.includes("if (!childTerminal)")
       && issueRun.includes("adapterExecutions += 1")
       && issueRun.includes("resolveRuntimeEnvelope(")
-      && issueRun.includes("findUniqueTaskIssue(freshIssues, childTaskId, botLogin)")
+      && issueRun.includes("github.taskIssues(taskId, ownerLogin)")
+      && issueRun.includes("github.taskIssues(childTaskId(taskId), botLogin)")
+      && issueRun.includes("findUniqueTaskIssue(freshIssues, childId, botLogin)")
+      && issueRun.includes("await github.lockIssue(event.issue.number)")
+      && issueRun.includes("await github.lockIssue(childIssue.number)")
+      && (issueRun.match(/await github\.lockIssue\(/g) ?? []).length === 2
       && issueRun.includes("created.user?.login !== botLogin")
-      && issueRun.includes("const afterCreateIssues = await github.issues()")
+      && issueRun.includes("const afterCreateIssues = await github.taskIssues(childId, botLogin)")
       && issueRun.includes("const authoritative = findUniqueTaskIssue(")
+      && !issueRun.includes("github.issues()")
       && (issueRun.match(/const verified = parseBotTerminalComment\(/g) ?? []).length === 2
       && (issueRun.match(/await coordinateIssueTask\s*\(/g) ?? []).length === 1
       && (issueRun.match(/await dispatcher\.dispatch\(buboEnvelope\)/g) ?? []).length === 1,

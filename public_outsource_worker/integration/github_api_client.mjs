@@ -1,5 +1,9 @@
 const GITHUB_API = "https://api.github.com";
 const REPOSITORY = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
+const TRUSTED_LOGIN = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/;
+const ACTIONS_BOT_LOGIN = "github-actions[bot]";
+const SAFE_TASK_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
+const TASK_TITLE_PREFIX = "[OUTSOURCE-TASK] ";
 
 export function createGithubIssueClient({
   repository,
@@ -52,9 +56,27 @@ export function createGithubIssueClient({
       }
       return allPages(`${repoRoot}/issues/${issueNumber}/comments?`);
     },
-    async issues() {
-      const items = await allPages(`${repoRoot}/issues?state=all&`);
-      return items.filter((item) => !item?.pull_request);
+    async taskIssues(taskId, trustedAuthorLogin) {
+      if (typeof taskId !== "string" || !SAFE_TASK_ID.test(taskId)) {
+        throw new Error("Invalid task_id lookup");
+      }
+      if (
+        typeof trustedAuthorLogin !== "string" ||
+        trustedAuthorLogin !== ACTIONS_BOT_LOGIN &&
+        !TRUSTED_LOGIN.test(trustedAuthorLogin)
+      ) {
+        throw new Error("Invalid trusted issue author");
+      }
+      const items = await allPages(
+        `${repoRoot}/issues?state=all&creator=${encodeURIComponent(trustedAuthorLogin)}&sort=created&direction=desc&`,
+      );
+      const title = `${TASK_TITLE_PREFIX}${taskId}`;
+      return items.filter(
+        (item) =>
+          !item?.pull_request &&
+          item?.title === title &&
+          item?.user?.login === trustedAuthorLogin,
+      );
     },
     comment(issueNumber, body) {
       return request(`${repoRoot}/issues/${issueNumber}/comments`, {
@@ -64,6 +86,14 @@ export function createGithubIssueClient({
     },
     createIssue(issue) {
       return request(`${repoRoot}/issues`, { method: "POST", body: issue });
+    },
+    lockIssue(issueNumber) {
+      if (!Number.isSafeInteger(issueNumber) || issueNumber <= 0) {
+        throw new Error("Invalid issue number");
+      }
+      return request(`${repoRoot}/issues/${issueNumber}/lock`, {
+        method: "PUT",
+      });
     },
   };
 }

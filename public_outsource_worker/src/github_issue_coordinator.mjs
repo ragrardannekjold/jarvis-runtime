@@ -250,7 +250,7 @@ export function resolveRuntimeEnvelope(descriptor, priorComments, botLogin) {
   };
 }
 
-function childTaskId(parentTaskId) {
+export function childTaskId(parentTaskId) {
   const candidate = `${parentTaskId}.bubo`;
   if (candidate.length <= 128) return candidate;
   return `bubo.${sha256Object(parentTaskId).slice(0, 32)}`;

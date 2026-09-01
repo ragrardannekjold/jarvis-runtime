@@ -65,11 +65,18 @@ class FakeGithub {
     this.commentIndex = new Map([[event.issue.number, []]]);
     this.created = [];
     this.posted = [];
+    this.locked = new Set();
     this.nextNumber = 42;
   }
 
-  async issues() {
-    return structuredClone(this.issueIndex);
+  async taskIssues(taskId, trustedAuthorLogin) {
+    return structuredClone(
+      this.issueIndex.filter(
+        (issue) =>
+          issue.title === `${ISSUE_TITLE_PREFIX}${taskId}` &&
+          issue.user?.login === trustedAuthorLogin,
+      ),
+    );
   }
 
   async comments(number) {
@@ -93,6 +100,11 @@ class FakeGithub {
     this.commentIndex.set(created.number, []);
     this.created.push(created);
     return structuredClone(created);
+  }
+
+  async lockIssue(number) {
+    this.locked.add(number);
+    return null;
   }
 }
 
@@ -143,6 +155,7 @@ test("one owner event executes the bounded Cuckoo to BUBO chain in the same run"
   assert.equal(summary.child.action, "COMMENT_TERMINAL");
   assert.equal(github.created.length, 1);
   assert.equal(github.posted.length, 2);
+  assert.deepEqual([...github.locked].sort((a, b) => a - b), [41, 42]);
   assert.equal(fetches, 1);
 
   const replay = await runBoundedIssueChain({
@@ -157,6 +170,28 @@ test("one owner event executes the bounded Cuckoo to BUBO chain in the same run"
   assert.equal(replay.child.action, "NOOP_ALREADY_TERMINAL");
   assert.equal(github.created.length, 1);
   assert.equal(github.posted.length, 2);
+});
+
+test("root conversation lock fails before any official source read", async () => {
+  const event = rootEvent();
+  class LockFailureGithub extends FakeGithub {
+    async lockIssue() {
+      throw new Error("lock unavailable");
+    }
+  }
+  let fetches = 0;
+  await assert.rejects(
+    runBoundedIssueChain({
+      event,
+      dispatcher: runtime(() => {
+        fetches += 1;
+      }).dispatcher,
+      botLogin: BOT,
+      github: new LockFailureGithub(event),
+    }),
+    /lock unavailable/,
+  );
+  assert.equal(fetches, 0);
 });
 
 test("rerun resumes an existing deterministic child that has no terminal", async () => {

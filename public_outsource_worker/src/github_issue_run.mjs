@@ -1,5 +1,6 @@
 import { fail } from "./errors.mjs";
 import {
+  childTaskId,
   coordinateIssueTask,
   createTerminal,
   findCurrentTerminal,
@@ -13,7 +14,13 @@ import {
 } from "./github_issue_coordinator.mjs";
 
 function assertGithubPort(github) {
-  for (const method of ["issues", "comments", "comment", "createIssue"]) {
+  for (const method of [
+    "taskIssues",
+    "comments",
+    "comment",
+    "createIssue",
+    "lockIssue",
+  ]) {
     if (typeof github?.[method] !== "function") {
       fail("INVALID_GITHUB_PORT", `GitHub port is missing method ${method}`);
     }
@@ -48,10 +55,21 @@ export async function runBoundedIssueChain({
     fail("INVALID_ROOT_CAPABILITY", "Owner workflow must start with a Cuckoo snapshot task");
   }
 
-  const existingIssues = await github.issues();
-  if (!Array.isArray(existingIssues)) {
+  // Lock before any history read so public comments cannot consume the recovery
+  // pagination budget or race a trusted terminal.
+  await github.lockIssue(event.issue.number);
+  const taskId = rootDescriptor.envelope.task_id;
+  const ownerLogin = event.repository.owner.login;
+  const [rootIssues, preexistingChildIssues] = await Promise.all([
+    github.taskIssues(taskId, ownerLogin),
+    rootDescriptor.next === null
+      ? Promise.resolve([])
+      : github.taskIssues(childTaskId(taskId), botLogin),
+  ]);
+  if (!Array.isArray(rootIssues) || !Array.isArray(preexistingChildIssues)) {
     fail("INVALID_ISSUE_INDEX", "GitHub issue index must be an array");
   }
+  const existingIssues = [...rootIssues, ...preexistingChildIssues];
   const parentComments = await github.comments(event.issue.number);
   const parentDecision = await coordinateIssueTask({
     event,
@@ -98,12 +116,12 @@ export async function runBoundedIssueChain({
     generatedByLogin: botLogin,
   });
   const childDescriptor = parseDescriptorBody(childPlan.body);
-  const childTaskId = childDescriptor.envelope.task_id;
-  const freshIssues = await github.issues();
+  const childId = childDescriptor.envelope.task_id;
+  const freshIssues = await github.taskIssues(childId, botLogin);
   if (!Array.isArray(freshIssues)) {
     fail("INVALID_ISSUE_INDEX", "GitHub issue index must be an array");
   }
-  let childIssue = findUniqueTaskIssue(freshIssues, childTaskId, botLogin);
+  let childIssue = findUniqueTaskIssue(freshIssues, childId, botLogin);
   let childCreated = false;
   if (childIssue) {
     if (childIssue.body !== childPlan.body) {
@@ -124,13 +142,13 @@ export async function runBoundedIssueChain({
     childIssue = { number: created.number, ...childPlan };
     childCreated = true;
 
-    const afterCreateIssues = await github.issues();
+    const afterCreateIssues = await github.taskIssues(childId, botLogin);
     if (!Array.isArray(afterCreateIssues)) {
       fail("INVALID_ISSUE_INDEX", "GitHub issue index must be an array");
     }
     const authoritative = findUniqueTaskIssue(
       afterCreateIssues,
-      childTaskId,
+      childId,
       botLogin,
     );
     if (!authoritative || authoritative.number !== childIssue.number) {
@@ -141,6 +159,7 @@ export async function runBoundedIssueChain({
     }
   }
 
+  await github.lockIssue(childIssue.number);
   const childComments = await github.comments(childIssue.number);
   // Always resolve the dependency, even if a child terminal exists, so case,
   // capability, parent author, and parent hash are revalidated on every rerun.
@@ -149,7 +168,7 @@ export async function runBoundedIssueChain({
     parentHistory,
     botLogin,
   );
-  let childTerminal = findCurrentTerminal(childComments, childTaskId, botLogin);
+  let childTerminal = findCurrentTerminal(childComments, childId, botLogin);
   let childAction = "NOOP_ALREADY_TERMINAL";
   if (!childTerminal) {
     const childResult = await dispatcher.dispatch(buboEnvelope);
@@ -169,7 +188,7 @@ export async function runBoundedIssueChain({
   summary.adapter_executions = adapterExecutions;
   summary.child = {
     issue_number: childIssue.number,
-    task_id: childTaskId,
+    task_id: childId,
     issue_action: childCreated ? "CREATED" : "RESUMED",
     action: childAction,
     result_sha256: childTerminal.result_sha256,
