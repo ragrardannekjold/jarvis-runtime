@@ -7,34 +7,55 @@ on:
       - '.github/workflows/runtime-anomaly-sentinel.yml'
       - 'runtime/anomaly-sentinel/**'
   schedule:
-    - cron: '23 * * * *'
+    - cron: '3-53/10 * * * *'
 
 permissions:
-  actions: read
   contents: read
-  issues: write
 
 concurrency:
   group: runtime-anomaly-sentinel
   cancel-in-progress: false
 
 jobs:
-  observe:
+  preflight:
     runs-on: ubuntu-latest
-    timeout-minutes: 8
+    timeout-minutes: 5
     steps:
-      - name: Checkout public runtime
+      - name: Checkout exact candidate
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
+          ref: ${{ github.sha }}
           persist-credentials: false
       - name: Set up Node
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
         with:
           node-version: '24'
           package-manager-cache: false
-      - name: Contract gate
-        run: node --test runtime/anomaly-sentinel/sentinel.test.mjs
-      - name: Scan source workflow state and reconcile incidents
+      - name: Read-only contract, worker, and canary gate
+        run: |
+          node --test runtime/anomaly-sentinel/*.test.mjs
+          node runtime/anomaly-sentinel/canary.mjs
+
+  observe:
+    needs: preflight
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    permissions:
+      actions: read
+      contents: read
+      issues: read
+    steps:
+      - name: Checkout exact candidate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Set up Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: '24'
+          package-manager-cache: false
+      - name: Read-only source and liveness observation
         env:
           GITHUB_TOKEN: ${{ github.token }}
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}

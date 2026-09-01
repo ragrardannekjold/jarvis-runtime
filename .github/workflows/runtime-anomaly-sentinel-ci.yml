@@ -16,16 +16,21 @@ jobs:
     timeout-minutes: 5
     steps:
       - name: Checkout public runtime
-        uses: actions/checkout@v4
-      - name: Set up Node
-        uses: actions/setup-node@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          node-version: '20'
-      - name: Syntax checks
+          persist-credentials: false
+      - name: Set up Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: '24'
+          package-manager-cache: false
+      - name: Syntax and manifest checks
         run: |
           node --check runtime/anomaly-sentinel/sentinel.mjs
           node --check runtime/anomaly-sentinel/worker.mjs
-      - name: Contract tests
-        run: node --test runtime/anomaly-sentinel/sentinel.test.mjs
+          node --check runtime/anomaly-sentinel/canary.mjs
+          node -e 'const m=require("./runtime/anomaly-sentinel/liveness-contracts.json"); if(m.schema_version!==2||m.contracts.length!==30) process.exit(1)'
+      - name: Contract and worker tests
+        run: node --test runtime/anomaly-sentinel/*.test.mjs
       - name: Exact offline canary
         run: node runtime/anomaly-sentinel/canary.mjs
