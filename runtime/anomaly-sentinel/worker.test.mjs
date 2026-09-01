@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { readFile, readdir } from "node:fs/promises";
 import {
   classifyWorkflowHealth,
   parseIncidentIssue,
@@ -25,6 +26,11 @@ const PATH = ".github/workflows/example.yml";
 const NAME = "Example Workflow";
 const NOW = new Date("2026-08-26T12:00:00.000Z");
 const BOT = { login: "github-actions[bot]", type: "Bot" };
+
+function gitBlobSha1(bytes) {
+  const header = Buffer.from(`blob ${bytes.length}\0`, "utf8");
+  return createHash("sha1").update(header).update(bytes).digest("hex");
+}
 
 function contract(overrides = {}) {
   return {
@@ -630,6 +636,35 @@ test("production workflow grants read scopes only and declares no write authorit
   assert.match(workflow, /^permissions:\n  contents: read$/m);
   assert.match(workflow, /^    permissions:\n      actions: read\n      contents: read\n      issues: read$/m);
   assert.doesNotMatch(workflow, /:\s*write\b|write-all|id-token:/i);
+});
+
+test("production liveness registry byte-pins every current workflow", async () => {
+  const workflowsRoot = new URL("../../.github/workflows/", import.meta.url);
+  const manifest = JSON.parse(
+    await readFile(new URL("./liveness-contracts.json", import.meta.url), "utf8"),
+  );
+  const names = (await readdir(workflowsRoot))
+    .filter((name) => name.endsWith(".yml") || name.endsWith(".yaml"))
+    .sort();
+  const paths = names.map((name) => `.github/workflows/${name}`);
+  const contractsByPath = new Map(
+    manifest.contracts.map((item) => [item.workflow_path, item]),
+  );
+
+  assert.deepEqual(
+    [...contractsByPath.keys()].sort(),
+    paths,
+    "liveness registry must have an exact entry for every workflow in the pinned tree",
+  );
+  for (const name of names) {
+    const workflowPath = `.github/workflows/${name}`;
+    const bytes = await readFile(new URL(name, workflowsRoot));
+    assert.equal(
+      gitBlobSha1(bytes),
+      contractsByPath.get(workflowPath).workflow_blob_sha,
+      `${workflowPath} blob pin must match its current bytes`,
+    );
+  }
 });
 
 test("production cycle is GET-only across failure, existing issue, disabled, source mismatch, recovery, and tampered issue", async () => {
