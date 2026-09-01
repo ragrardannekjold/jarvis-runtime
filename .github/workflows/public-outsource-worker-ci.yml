@@ -1,0 +1,25 @@
+name: Public outsource worker CI
+
+on:
+  pull_request:
+    paths:
+      - 'public_outsource_worker/**'
+      - '.github/workflows/public-outsource-worker.yml'
+      - '.github/workflows/public-outsource-worker-ci.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Run public outsource worker tests
+        working-directory: public_outsource_worker
+        run: npm test
