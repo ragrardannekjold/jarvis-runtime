@@ -251,8 +251,26 @@ export async function collectSnapshot({
     apiByPath.set(workflow.path, workflow);
     apiIds.add(workflow.id);
   }
-  const unexpectedActive = apiWorkflows.filter((item) => item.state === "active" && !treeByPath.has(item.path));
-  if (unexpectedActive.length > 0) fail("active_api_workflow_missing_from_tree");
+  const orphanedActiveWorkflows = apiWorkflows
+    .filter((item) => item.state === "active" && !treeByPath.has(item.path))
+    .map((item) => {
+      if (
+        !Number.isSafeInteger(item.id)
+        || item.id < 1
+        || typeof item.name !== "string"
+        || !item.name
+        || typeof item.path !== "string"
+        || !/^\.github\/workflows\/[^/]+\.ya?ml$/i.test(item.path)
+      ) fail("invalid_orphaned_api_workflow");
+      return {
+        workflow_id: item.id,
+        workflow_name: item.name,
+        workflow_path: item.path,
+        workflow_state: item.state,
+      };
+    })
+    .sort((left, right) => left.workflow_path.localeCompare(right.workflow_path)
+      || left.workflow_id - right.workflow_id);
 
   const workflowInventory = contracts.map((contract) => {
     const source = treeByPath.get(contract.workflow_path);
@@ -314,6 +332,7 @@ export async function collectSnapshot({
     workflow_source_digest: workflowSourceDigest,
     liveness_contracts: contracts,
     workflow_inventory: workflowInventory,
+    api_orphaned_active_workflows: orphanedActiveWorkflows,
     all_event_runs: allGroups.flat(),
     scheduled_runs: scheduledGroups.flat(),
     execution_history_complete: false,
@@ -789,7 +808,11 @@ export async function runSentinelCycle({
   const selected = selectExecutablePlan(plan);
   await assertSourceAuthority({ request, repository, defaultBranch, pinnedCommit });
   const stateCounts = Object.fromEntries(READBACK_STATES.map((state) => [state, health.state_counts[state] || 0]));
-  const operationalState = health.overall_state === "GREEN" ? "AMBER" : health.overall_state;
+  const apiInventoryDrift = snapshot.api_orphaned_active_workflows.length > 0;
+  const operationalState = apiInventoryDrift
+    ? "RED"
+    : health.overall_state === "GREEN" ? "AMBER" : health.overall_state;
+  const orphanSample = snapshot.api_orphaned_active_workflows.slice(0, 50);
   return {
     schema_version: 2,
     run_id: runId,
@@ -799,6 +822,12 @@ export async function runSentinelCycle({
     workflow_source_digest: snapshot.workflow_source_digest,
     coverage: health.coverage,
     workflows_observed: health.workflow_observations.length,
+    api_inventory_tree_consistent: !apiInventoryDrift,
+    api_orphaned_active_count: snapshot.api_orphaned_active_workflows.length,
+    api_orphaned_active_digest: sha256(JSON.stringify(snapshot.api_orphaned_active_workflows)),
+    api_orphaned_active_sample: orphanSample,
+    api_orphaned_active_sample_complete: orphanSample.length === snapshot.api_orphaned_active_workflows.length,
+    historical_rerun_surface_neutralized: !apiInventoryDrift,
     overall_state: operationalState,
     state_counts: stateCounts,
     actions: [],
