@@ -361,6 +361,8 @@
     "mutation_authority": "NONE",
     "execution_issue_upserts_enabled": false,
     "execution_history_complete": false,
+    "api_orphaned_active_workflows_fail_health": true,
+    "historical_rerun_surface_neutralized": false,
     "recovery_closes_incident": false,
     "incident_closure_mode": "QUARANTINE_PENDING_HISTORICAL_RERUN_NEUTRALIZATION",
     "certified_green_available": false,
