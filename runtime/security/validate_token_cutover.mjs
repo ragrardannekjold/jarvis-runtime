@@ -9,7 +9,7 @@ import { fileURLToPath } from "node:url";
 export const CONTRACT_PATH = "runtime/security/token_cutover_contract.json";
 export const MANIFEST_PATH = "PUBLIC_EXPORT_MANIFEST.json";
 export const EXPECTED_CONTRACT_SHA256 =
-  "52d9c89044de95d5a4de6a3245a114d34ffaa85023203c64c4538974afeca1e3";
+  "92eb3a561655a15d532c7094e02f48d7b94ade005177d97351d0bbda8931be28";
 const CONTAIN_PHASE_INDEX = 2;
 const OFFICIAL_NODE24_ACTION_PINS = new Map([
   ["actions/checkout", "3d3c42e5aac5ba805825da76410c181273ba90b1"],
@@ -91,7 +91,7 @@ const FIXED_LOCAL_EXECUTION_BLOBS = new Map([
   ["runtime/async-jobs/contract.test.mjs", "a9908d14aeacb082aecd6d2bb416281ea346d683"],
   ["runtime/continuous-queue/worker.mjs", "3525aba2f971040c6324686023ff67230a9e336f"],
   ["runtime/anomaly-sentinel/sentinel.mjs", "f84b48da1c4b13a9fbf8c998457dfe5fa443ce62"],
-  ["runtime/anomaly-sentinel/worker.mjs", "256537d2ac3267e9bee2e5ed4aa44157fd921a7d"],
+  ["runtime/anomaly-sentinel/worker.mjs", "22407b4e7cb137c8d88e1c5c7d91ef1b5beb768e"],
   ["runtime/anomaly-sentinel/liveness-contracts.json", "6e04d147f6d6be9ca6c022647c7985964bc8ac55"],
 ]);
 
@@ -1409,6 +1409,8 @@ function validatePublicManifest(manifest, contract) {
       && anomaly?.mutation_authority === "NONE"
       && anomaly?.execution_issue_upserts_enabled === false
       && anomaly?.execution_history_complete === false
+      && anomaly?.api_orphaned_active_workflows_fail_health === true
+      && anomaly?.historical_rerun_surface_neutralized === false
       && anomaly?.recovery_closes_incident === false
       && anomaly?.incident_closure_mode === "QUARANTINE_PENDING_HISTORICAL_RERUN_NEUTRALIZATION"
       && anomaly?.certified_green_available === false
