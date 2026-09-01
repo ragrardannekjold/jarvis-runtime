@@ -29,7 +29,7 @@ jobs:
           node --check runtime/anomaly-sentinel/sentinel.mjs
           node --check runtime/anomaly-sentinel/worker.mjs
           node --check runtime/anomaly-sentinel/canary.mjs
-          node -e 'const m=require("./runtime/anomaly-sentinel/liveness-contracts.json"); if(m.schema_version!==2||m.contracts.length!==30) process.exit(1)'
+          node -e 'const m=require("./runtime/anomaly-sentinel/liveness-contracts.json"); if(m.schema_version!==2||m.contracts.length!==32) process.exit(1)'
       - name: Contract and worker tests
         run: node --test runtime/anomaly-sentinel/*.test.mjs
       - name: Exact offline canary

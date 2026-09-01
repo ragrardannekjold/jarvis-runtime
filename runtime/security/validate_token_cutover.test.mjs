@@ -42,10 +42,196 @@ test("CONTAIN baseline is exact and fail closed", async () => {
     legacy_secret_bindings: 7,
     legacy_secret_workflows: 2,
     manual_tombstones: 6,
-    privileged_source_pins: 28,
+    privileged_source_pins: 41,
     historical_rerun_capability: "PENDING_NEUTRALIZATION",
     external_attestation: "PENDING_EXTERNAL_AUTHORITY",
   });
+});
+
+test("public outsource lane accepts only the exact owner-opened bounded issue chain", async () => {
+  const snapshot = await fresh();
+  assert.doesNotThrow(() => validateSnapshot(snapshot.workflows, snapshot.contract, snapshot.manifest));
+});
+
+test("public outsource workflow rejects owner-gate, trigger, and command expansion after repinning", async () => {
+  const workflowPath = ".github/workflows/public-outsource-worker.yml";
+  for (const [label, mutate, expected] of [
+    [
+      "bot actor",
+      (workflow) => workflow.replace(
+        "github.event.issue.user.login == github.repository_owner",
+        "(github.event.issue.user.login == github.repository_owner || github.actor == 'github-actions[bot]')",
+      ),
+      /owner gate or issue-scoped concurrency drifted/,
+    ],
+    [
+      "title-only concurrency",
+      (workflow) => workflow.replace(
+        "group: public-outsource-${{ github.event.issue.user.login }}-${{ github.event.issue.title }}",
+        "group: public-outsource-${{ github.event.issue.title }}",
+      ),
+      /owner gate or issue-scoped concurrency drifted/,
+    ],
+    [
+      "schedule trigger",
+      (workflow) => workflow.replace("on:\n  issues:", "on:\n  schedule:\n    - cron: '*/5 * * * *'\n  issues:"),
+      /trigger and authority boundary drifted|scrapeable public-content trigger is not allowlisted/,
+    ],
+    [
+      "extra command",
+      (workflow) => `${workflow}\n      - name: Unreviewed command\n        run: node -e 'console.log(1)'\n`,
+      /execution command and native-token closure drifted/,
+    ],
+  ]) {
+    const snapshot = await fresh();
+    snapshot.workflows.set(workflowPath, mutate(snapshot.workflows.get(workflowPath)));
+    repin(snapshot, workflowPath);
+    assert.throws(
+      () => validateSnapshot(snapshot.workflows, snapshot.contract),
+      expected,
+      label,
+    );
+  }
+});
+
+test("public outsource workflow rejects mutable actions, credential persistence, and package cache", async () => {
+  const workflowPath = ".github/workflows/public-outsource-worker.yml";
+  for (const [label, mutate, expected] of [
+    [
+      "mutable checkout",
+      (workflow) => workflow.replace(
+        "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+        "actions/checkout@v4",
+      ),
+      /external executable reference must use a full commit SHA/,
+    ],
+    [
+      "credential persistence",
+      (workflow) => workflow.replace("persist-credentials: false", "persist-credentials: true"),
+      /privileged checkout must disable persisted credentials/,
+    ],
+    [
+      "package cache",
+      (workflow) => workflow.replace("package-manager-cache: false", "package-manager-cache: true"),
+      /setup-node automatic package-manager cache must be disabled/,
+    ],
+  ]) {
+    const snapshot = await fresh();
+    snapshot.workflows.set(workflowPath, mutate(snapshot.workflows.get(workflowPath)));
+    repin(snapshot, workflowPath);
+    assert.throws(
+      () => validateSnapshot(snapshot.workflows, snapshot.contract),
+      expected,
+      label,
+    );
+  }
+});
+
+test("public outsource transitive source closure rejects dynamic execution and arbitrary network authority", async () => {
+  for (const [sourcePath, mutate, expected] of [
+    [
+      "public_outsource_worker/src/runtime.mjs",
+      (source) => `${source}\nawait import(process.env.UNREVIEWED_MODULE);\n`,
+      /unreviewed command or dynamic module|import closure drifted/,
+    ],
+    [
+      "public_outsource_worker/src/adapters/cuckoo.mjs",
+      (source) => source.replace(
+        "https://public-api.prozorro.gov.ua/api/2.5/tenders",
+        "https://example.invalid/tenders",
+      ),
+      /network authority escaped|official-source, or verifier gate drifted/,
+    ],
+    [
+      "public_outsource_worker/src/security.mjs",
+      (source) => source.replace('input.sensitivity !== "PUBLIC"', 'input.sensitivity !== "PRIVATE"'),
+      /PUBLIC-only payload boundary drifted/,
+    ],
+    [
+      "public_outsource_worker/integration/github_api_client.mjs",
+      (source) => source.replace(
+        "creator=${encodeURIComponent(trustedAuthorLogin)}&",
+        "",
+      ),
+      /GitHub client escaped repository-scoped issue I\/O/,
+    ],
+    [
+      "public_outsource_worker/integration/github_api_client.mjs",
+      (source) => source.replace(
+        "item?.user?.login === trustedAuthorLogin",
+        "true",
+      ),
+      /GitHub client escaped repository-scoped issue I\/O/,
+    ],
+    [
+      "public_outsource_worker/integration/github_api_client.mjs",
+      (source) => source.replace(
+        'const ACTIONS_BOT_LOGIN = "github-actions[bot]";',
+        'const ACTIONS_BOT_LOGIN = "disabled-bot";',
+      ),
+      /GitHub client escaped repository-scoped issue I\/O/,
+    ],
+    [
+      "public_outsource_worker/src/github_issue_run.mjs",
+      (source) => source.replace(
+        "await github.lockIssue(event.issue.number);",
+        "// root lock removed",
+      ),
+      /same-run chain is no longer bounded/,
+    ],
+  ]) {
+    const snapshot = await fresh();
+    snapshot.workflows.set(sourcePath, mutate(snapshot.workflows.get(sourcePath)));
+    repinSource(snapshot, sourcePath);
+    assert.throws(
+      () => validateSnapshot(snapshot.workflows, snapshot.contract),
+      expected,
+      sourcePath,
+    );
+  }
+});
+
+test("public outsource source imports, liveness pins, and public inventory fail closed", async () => {
+  const importDrift = await fresh();
+  const sourcePath = "public_outsource_worker/integration/github_action_entry.mjs";
+  importDrift.workflows.set(
+    sourcePath,
+    importDrift.workflows.get(sourcePath).replace(
+      'import { readFile } from "node:fs/promises";',
+      'import { readFile } from "node:fs/promises";\nimport process from "node:process";',
+    ),
+  );
+  repinSource(importDrift, sourcePath);
+  assert.throws(
+    () => validateSnapshot(importDrift.workflows, importDrift.contract),
+    /public outsource import closure drifted/,
+  );
+
+  const missingLiveness = await fresh();
+  const livenessPath = "runtime/anomaly-sentinel/liveness-contracts.json";
+  const liveness = JSON.parse(missingLiveness.workflows.get(livenessPath));
+  liveness.contracts = liveness.contracts.filter(
+    (item) => item.workflow_path !== ".github/workflows/public-outsource-worker-ci.yml",
+  );
+  missingLiveness.workflows.set(livenessPath, `${JSON.stringify(liveness, null, 2)}\n`);
+  repinSource(missingLiveness, livenessPath);
+  assert.throws(
+    () => validateSnapshot(missingLiveness.workflows, missingLiveness.contract),
+    /anomaly sentinel liveness contract boundary drifted|not exact-pinned in the liveness registry/,
+  );
+
+  const missingManifest = await fresh();
+  missingManifest.manifest.allowlist = missingManifest.manifest.allowlist.filter(
+    (item) => item !== "public_outsource_worker/test/github_issue_run.test.mjs",
+  );
+  assert.throws(
+    () => validateSnapshot(
+      missingManifest.workflows,
+      missingManifest.contract,
+      missingManifest.manifest,
+    ),
+    /public manifest omits public_outsource_worker\/test\/github_issue_run\.test\.mjs/,
+  );
 });
 
 test("manual tombstone rejects a second job", async () => {
