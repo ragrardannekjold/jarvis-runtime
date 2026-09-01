@@ -139,7 +139,9 @@
     "runtime/anomaly-sentinel/README.md",
     "runtime/anomaly-sentinel/sentinel.mjs",
     "runtime/anomaly-sentinel/worker.mjs",
+    "runtime/anomaly-sentinel/liveness-contracts.json",
     "runtime/anomaly-sentinel/sentinel.test.mjs",
+    "runtime/anomaly-sentinel/worker.test.mjs",
     "runtime/anomaly-sentinel/canary.mjs"
   ],
   "deny_private_paths": [
@@ -347,17 +349,27 @@
     "remote_durable_backend_required": true
   },
   "runtime_anomaly_sentinel": {
-    "status": "PRODUCTION_ACTIVE_CANARY_VERIFIED",
-    "schema_version": 1,
+    "status": "PRODUCTION_READ_ONLY_SHADOW_AWAITING_LIVE_READBACK",
+    "schema_version": 2,
     "source": "github_actions_public_metadata",
-    "schedule": "hourly",
+    "schedule": "ten_minute_read_only_shadow",
+    "observer_request_budget_per_cycle": 100,
+    "max_scheduled_issue_upserts_per_cycle": 0,
     "active_failure_dedupe": true,
-    "recovery_closes_incident": true,
+    "scheduled_liveness_upserts_enabled": false,
+    "write_mode": "READ_ONLY_SHADOW",
+    "mutation_authority": "NONE",
+    "execution_issue_upserts_enabled": false,
+    "execution_history_complete": false,
+    "recovery_closes_incident": false,
+    "incident_closure_mode": "QUARANTINE_PENDING_HISTORICAL_RERUN_NEUTRALIZATION",
+    "certified_green_available": false,
+    "minimum_reported_state": "AMBER",
     "expected_cancellation_separate": true,
     "rerun_or_repair_authority": false,
     "mailbox_content_read": false,
     "private_content_publication": false,
-    "latest_main_canary": {
+    "historical_main_canary_not_candidate_evidence": {
       "run_id": 32969965585,
       "observed_utc": "2026-08-26T12:42:18.111Z",
       "workflows_observed": 21,
