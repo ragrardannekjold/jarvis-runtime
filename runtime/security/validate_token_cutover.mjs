@@ -9,7 +9,7 @@ import { fileURLToPath } from "node:url";
 export const CONTRACT_PATH = "runtime/security/token_cutover_contract.json";
 export const MANIFEST_PATH = "PUBLIC_EXPORT_MANIFEST.json";
 export const EXPECTED_CONTRACT_SHA256 =
-  "51377fd0677a6283eff9b316dd2cd09aae718c04cabe19a108885cdb908bcf68";
+  "52d9c89044de95d5a4de6a3245a114d34ffaa85023203c64c4538974afeca1e3";
 const CONTAIN_PHASE_INDEX = 2;
 const OFFICIAL_NODE24_ACTION_PINS = new Map([
   ["actions/checkout", "3d3c42e5aac5ba805825da76410c181273ba90b1"],
@@ -37,14 +37,14 @@ const SCRAPEABLE_PUBLIC_INPUT_TRIGGERS = new Set([
   "pull_request_review_comment",
 ]);
 const READ_AUTHORITY_SCOPES = new Set([
-  ".github/workflows/runtime-anomaly-sentinel.yml|permissions|actions",
+  ".github/workflows/runtime-anomaly-sentinel.yml|jobs/observe/permissions|actions",
+  ".github/workflows/runtime-anomaly-sentinel.yml|jobs/observe/permissions|issues",
 ]);
 const WRITE_AUTHORITY_SCOPES = new Set([
   ".github/workflows/kyiv-fast-watch.yml|permissions|actions",
   ".github/workflows/kyiv-cdse-event-queue.yml|jobs/drain/permissions|actions",
   ".github/workflows/async-job-worker.yml|permissions|issues",
   ".github/workflows/continuous-external-queue.yml|permissions|issues",
-  ".github/workflows/runtime-anomaly-sentinel.yml|permissions|issues",
 ]);
 const ASYNC_TOKEN_WORKER_JOB_TYPES = [
   "heartbeat_probe",
@@ -64,7 +64,7 @@ const FIXED_LOCAL_EXECUTION_BLOBS = new Map([
   [".github/workflows/shodan-runtime-readback.yml", "9514d1ca6e38d64b345d3c0b6b7544bd4f2527ef"],
   [".github/workflows/async-job-worker.yml", "083e98b0b71fde01ab82e223d21cbb4aa32208f2"],
   [".github/workflows/continuous-external-queue.yml", "a06242941d968fba6836b39612de4aa3b06719ab"],
-  [".github/workflows/runtime-anomaly-sentinel.yml", "5df49f48129bebb4ac632d9cef8675535a74b7b6"],
+  [".github/workflows/runtime-anomaly-sentinel.yml", "8eb87a87a767390f145de6f994d9986aaa894d56"],
   ["runtime/exposure_queue_worker.mjs", "6b7c203895edada412ca42646ffb60065c1cc04d"],
   ["runtime/investigation_passive_index_worker.mjs", "f4259d73899050479afdc2514d5cfc0b2f93b56a"],
   ["runtime/investigation_passive_index.mjs", "99865510cbd62c1bdc476d8f153bed97ca72f192"],
@@ -90,8 +90,9 @@ const FIXED_LOCAL_EXECUTION_BLOBS = new Map([
   ["runtime/async-jobs/contract.mjs", "5d905100806b71ca9428edf5e4454c1e3ec6da3d"],
   ["runtime/async-jobs/contract.test.mjs", "a9908d14aeacb082aecd6d2bb416281ea346d683"],
   ["runtime/continuous-queue/worker.mjs", "3525aba2f971040c6324686023ff67230a9e336f"],
-  ["runtime/anomaly-sentinel/sentinel.mjs", "8964cbe0fd0ae3706c7ba101efebb22bf33395a4"],
-  ["runtime/anomaly-sentinel/worker.mjs", "f94bae283ea60db7c3ad156f414035b601e09509"],
+  ["runtime/anomaly-sentinel/sentinel.mjs", "f84b48da1c4b13a9fbf8c998457dfe5fa443ce62"],
+  ["runtime/anomaly-sentinel/worker.mjs", "256537d2ac3267e9bee2e5ed4aa44157fd921a7d"],
+  ["runtime/anomaly-sentinel/liveness-contracts.json", "6e04d147f6d6be9ca6c022647c7985964bc8ac55"],
 ]);
 
 function invariant(condition, message) {
@@ -211,7 +212,7 @@ function validatePinnedWorkflows(workflows, contract) {
 function validatePinnedSources(files, contract) {
   const pins = contract.privileged_source_pins;
   invariant(pins && typeof pins === "object" && !Array.isArray(pins), "privileged source pins are missing");
-  invariant(Object.keys(pins).length === 27, "twenty-seven privileged source pins are required");
+  invariant(Object.keys(pins).length === 28, "twenty-eight privileged source pins are required");
   for (const [sourcePath, expectedBlob] of Object.entries(pins)) {
     invariant(files.has(sourcePath), `privileged source is missing: ${sourcePath}`);
     invariant(/^[0-9a-f]{40}$/.test(expectedBlob), `privileged source pin is invalid: ${sourcePath}`);
@@ -773,7 +774,14 @@ function validateAnomalySentinelBoundary(files) {
   const workflow = files.get(workflowPath);
   const worker = files.get("runtime/anomaly-sentinel/worker.mjs");
   const core = files.get("runtime/anomaly-sentinel/sentinel.mjs");
-  invariant(typeof workflow === "string" && typeof worker === "string" && typeof core === "string", "anomaly sentinel closure is missing");
+  const livenessText = files.get("runtime/anomaly-sentinel/liveness-contracts.json");
+  invariant(
+    typeof workflow === "string"
+      && typeof worker === "string"
+      && typeof core === "string"
+      && typeof livenessText === "string",
+    "anomaly sentinel closure is missing",
+  );
 
   const authority = validateWorkflowAuthority(workflow, workflowPath);
   validatePrivilegedExecutionEnvironment(workflow, workflowPath);
@@ -792,49 +800,71 @@ function validateAnomalySentinelBoundary(files) {
     JSON.stringify(references) === JSON.stringify([
       "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
       "actions/setup-node@820762786026740c76f36085b0efc47a31fe5020",
+      "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+      "actions/setup-node@820762786026740c76f36085b0efc47a31fe5020",
     ]),
     "anomaly sentinel must use only the reviewed Node 24 action runtime closure",
   );
   invariant(
     authority.hasExplicitTopLevelPermissions
-      && authority.hasWriteAuthority
-      && JSON.stringify(topLevelChildren(workflow, "permissions"))
-        === JSON.stringify(["actions", "contents", "issues"]),
-    "anomaly sentinel authority must remain actions-read contents-read issues-write",
+      && !authority.hasWriteAuthority
+      && JSON.stringify(topLevelChildren(workflow, "permissions")) === JSON.stringify(["contents"])
+      && JSON.stringify(topLevelChildren(workflow, "jobs")) === JSON.stringify(["preflight", "observe"])
+      && workflow.includes("    permissions:\n      actions: read\n      contents: read\n      issues: read")
+      && !/:\s*write\b|write-all|id-token:/i.test(workflow),
+    "anomaly sentinel authority must remain a two-job read-only shadow",
   );
   invariant(
     JSON.stringify(topLevelChildren(workflow, "on")) === JSON.stringify(["push", "schedule"])
       && workflow.includes("branches: [main]")
-      && workflow.includes("- cron: '23 * * * *'")
+      && workflow.includes("- cron: '3-53/10 * * * *'")
       && !workflow.includes("workflow_dispatch")
       && !workflow.includes("pull_request"),
-    "anomaly sentinel must execute only from default-branch push or the hourly schedule",
+    "anomaly sentinel must execute only from default-branch push or the ten-minute schedule",
   );
-  const runs = yamlMappingEntries(workflow, workflowPath)
-    .filter(({ key }) => key === "run")
-    .map(({ value }) => value);
   invariant(
-    JSON.stringify(runs) === JSON.stringify([
-      "node --test runtime/anomaly-sentinel/sentinel.test.mjs",
-      "node runtime/anomaly-sentinel/worker.mjs",
-    ]),
-    "anomaly sentinel execution closure must contain only its contract gate and pinned worker",
+    (workflow.match(/^\s+run:\s*/gm) ?? []).length === 2
+      && (workflow.match(/node --test runtime\/anomaly-sentinel\/\*\.test\.mjs/g) ?? []).length === 1
+      && (workflow.match(/node runtime\/anomaly-sentinel\/canary\.mjs/g) ?? []).length === 1
+      && (workflow.match(/run: node runtime\/anomaly-sentinel\/worker\.mjs/g) ?? []).length === 1
+      && workflow.includes("  observe:\n    needs: preflight")
+      && (workflow.match(/ref:\s*\$\{\{ github\.sha \}\}/g) ?? []).length === 2
+      && (workflow.match(/persist-credentials:\s*false/g) ?? []).length === 2
+      && (workflow.match(/node-version:\s*'24'/g) ?? []).length === 2
+      && (workflow.match(/package-manager-cache:\s*false/g) ?? []).length === 2,
+    "anomaly sentinel execution closure must retain exact read-only preflight and observe jobs",
   );
   invariant(
     (workflow.match(/GITHUB_TOKEN:\s*\$\{\{ github\.token \}\}/g) ?? []).length === 1
       && workflow.includes("DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}")
-      && workflow.includes("EXPECTED_CANCEL_WORKFLOWS: Kyiv V3 public collector"),
+      && workflow.includes("EXPECTED_CANCEL_WORKFLOWS: Kyiv V3 public collector")
+      && (workflow.match(/GITHUB_TOKEN:\s*\$\{\{ github\.token \}\}/g) ?? []).length === 1,
     "anomaly sentinel token and source-branch inputs drifted",
   );
+  const cycleStart = worker.indexOf("export async function runSentinelCycle(");
+  const cycleEnd = worker.indexOf("\nasync function main()", cycleStart);
+  const productionCycle = cycleStart >= 0 && cycleEnd > cycleStart
+    ? worker.slice(cycleStart, cycleEnd)
+    : "";
   invariant(
     worker.includes('const defaultBranch = requiredEnv("DEFAULT_BRANCH");')
-      && worker.includes("branch=${encodeURIComponent(defaultBranch)}")
-      && worker.includes("exclude_pull_requests=true")
-      && worker.includes("/git/trees/${encodeURIComponent(defaultBranch)}?recursive=1")
-      && worker.includes('throw new Error("default_branch_tree_incomplete")')
-      && worker.includes("decommissionedWorkflowNames")
+      && worker.includes('const pinnedCommit = requiredEnv("GITHUB_SHA");')
+      && worker.includes('"/git/ref/heads/" + encodeURIComponent(defaultBranch)')
+      && worker.includes('"/git/commits/" + pinnedCommit')
+      && worker.includes('"/git/trees/" + treeSha + "?recursive=1"')
+      && worker.includes('fail("pinned_tree_incomplete")')
+      && worker.includes("head_repository")
+      && worker.includes("event=schedule")
+      && worker.includes("&created=")
+      && worker.includes("const GITHUB_API_REQUEST_BUDGET = 100;")
+      && worker.includes("const MAX_SCHEDULED_UPSERTS_PER_CYCLE = 0;")
+      && productionCycle.includes('actions: []')
+      && productionCycle.includes('write_mode: "READ_ONLY_SHADOW"')
+      && productionCycle.includes('mutation_authority: "NONE"')
+      && productionCycle.includes("writes_allowed: false")
+      && !productionCycle.includes("executePlan(")
       && !/node:child_process|\bexecFile\b|\bspawn\b|\bnpm\b|\bimport\s*\(|\brequire\s*\(|\/dispatches|\/rerun/.test(worker),
-    "anomaly sentinel worker escaped its source-observation-only boundary",
+    "anomaly sentinel worker escaped its read-only production boundary",
   );
   invariant(
     /^import \{ createHash \} from "node:crypto";$/m.test(core)
@@ -842,6 +872,41 @@ function validateAnomalySentinelBoundary(files) {
       && core.includes('"DECOMMISSIONED"')
       && !/node:child_process|\bfetch\s*\(|process\.env|\bimport\s*\(|\brequire\s*\(/.test(core),
     "anomaly sentinel classifier must remain a pure non-network contract",
+  );
+  let liveness;
+  try {
+    liveness = JSON.parse(livenessText);
+  } catch {
+    invariant(false, "anomaly sentinel liveness contract is invalid JSON");
+  }
+  invariant(
+    liveness.schema_version === 2
+      && /^[0-9a-f]{40}$/.test(liveness.baseline_ref ?? "")
+      && liveness.incident_closure_mode === "quarantine"
+      && Array.isArray(liveness.contracts)
+      && liveness.contracts.length === 30,
+    "anomaly sentinel liveness contract boundary drifted",
+  );
+  const paths = liveness.contracts.map((item) => item.workflow_path);
+  invariant(new Set(paths).size === paths.length, "anomaly sentinel liveness paths are not unique");
+  for (const item of liveness.contracts) {
+    invariant(/^\.github\/workflows\/[^/]+\.ya?ml$/.test(item.workflow_path ?? ""), "invalid liveness workflow path");
+    invariant(/^[0-9a-f]{40}$/.test(item.workflow_blob_sha ?? ""), "invalid liveness workflow blob pin");
+    if (item.mode === "scheduled") {
+      invariant(
+        item.expected_event === "schedule"
+          && Number.isSafeInteger(item.recovery_min_successes)
+          && item.recovery_min_successes >= 2,
+        "scheduled liveness recovery boundary drifted",
+      );
+    }
+  }
+  const observer = liveness.contracts.find((item) => item.workflow_path === workflowPath);
+  invariant(
+    observer?.workflow_name === "Runtime Anomaly Sentinel"
+      && observer?.mode === "observer"
+      && observer?.workflow_blob_sha === gitBlobSha1(workflow),
+    "anomaly sentinel liveness self-pin drifted",
   );
 }
 
@@ -1329,6 +1394,31 @@ function validatePublicManifest(manifest, contract) {
       && bus?.historical_public_canary?.security_attestation_accepted === false
       && bus?.historical_public_canary?.legacy_v1_public_transport_now_quarantined === true,
     "public manifest knowledge/skill bus quarantine boundary drifted",
+  );
+  const anomaly = manifest.runtime_anomaly_sentinel;
+  invariant(
+    anomaly?.status === "PRODUCTION_READ_ONLY_SHADOW_AWAITING_LIVE_READBACK"
+      && anomaly?.schema_version === 2
+      && anomaly?.source === "github_actions_public_metadata"
+      && anomaly?.schedule === "ten_minute_read_only_shadow"
+      && anomaly?.observer_request_budget_per_cycle === 100
+      && anomaly?.max_scheduled_issue_upserts_per_cycle === 0
+      && anomaly?.active_failure_dedupe === true
+      && anomaly?.scheduled_liveness_upserts_enabled === false
+      && anomaly?.write_mode === "READ_ONLY_SHADOW"
+      && anomaly?.mutation_authority === "NONE"
+      && anomaly?.execution_issue_upserts_enabled === false
+      && anomaly?.execution_history_complete === false
+      && anomaly?.recovery_closes_incident === false
+      && anomaly?.incident_closure_mode === "QUARANTINE_PENDING_HISTORICAL_RERUN_NEUTRALIZATION"
+      && anomaly?.certified_green_available === false
+      && anomaly?.minimum_reported_state === "AMBER"
+      && anomaly?.expected_cancellation_separate === true
+      && anomaly?.rerun_or_repair_authority === false
+      && anomaly?.mailbox_content_read === false
+      && anomaly?.private_content_publication === false
+      && anomaly?.historical_main_canary_not_candidate_evidence?.run_id === 32969965585,
+    "public manifest anomaly sentinel read-only shadow boundary drifted",
   );
   invariant(manifest.command_center_runtime_schedule_enabled === false, "disabled command runtime cannot claim a schedule");
   invariant(manifest.daily_report_schedule?.enabled === false, "disabled daily report cannot claim a schedule");
