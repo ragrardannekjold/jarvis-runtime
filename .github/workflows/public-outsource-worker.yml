@@ -1,0 +1,31 @@
+name: Public outsource worker
+
+on:
+  issues:
+    types: [opened]
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: public-outsource-${{ github.event.issue.number }}
+  cancel-in-progress: false
+
+jobs:
+  dispatch:
+    if: >-
+      startsWith(github.event.issue.title, '[OUTSOURCE-TASK] ') &&
+      (github.actor == github.repository_owner || github.actor == 'github-actions[bot]')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Dispatch public task event
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          OUTSOURCE_BOT_LOGIN: github-actions[bot]
+        run: node public_outsource_worker/integration/github_action_entry.mjs
