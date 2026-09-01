@@ -42,7 +42,7 @@ test("CONTAIN baseline is exact and fail closed", async () => {
     legacy_secret_bindings: 7,
     legacy_secret_workflows: 2,
     manual_tombstones: 6,
-    privileged_source_pins: 27,
+    privileged_source_pins: 28,
     historical_rerun_capability: "PENDING_NEUTRALIZATION",
     external_attestation: "PENDING_EXTERNAL_AUTHORITY",
   });
@@ -381,7 +381,7 @@ test("anomaly sentinel keeps exact default-branch source and authority boundarie
   repin(manual, workflowPath);
   assert.throws(
     () => validateSnapshot(manual.workflows, manual.contract),
-    /must execute only from default-branch push or the hourly schedule/,
+    /must execute only from default-branch push or the ten-minute schedule/,
   );
 
   const sourcePath = "runtime/anomaly-sentinel/worker.mjs";
@@ -389,28 +389,43 @@ test("anomaly sentinel keeps exact default-branch source and authority boundarie
   branchEscape.workflows.set(
     sourcePath,
     branchEscape.workflows.get(sourcePath).replace(
-      "branch=${encodeURIComponent(defaultBranch)}",
-      "branch=${encodeURIComponent(process.env.UNTRUSTED_BRANCH)}",
+      'const pinnedCommit = requiredEnv("GITHUB_SHA");',
+      'const pinnedCommit = requiredEnv("UNTRUSTED_SHA");',
     ),
   );
   repinSource(branchEscape, sourcePath);
   assert.throws(
     () => validateSnapshot(branchEscape.workflows, branchEscape.contract),
-    /worker escaped its source-observation-only boundary|fixed local execution (?:pin|blob) drifted/,
+    /worker escaped its read-only production boundary|fixed local execution (?:pin|blob) drifted/,
   );
 
   const widerWrite = await fresh();
   widerWrite.workflows.set(
     workflowPath,
     widerWrite.workflows.get(workflowPath).replace(
-      "  issues: write",
-      "  issues: write\n  models: write",
+      "      issues: read",
+      "      issues: write",
     ),
   );
   repin(widerWrite, workflowPath);
   assert.throws(
     () => validateSnapshot(widerWrite.workflows, widerWrite.contract),
     /write permission scope is not allowlisted/,
+  );
+
+  const livenessPath = "runtime/anomaly-sentinel/liveness-contracts.json";
+  const weakenedLiveness = await fresh();
+  weakenedLiveness.workflows.set(
+    livenessPath,
+    weakenedLiveness.workflows.get(livenessPath).replace(
+      '"recovery_min_successes":2',
+      '"recovery_min_successes":1',
+    ),
+  );
+  repinSource(weakenedLiveness, livenessPath);
+  assert.throws(
+    () => validateSnapshot(weakenedLiveness.workflows, weakenedLiveness.contract),
+    /scheduled liveness recovery boundary drifted|fixed local execution (?:pin|blob) drifted/,
   );
 });
 
@@ -1422,6 +1437,17 @@ test("public manifest cannot claim repository-secret isolation", async () => {
       snapshot.manifest,
     ),
     /overclaims repository-secret isolation/,
+  );
+});
+
+test("public manifest cannot promote the anomaly sentinel beyond read-only shadow", async () => {
+  const snapshot = await fresh();
+  snapshot.manifest.runtime_anomaly_sentinel.scheduled_liveness_upserts_enabled = true;
+  snapshot.manifest.runtime_anomaly_sentinel.max_scheduled_issue_upserts_per_cycle = 1;
+  snapshot.manifest.runtime_anomaly_sentinel.mutation_authority = "ISSUES_WRITE";
+  assert.throws(
+    () => validateSnapshot(snapshot.workflows, snapshot.contract, snapshot.manifest),
+    /public manifest anomaly sentinel read-only shadow boundary drifted/,
   );
 });
 
