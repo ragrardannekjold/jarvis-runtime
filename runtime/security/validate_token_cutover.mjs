@@ -9,7 +9,7 @@ import { fileURLToPath } from "node:url";
 export const CONTRACT_PATH = "runtime/security/token_cutover_contract.json";
 export const MANIFEST_PATH = "PUBLIC_EXPORT_MANIFEST.json";
 export const EXPECTED_CONTRACT_SHA256 =
-  "92266cd172db18b27e7c48bd42ea302addc9a90719f46f59b3cac664530c49ec";
+  "695e5148d94b2705a2c4818a998ab764ebf68783cf963861d64496622bbe36ee";
 const CONTAIN_PHASE_INDEX = 2;
 const OFFICIAL_NODE24_ACTION_PINS = new Map([
   ["actions/checkout", "3d3c42e5aac5ba805825da76410c181273ba90b1"],
@@ -170,7 +170,7 @@ const FIXED_LOCAL_EXECUTION_BLOBS = new Map([
   ["runtime/continuous-queue/worker.mjs", "3525aba2f971040c6324686023ff67230a9e336f"],
   ["runtime/anomaly-sentinel/sentinel.mjs", "f84b48da1c4b13a9fbf8c998457dfe5fa443ce62"],
   ["runtime/anomaly-sentinel/worker.mjs", "22407b4e7cb137c8d88e1c5c7d91ef1b5beb768e"],
-  ["runtime/anomaly-sentinel/liveness-contracts.json", "7eeeae512a3de295ae33da46994847abe7b9c0ef"],
+  ["runtime/anomaly-sentinel/liveness-contracts.json", "4e6fe8abb7226a398e3b083a5a8af70228cf34ee"],
   [PUBLIC_OUTSOURCE_WORKFLOW_PATH, "10a203e1c9d3345d99fe0ff556ffcd818c9a2287"],
   ["public_outsource_worker/integration/github_action_entry.mjs", "b85534af4794c64b7d96da63a7297866a74f6893"],
   ["public_outsource_worker/integration/github_api_client.mjs", "c3f776fa3de7b15efd3ce9945e147787a1cce67c"],
