@@ -42,7 +42,10 @@ jobs:
           JARVIS_PRIVATE_BRIDGE_INSTALLATION_ID: ""
         run: node --test runtime/private-bridge/bridge.test.mjs
 
-      - name: Prove public queue carries only canonical bridge identity
+      - name: Prove signed-v2 lane is inactive and externally gated
+        run: node --test runtime/private-bridge/activation-contract.test.mjs
+
+      - name: Prove public continuous queue rejects private bridge activation
         run: node --test runtime/private-bridge/queue-contract.test.mjs
 
       - name: Re-run continuous queue regression
