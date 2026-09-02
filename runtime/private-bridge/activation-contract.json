@@ -1,0 +1,52 @@
+{
+  "schema_version": 1,
+  "lane": "SIGNED_V2_PRIVATE_BRIDGE",
+  "lifecycle_state": "INACTIVE_LIBRARY_ONLY",
+  "activation_state": "BLOCKED_EXTERNAL_ATTESTATION",
+  "token_cutover_phase": "CONTAIN",
+  "public_continuous_queue_integration": "FORBIDDEN_IN_CONTAIN_PHASE",
+  "legacy_private_async_bridge": "MUST_REMAIN_TOMBSTONED",
+  "credential_model": "DISTINCT_SHORT_LIVED_GITHUB_APP_IDENTITIES_REQUIRED",
+  "credentials_provisioned": "NOT_PROVEN",
+  "protected_environment_attested": false,
+  "branch_rules_attested": false,
+  "approval_policy_attested": false,
+  "external_authority_artifact": null,
+  "live_private_bridge_readback": "NOT_PROVEN",
+  "live_source_watcher": "NOT_PROVEN",
+  "gpt_required": false,
+  "activation_from_pull_request_ci_allowed": false,
+  "secrets_in_pull_request_ci_allowed": false,
+  "requirements": {
+    "distinct_read_and_write_credential_identities": true,
+    "short_lived_or_independently_revocable": true,
+    "single_private_repository_scope": "ragrardannekjold/jarvis-command-center",
+    "least_contents_permissions": true,
+    "no_inherited_secret_context": true,
+    "private_child_receives_no_github_token_or_app_key": true,
+    "private_stdout_stderr_contained": true,
+    "legacy_shared_token_remains_disabled": true,
+    "public_continuous_queue_blob_remains_exact_reviewed_baseline": true,
+    "external_attestation_required_before_secret_bearing_execution": true,
+    "live_canary_readback_required_before_promotion": true
+  },
+  "truth_boundary": {
+    "code_and_contract_tests_can_prove": [
+      "credential_minting_logic",
+      "repository_downscope",
+      "private_task_and_result_contracts",
+      "child_environment_containment",
+      "public_receipt_sanitization",
+      "public_queue_isolation"
+    ],
+    "code_and_contract_tests_cannot_prove": [
+      "credential_provisioning",
+      "protected_environment_policy",
+      "branch_protection",
+      "approval_policy",
+      "live_private_bridge_execution",
+      "permanent_live_watcher"
+    ]
+  },
+  "linear_issue": "AI-109"
+}
