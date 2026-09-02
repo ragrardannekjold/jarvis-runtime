@@ -49,7 +49,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           repository: ragrardannekjold/jarvis-command-center
-          ref: b2588be4b7391a40175ab8ca808594f6fb8dc464
+          ref: d97097c189e8d8dd52a97039d53fd40072dae220
           token: ${{ secrets.COMMAND_CENTER_TOKEN }}
           path: command-center
           persist-credentials: false
