@@ -30,8 +30,10 @@ jobs:
         with:
           node-version: "22"
 
-      - name: Syntax check private bridge
-        run: node --check runtime/private-bridge/bridge.mjs
+      - name: Syntax check private bridge and continuous queue
+        run: |
+          node --check runtime/private-bridge/bridge.mjs
+          node --check runtime/continuous-queue/worker.mjs
 
       - name: Run private bridge security contracts without secrets
         env:
@@ -40,5 +42,8 @@ jobs:
           JARVIS_PRIVATE_BRIDGE_INSTALLATION_ID: ""
         run: node --test runtime/private-bridge/bridge.test.mjs
 
-      - name: Re-run continuous queue regression when queue integration changes
+      - name: Prove public queue carries only canonical bridge identity
+        run: node --test runtime/private-bridge/queue-contract.test.mjs
+
+      - name: Re-run continuous queue regression
         run: node --test runtime/continuous-queue/worker.test.mjs
