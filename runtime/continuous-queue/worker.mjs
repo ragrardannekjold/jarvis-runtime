@@ -3,13 +3,6 @@ import path from "node:path";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 
-import {
-  BRIDGE_BLOCKED,
-  BRIDGE_JOB_TYPE,
-  renderPublicBridgeReceipt,
-  runPrivateInvestigationBridge,
-} from "../private-bridge/bridge.mjs";
-
 const execFileAsync = promisify(execFile);
 const QUEUE_PREFIX = "[QUEUE-JOB]";
 const PLAN_PREFIX = "[QUEUE-PLAN]";
@@ -17,13 +10,11 @@ const INTERNAL_PRODUCER = "continuous_queue_refill_v2";
 const STATUS_EPOCH = "continuous_queue_status_v2";
 const TERMINAL_STATES = new Set(["SUCCEEDED", "FAILED", "REJECTED"]);
 const CANONICAL_UTC_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
-const PRIVATE_BRIDGE_MISSION_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 const ALLOWED_JOB_TYPES = new Set([
   "heartbeat_probe",
   "async_contract_self_test",
   "runtime_syntax_self_test",
   "sustained_rhythm_verification",
-  BRIDGE_JOB_TYPE,
 ]);
 const CANONICAL_ID_RE = /^[A-Za-z0-9._:/#-]{1,128}$/;
 const MAX_PAYLOAD_BYTES = 2048;
@@ -42,7 +33,6 @@ const JOB_PAYLOAD_KEYS = new Map([
   ["async_contract_self_test", CANONICAL_PAYLOAD_KEYS],
   ["runtime_syntax_self_test", CANONICAL_PAYLOAD_KEYS],
   ["sustained_rhythm_verification", [...CANONICAL_PAYLOAD_KEYS, "hold_ms", "probe"]],
-  [BRIDGE_JOB_TYPE, CANONICAL_PAYLOAD_KEYS],
 ]);
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -142,12 +132,6 @@ export function validateTaskSpec(task, { requireCanonical = false } = {}) {
   const supplied = Object.values(canonical).filter(Boolean).length;
   if (supplied !== 0 && supplied !== 3) throw new Error("canonical_ids_must_be_complete");
   if (requireCanonical && supplied !== 3) throw new Error("plan_tasks_require_canonical_ids");
-  if (task.job_type === BRIDGE_JOB_TYPE) {
-    if (supplied !== 3) throw new Error("private_bridge_requires_canonical_ids");
-    if (!PRIVATE_BRIDGE_MISSION_ID_RE.test(canonical.mission_id) || canonical.mission_id.includes("..")) {
-      throw new Error("invalid_private_bridge_mission_id");
-    }
-  }
   if (task.job_type === "sustained_rhythm_verification") {
     if (!["runtime_syntax", "async_contract"].includes(payload.probe)) {
       throw new Error("invalid_sustained_rhythm_probe");
@@ -477,11 +461,6 @@ async function runRuntimeSyntaxSelfTest(job) {
     maxBuffer: 1024 * 1024,
     env: TOKENLESS_CHILD_ENV,
   });
-  await execFileAsync(process.execPath, ["--check", "runtime/private-bridge/bridge.mjs"], {
-    timeout: 60000,
-    maxBuffer: 1024 * 1024,
-    env: TOKENLESS_CHILD_ENV,
-  });
   return "runtime syntax checks passed";
 }
 
@@ -500,23 +479,11 @@ async function runSustainedRhythmVerification(job) {
   return runAsyncContractSelfTest(job);
 }
 
-async function runPrivateBridge(job) {
-  await postStatus(job, "RUNNING", "isolated short-lived private bridge");
-  try {
-    const receipt = await runPrivateInvestigationBridge({ job });
-    return renderPublicBridgeReceipt(receipt);
-  } catch (error) {
-    if (error?.code === BRIDGE_BLOCKED) throw new Error(BRIDGE_BLOCKED);
-    throw error;
-  }
-}
-
 async function execute(job) {
   if (job.job_type === "heartbeat_probe") return runHeartbeat(job);
   if (job.job_type === "async_contract_self_test") return runAsyncContractSelfTest(job);
   if (job.job_type === "runtime_syntax_self_test") return runRuntimeSyntaxSelfTest(job);
   if (job.job_type === "sustained_rhythm_verification") return runSustainedRhythmVerification(job);
-  if (job.job_type === BRIDGE_JOB_TYPE) return runPrivateBridge(job);
   throw new Error("unreachable_job_type");
 }
 
