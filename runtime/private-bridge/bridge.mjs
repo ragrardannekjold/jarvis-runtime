@@ -16,6 +16,8 @@ export const PRIVATE_STATE_REF = "jarvis-runtime-state";
 export const PRIVATE_QUEUE_PREFIX = "runtime/investigation/queue/pending";
 export const PRIVATE_RESULT_PREFIX = "runtime/investigation/results";
 const PRIVATE_TASK_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
+const GIT_SHA_RE = /^[0-9a-f]{40,64}$/;
+const SHA256_RE = /^[0-9a-f]{64}$/;
 const MAX_PRIVATE_RECORD_BYTES = 128 * 1024;
 const MAX_ARCHIVE_BYTES = 64 * 1024 * 1024;
 const APP_JWT_LIFETIME_SECONDS = 8 * 60;
@@ -45,6 +47,9 @@ function canonicalJson(value) {
 }
 
 export function sha256(value) {
+  if (Buffer.isBuffer(value) || value instanceof Uint8Array) {
+    return createHash("sha256").update(value).digest("hex");
+  }
   const text = typeof value === "string" ? value : canonicalJson(value);
   return createHash("sha256").update(text, "utf8").digest("hex");
 }
@@ -163,6 +168,21 @@ function privateTaskId(value) {
   return value;
 }
 
+function decodeJsonContentRecord(record, code) {
+  if (!record || record.type !== "file" || typeof record.content !== "string" || record.encoding !== "base64") {
+    throw new Error(`${code}_record_invalid`);
+  }
+  const bytes = Buffer.from(record.content.replaceAll("\n", ""), "base64");
+  if (bytes.length < 2 || bytes.length > MAX_PRIVATE_RECORD_BYTES) {
+    throw new Error(`${code}_record_size_invalid`);
+  }
+  try {
+    return JSON.parse(bytes.toString("utf8"));
+  } catch {
+    throw new Error(`${code}_json_invalid`);
+  }
+}
+
 export function validatePrivateCanaryTask(task, expectedTaskId, nowMs = Date.now()) {
   const taskId = privateTaskId(expectedTaskId);
   if (!task || typeof task !== "object" || Array.isArray(task)) throw new Error("invalid_private_task");
@@ -199,19 +219,67 @@ export async function loadPrivatePendingTask({ token, taskId, fetchImpl = fetch,
     allow404: true,
   });
   if (!record) throw new Error("private_task_not_found");
-  if (record.type !== "file" || typeof record.content !== "string" || record.encoding !== "base64") {
-    throw new Error("invalid_private_task_record");
-  }
-  const bytes = Buffer.from(record.content.replaceAll("\n", ""), "base64");
-  if (bytes.length < 2 || bytes.length > MAX_PRIVATE_RECORD_BYTES) throw new Error("private_task_record_size_invalid");
-  let task;
-  try {
-    task = JSON.parse(bytes.toString("utf8"));
-  } catch {
-    throw new Error("invalid_private_task_json");
-  }
+  const task = decodeJsonContentRecord(record, "private_task");
   validatePrivateCanaryTask(task, safeTaskId, nowMs);
   return { task, sourceSha: record.sha, requestSha256: sha256(task) };
+}
+
+export function validatePrivateResultRecord(result, { taskId, capability, requestSha256 }) {
+  const safeTaskId = privateTaskId(taskId);
+  if (!result || typeof result !== "object" || Array.isArray(result)) throw new Error("invalid_private_result");
+  if (result.schema_version !== 3 || result.private_only !== true) throw new Error("private_result_schema_invalid");
+  if (result.task_id !== safeTaskId || result.capability !== capability) throw new Error("private_result_identity_mismatch");
+  if (result.request_sha256 !== requestSha256 || !SHA256_RE.test(String(requestSha256 || ""))) {
+    throw new Error("private_result_request_mismatch");
+  }
+  if (result.status !== "SUCCEEDED") throw new Error("private_result_not_succeeded");
+  if (!SHA256_RE.test(String(result.result_sha256 || ""))) throw new Error("private_result_hash_invalid");
+  const { result_sha256: recordedHash, ...material } = result;
+  if (sha256(material) !== recordedHash) throw new Error("private_result_integrity_mismatch");
+  const contract = result.execution_contract;
+  if (!contract || contract.active_scanning !== false || contract.public_targeting_output !== false) {
+    throw new Error("private_result_safety_contract_invalid");
+  }
+  if (contract.raw_private_stdout_persisted !== false || contract.raw_private_stderr_persisted !== false) {
+    throw new Error("private_result_output_containment_invalid");
+  }
+  if (contract.child_received_github_token !== false || contract.child_received_app_private_key !== false) {
+    throw new Error("private_result_credential_containment_invalid");
+  }
+  if (contract.gpt_required !== false) throw new Error("private_result_gpt_dependency_invalid");
+  const detail = result.result;
+  if (!detail || detail.terminal_readback_status !== "VERIFIED_DONE" || detail.terminal_readback_survived_restart !== true) {
+    throw new Error("private_result_terminal_readback_invalid");
+  }
+  if (detail.event_count !== 1 || detail.task_count !== 1 || detail.mission_count !== 1) {
+    throw new Error("private_result_cardinality_invalid");
+  }
+  if (detail.duplicate_submissions !== 1 || detail.no_change_collapsed !== 1 || detail.continuation_without_chat !== true) {
+    throw new Error("private_result_restart_contract_invalid");
+  }
+  const parent = result.parent_investigation_effect;
+  if (!parent || parent.fact_promotion !== false || parent.live_source_watcher_proven !== false) {
+    throw new Error("private_result_parent_effect_invalid");
+  }
+  return result;
+}
+
+export async function loadPrivateExistingResult({ token, task, requestSha256, fetchImpl = fetch }) {
+  const safeTaskId = privateTaskId(task.task_id);
+  const relative = `${PRIVATE_RESULT_PREFIX}/${safeTaskId}.json`;
+  const record = await privateRequest({
+    token,
+    apiPath: `/repos/${PRIVATE_REPOSITORY_OWNER}/${PRIVATE_REPOSITORY_NAME}/contents/${privateApiPath(relative)}?ref=${encodeURIComponent(PRIVATE_STATE_REF)}`,
+    fetchImpl,
+    allow404: true,
+  });
+  if (!record) return null;
+  const result = decodeJsonContentRecord(record, "private_result");
+  return validatePrivateResultRecord(result, {
+    taskId: safeTaskId,
+    capability: task.capability,
+    requestSha256,
+  });
 }
 
 export function isolatedChildEnv(source = process.env, extra = {}) {
@@ -229,9 +297,21 @@ export function isolatedChildEnv(source = process.env, extra = {}) {
   return env;
 }
 
-async function downloadPrivateArchive({ token, targetPath, fetchImpl = fetch }) {
+export async function resolvePrivateMainCommit({ token, fetchImpl = fetch }) {
+  const payload = await privateRequest({
+    token,
+    apiPath: `/repos/${PRIVATE_REPOSITORY_OWNER}/${PRIVATE_REPOSITORY_NAME}/commits/${encodeURIComponent(PRIVATE_MAIN_REF)}`,
+    fetchImpl,
+  });
+  const commitSha = String(payload?.sha || "").toLowerCase();
+  if (!GIT_SHA_RE.test(commitSha)) throw new Error("private_main_commit_invalid");
+  return commitSha;
+}
+
+async function downloadPrivateArchive({ token, privateMainCommitSha, targetPath, fetchImpl = fetch }) {
+  if (!GIT_SHA_RE.test(String(privateMainCommitSha || ""))) throw new Error("private_main_commit_invalid");
   const response = await fetchImpl(
-    `https://api.github.com/repos/${PRIVATE_REPOSITORY_OWNER}/${PRIVATE_REPOSITORY_NAME}/tarball/${encodeURIComponent(PRIVATE_MAIN_REF)}`,
+    `https://api.github.com/repos/${PRIVATE_REPOSITORY_OWNER}/${PRIVATE_REPOSITORY_NAME}/tarball/${privateMainCommitSha}`,
     {
       headers: {
         Authorization: `Bearer ${token}`,
@@ -247,7 +327,7 @@ async function downloadPrivateArchive({ token, targetPath, fetchImpl = fetch }) 
   const bytes = Buffer.from(await response.arrayBuffer());
   if (bytes.length < 100 || bytes.length > MAX_ARCHIVE_BYTES) throw new Error("private_archive_size_invalid");
   await writeFile(targetPath, bytes, { mode: 0o600 });
-  return sha256(bytes.toString("base64"));
+  return sha256(bytes);
 }
 
 async function extractedRepositoryDir(extractRoot) {
@@ -316,7 +396,17 @@ async function runPrivateCanary({ repositoryDir, tempRoot, execFileImpl = execFi
   return { first, restart };
 }
 
-export function privateResultRecord({ task, requestSha256, archiveSha256, first, restart, startedAt, completedAt }) {
+export function privateResultRecord({
+  task,
+  requestSha256,
+  privateTaskSourceSha,
+  privateMainCommitSha,
+  archiveSha256,
+  first,
+  restart,
+  startedAt,
+  completedAt,
+}) {
   const result = {
     schema_version: 3,
     private_only: true,
@@ -325,12 +415,14 @@ export function privateResultRecord({ task, requestSha256, archiveSha256, first,
     project_id: task.project_id,
     status: "SUCCEEDED",
     request_sha256: requestSha256,
+    private_task_source_sha: privateTaskSourceSha,
     started_at: startedAt,
     completed_at: completedAt,
     execution_contract: {
       credential_model: "GITHUB_APP_SHORT_LIVED_INSTALLATION_TOKEN",
       repository_allowlist: `${PRIVATE_REPOSITORY_OWNER}/${PRIVATE_REPOSITORY_NAME}`,
       private_main_ref: PRIVATE_MAIN_REF,
+      private_main_commit_sha: privateMainCommitSha,
       private_state_ref: PRIVATE_STATE_REF,
       active_scanning: false,
       public_targeting_output: false,
@@ -366,24 +458,19 @@ export function privateResultRecord({ task, requestSha256, archiveSha256, first,
   return { ...result, result_sha256: sha256(result) };
 }
 
-async function persistPrivateResult({ token, taskId, result, fetchImpl = fetch }) {
-  const safeTaskId = privateTaskId(taskId);
+async function persistPrivateResult({ token, task, requestSha256, result, fetchImpl = fetch }) {
+  const safeTaskId = privateTaskId(task.task_id);
+  const existing = await loadPrivateExistingResult({ token, task, requestSha256, fetchImpl });
+  if (existing) {
+    return {
+      state: "EXISTING_VERIFIED",
+      privateResult: existing,
+      resultSha256: existing.result_sha256,
+    };
+  }
   const relative = `${PRIVATE_RESULT_PREFIX}/${safeTaskId}.json`;
   const apiPath = `/repos/${PRIVATE_REPOSITORY_OWNER}/${PRIVATE_REPOSITORY_NAME}/contents/${privateApiPath(relative)}`;
-  const existing = await privateRequest({
-    token,
-    apiPath: `${apiPath}?ref=${encodeURIComponent(PRIVATE_STATE_REF)}`,
-    fetchImpl,
-    allow404: true,
-  });
   const text = `${JSON.stringify(result, null, 2)}\n`;
-  const textSha = sha256(text);
-  if (existing) {
-    if (existing.type !== "file" || typeof existing.content !== "string") throw new Error("invalid_existing_private_result");
-    const existingText = Buffer.from(existing.content.replaceAll("\n", ""), "base64").toString("utf8");
-    if (sha256(existingText) !== textSha) throw new Error("private_result_collision");
-    return { state: "EXISTING_IDENTICAL", resultSha256: result.result_sha256, contentSha256: textSha };
-  }
   await privateRequest({
     token,
     apiPath,
@@ -395,7 +482,12 @@ async function persistPrivateResult({ token, taskId, result, fetchImpl = fetch }
       branch: PRIVATE_STATE_REF,
     },
   });
-  return { state: "CREATED", resultSha256: result.result_sha256, contentSha256: textSha };
+  return {
+    state: "CREATED",
+    privateResult: result,
+    resultSha256: result.result_sha256,
+    contentSha256: sha256(text),
+  };
 }
 
 export function publicBridgeReceipt({ taskId, privateResult, persistence }) {
@@ -464,6 +556,23 @@ export async function runPrivateInvestigationBridge({
       fetchImpl,
       nowMs: now().getTime(),
     });
+    const existing = await loadPrivateExistingResult({
+      token: readAccess.token,
+      task: pending.task,
+      requestSha256: pending.requestSha256,
+      fetchImpl,
+    });
+    if (existing) {
+      return publicBridgeReceipt({
+        taskId,
+        privateResult: existing,
+        persistence: { state: "EXISTING_VERIFIED" },
+      });
+    }
+    const privateMainCommitSha = await resolvePrivateMainCommit({
+      token: readAccess.token,
+      fetchImpl,
+    });
     const archivePath = path.join(tempRoot, "private-main.tar.gz");
     const extractRoot = path.join(tempRoot, "checkout");
     await execFileImpl("mkdir", ["-p", extractRoot], {
@@ -473,6 +582,7 @@ export async function runPrivateInvestigationBridge({
     });
     const archiveSha256 = await downloadPrivateArchive({
       token: readAccess.token,
+      privateMainCommitSha,
       targetPath: archivePath,
       fetchImpl,
     });
@@ -492,6 +602,8 @@ export async function runPrivateInvestigationBridge({
     const privateResult = privateResultRecord({
       task: pending.task,
       requestSha256: pending.requestSha256,
+      privateTaskSourceSha: pending.sourceSha,
+      privateMainCommitSha,
       archiveSha256,
       first,
       restart,
@@ -501,11 +613,16 @@ export async function runPrivateInvestigationBridge({
     const writeAccess = await mintInstallationToken({ credentials, permission: "write", fetchImpl });
     const persistence = await persistPrivateResult({
       token: writeAccess.token,
-      taskId,
+      task: pending.task,
+      requestSha256: pending.requestSha256,
       result: privateResult,
       fetchImpl,
     });
-    return publicBridgeReceipt({ taskId, privateResult, persistence });
+    return publicBridgeReceipt({
+      taskId,
+      privateResult: persistence.privateResult,
+      persistence,
+    });
   } finally {
     await rm(tempRoot, { recursive: true, force: true });
   }
