@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { generateKeyPairSync, createVerify } from "node:crypto";
+import { createHash, createVerify, generateKeyPairSync } from "node:crypto";
 
 import {
   BRIDGE_BLOCKED,
@@ -10,9 +10,13 @@ import {
   isolatedChildEnv,
   loadBridgeCredentials,
   mintInstallationToken,
+  privateResultRecord,
   publicBridgeReceipt,
   renderPublicBridgeReceipt,
+  resolvePrivateMainCommit,
+  sha256,
   validatePrivateCanaryTask,
+  validatePrivateResultRecord,
 } from "./bridge.mjs";
 
 const { privateKey, publicKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
@@ -47,6 +51,42 @@ function validTask(overrides = {}) {
   };
 }
 
+function validReceipts() {
+  const first = {
+    receipt_sha256: "1".repeat(64),
+    terminal_readback_status: "VERIFIED_DONE",
+  };
+  const restart = {
+    receipt_sha256: "2".repeat(64),
+    terminal_readback_status: "VERIFIED_DONE",
+    terminal_readback_survived_restart: true,
+    event_count: 1,
+    task_count: 1,
+    mission_count: 1,
+    duplicate_submissions: 1,
+    no_change_collapsed: 1,
+    continuation_without_chat: true,
+    next_advanced: true,
+  };
+  return { first, restart };
+}
+
+function validPrivateResult() {
+  const task = validTask();
+  const { first, restart } = validReceipts();
+  return privateResultRecord({
+    task,
+    requestSha256: sha256(task),
+    privateTaskSourceSha: "a".repeat(40),
+    privateMainCommitSha: "b".repeat(40),
+    archiveSha256: "c".repeat(64),
+    first,
+    restart,
+    startedAt: "2026-09-02T12:00:00Z",
+    completedAt: "2026-09-02T12:01:00Z",
+  });
+}
+
 test("missing GitHub App credentials fail closed with one bounded state", () => {
   assert.throws(
     () => loadBridgeCredentials({}),
@@ -79,6 +119,13 @@ test("GitHub App JWT is short-lived RS256 and binds the app id", () => {
   assert.equal(verifier.verify(PUBLIC_KEY_PEM, Buffer.from(signaturePart, "base64url")), true);
 });
 
+test("sha256 hashes raw bytes rather than their serialized representation", () => {
+  const bytes = Buffer.from([0, 1, 2, 3, 255]);
+  const expected = createHash("sha256").update(bytes).digest("hex");
+  assert.equal(sha256(bytes), expected);
+  assert.notEqual(sha256(bytes), sha256(bytes.toString("base64")));
+});
+
 test("installation token request is downscoped to one private repository and requested contents permission", async () => {
   const calls = [];
   const nowMs = Date.parse("2026-09-02T12:00:00Z");
@@ -106,6 +153,25 @@ test("installation token request is downscoped to one private repository and req
   assert.match(calls[0].options.headers.Authorization, /^Bearer [^.]+\.[^.]+\.[^.]+$/);
 });
 
+test("private main revision is resolved to an exact commit before archive fetch", async () => {
+  const calls = [];
+  const fetchImpl = async (url, options) => {
+    calls.push({ url, options });
+    return {
+      ok: true,
+      status: 200,
+      async json() {
+        return { sha: "d".repeat(40) };
+      },
+    };
+  };
+  const commit = await resolvePrivateMainCommit({ token: "short-lived-token", fetchImpl });
+  assert.equal(commit, "d".repeat(40));
+  assert.equal(calls.length, 1);
+  assert.match(calls[0].url, /\/repos\/ragrardannekjold\/jarvis-command-center\/commits\/main$/);
+  assert.equal(calls[0].options.headers.Authorization, "Bearer short-lived-token");
+});
+
 test("private task contract forbids traversal, active scanning, public targeting and stale authorization", () => {
   const nowMs = Date.parse("2026-09-02T12:00:00Z");
   assert.doesNotThrow(() => validatePrivateCanaryTask(validTask(), "ai109-private-bridge-canary", nowMs));
@@ -129,6 +195,37 @@ test("private task contract forbids traversal, active scanning, public targeting
     () => validatePrivateCanaryTask(validTask({ expires_at: "2026-09-02T11:59:59Z" }), "ai109-private-bridge-canary", nowMs),
     /private_task_expired/,
   );
+});
+
+test("private result is content-addressed and tampering fails closed", () => {
+  const task = validTask();
+  const result = validPrivateResult();
+  assert.doesNotThrow(() => validatePrivateResultRecord(result, {
+    taskId: task.task_id,
+    capability: task.capability,
+    requestSha256: sha256(task),
+  }));
+  const tampered = structuredClone(result);
+  tampered.completed_at = "2026-09-02T12:02:00Z";
+  assert.throws(() => validatePrivateResultRecord(tampered, {
+    taskId: task.task_id,
+    capability: task.capability,
+    requestSha256: sha256(task),
+  }), /private_result_integrity_mismatch/);
+});
+
+test("private result cannot promote facts or claim a live watcher", () => {
+  const task = validTask();
+  const result = validPrivateResult();
+  const weakened = structuredClone(result);
+  weakened.parent_investigation_effect.fact_promotion = true;
+  const { result_sha256: _old, ...material } = weakened;
+  weakened.result_sha256 = sha256(material);
+  assert.throws(() => validatePrivateResultRecord(weakened, {
+    taskId: task.task_id,
+    capability: task.capability,
+    requestSha256: sha256(task),
+  }), /private_result_parent_effect_invalid/);
 });
 
 test("private bridge child environment never inherits GitHub or App credentials", () => {
@@ -166,7 +263,7 @@ test("public receipt is finite and cannot contain token, private stdout, stderr 
   const receipt = publicBridgeReceipt({
     taskId: "ai109-private-bridge-canary",
     privateResult,
-    persistence: { state: "CREATED" },
+    persistence: { state: "EXISTING_VERIFIED" },
   });
   assert.equal(receipt.private_payload_exposed, false);
   assert.equal(receipt.private_stdout_exposed, false);
@@ -174,17 +271,13 @@ test("public receipt is finite and cannot contain token, private stdout, stderr 
   assert.equal(receipt.credential_persisted, false);
   assert.equal(receipt.gpt_required, false);
   assert.equal(receipt.live_source_watcher_proven, false);
+  assert.equal(receipt.persistence_state, "EXISTING_VERIFIED");
   const rendered = renderPublicBridgeReceipt(receipt);
   assert.ok(rendered.length < 1200);
-  for (const forbidden of ["PRIVATE-SECRET", "ghs_", "stdout", "stderr", "private_payload", "source_delta_external_runtime_canary.py"]) {
-    if (forbidden === "private_payload") {
-      assert.match(rendered, /"private_payload_exposed":false/);
-    } else if (forbidden === "stdout") {
-      assert.match(rendered, /"private_stdout_exposed":false/);
-    } else if (forbidden === "stderr") {
-      assert.match(rendered, /"private_stderr_exposed":false/);
-    } else {
-      assert.equal(rendered.includes(forbidden), false);
-    }
+  for (const forbidden of ["PRIVATE-SECRET", "ghs_", "source_delta_external_runtime_canary.py"]) {
+    assert.equal(rendered.includes(forbidden), false);
   }
+  assert.match(rendered, /"private_payload_exposed":false/);
+  assert.match(rendered, /"private_stdout_exposed":false/);
+  assert.match(rendered, /"private_stderr_exposed":false/);
 });
