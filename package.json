@@ -10,7 +10,8 @@
     "build": "next build",
     "start": "next start -p ${PORT:-3000}",
     "mcp:check": "node --check app/api/mcp/route.js && node --check app/api/health/route.js",
-    "mcp:providers:probe": "node scripts/probe-remote-mcp.mjs"
+    "mcp:providers:probe": "node scripts/probe-remote-mcp.mjs",
+    "mcp:gateway:probe": "node scripts/probe-live-gateway.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/client": "^2.0.0",
