@@ -1,0 +1,33 @@
+name: Claude Outsource MCP Canary
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'app/api/mcp/**'
+      - 'app/api/health/**'
+      - 'package.json'
+      - 'public_outsource_worker/**'
+      - '.github/workflows/claude-outsource-mcp-canary.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Install dependencies
+        run: npm install --no-audit --no-fund
+      - name: Syntax check MCP routes
+        run: npm run mcp:check
+      - name: Existing public outsource worker tests
+        run: npm --prefix public_outsource_worker test
+      - name: Build deployment bundle
+        run: npm run build
