@@ -7,6 +7,7 @@ on:
       - 'app/api/mcp/**'
       - 'app/api/health/**'
       - 'package.json'
+      - 'scripts/probe-remote-mcp.mjs'
       - 'public_outsource_worker/**'
       - '.github/workflows/claude-outsource-mcp-canary.yml'
   workflow_dispatch:
@@ -29,6 +30,8 @@ jobs:
         run: npm run mcp:check
       - name: Existing public outsource worker tests
         run: npm --prefix public_outsource_worker test
+      - name: Probe keyless Exa and Firecrawl MCPs
+        run: npm run mcp:providers:probe
       - name: Build deployment bundle
         run: npm run build
       - name: External HTTPS health smoke
