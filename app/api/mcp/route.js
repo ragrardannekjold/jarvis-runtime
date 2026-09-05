@@ -28,7 +28,13 @@ const EXTERNAL_RESOURCES = [
     mode: 'REMOTE_MCP_KEYLESS',
     endpoint: FIRECRAWL_ENDPOINT,
     state: 'REMOTE_ENDPOINT_PROBED',
-    exposed_tools: ['firecrawl_search', 'firecrawl_scrape'],
+    exposed_tools: [
+      'firecrawl_search',
+      'firecrawl_scrape',
+      'research_paper_search',
+      'research_pdf_read',
+      'source_reputation_scout',
+    ],
     upstream_tools: ['firecrawl_search', 'firecrawl_scrape'],
   },
   {
@@ -37,6 +43,8 @@ const EXTERNAL_RESOURCES = [
     endpoint: 'https://api.alphaxiv.org/mcp/v1',
     state: 'AUTH_REQUIRED_NONINTERACTIVE',
     auth: 'OAUTH_2_1_OR_API_KEY',
+    fallback: ['research_paper_search', 'research_pdf_read'],
+    fallback_equivalence: false,
   },
   {
     id: 'haveibeenpwned',
@@ -44,18 +52,22 @@ const EXTERNAL_RESOURCES = [
     endpoint: 'https://haveibeenpwned.com/api/v3',
     state: 'AUTH_REQUIRED_FOR_ACCOUNT_LOOKUP',
     auth: 'HIBP_API_KEY',
-    note: 'Pwned Passwords is keyless but is not the requested account/email breach lookup surface.',
+    note: 'Pwned Passwords is keyless but is not the requested account/email breach lookup surface. No substitute is promoted as equivalent.',
   },
   {
     id: 'malwarebytes',
     mode: 'HOST_APP_PLUGIN',
     state: 'PLUGIN_INSTALLATION_SURFACE_ONLY',
     auth: 'NO_ACCOUNT_REQUIRED_FOR_CHATGPT_PLUGIN',
+    fallback: ['source_reputation_scout'],
+    fallback_equivalence: false,
   },
   {
     id: 'norton',
     mode: 'HOST_APP_PLUGIN',
     state: 'PLUGIN_INSTALLATION_SURFACE_ONLY',
+    fallback: ['source_reputation_scout'],
+    fallback_equivalence: false,
   },
   {
     id: 'grain',
@@ -63,6 +75,7 @@ const EXTERNAL_RESOURCES = [
     endpoint: 'https://api.grain.com/_/mcp',
     state: 'OWNER_OAUTH_REQUIRED',
     auth: 'OAUTH',
+    note: 'Private meeting/transcript data is not substituted with public search.',
   },
 ];
 
@@ -85,7 +98,7 @@ function taskSuffix(runId) {
 }
 
 async function callRemoteMcpTool(endpoint, toolName, args) {
-  const client = new Client({ name: 'jarvis-outsource-gateway', version: '0.2.0' });
+  const client = new Client({ name: 'jarvis-outsource-gateway', version: '0.3.0' });
   const transport = new StreamableHTTPClientTransport(new URL(endpoint));
   try {
     await client.connect(transport);
@@ -106,7 +119,7 @@ const handler = createMcpHandler((server) => {
     },
     async () =>
       asToolResult({
-        schema: 'claude.outsource_capabilities.v2',
+        schema: 'claude.outsource_capabilities.v3',
         mode: 'PUBLIC_CANARY_ONLY',
         capabilities: publicRuntime.registry.list(),
         external_resources: EXTERNAL_RESOURCES,
@@ -122,12 +135,12 @@ const handler = createMcpHandler((server) => {
     {
       title: 'Resource Connector Status',
       description:
-        'Returns configured external resource states. States distinguish verified keyless remote endpoints from providers that still require OAuth, API keys, or host-app installation.',
+        'Returns configured external resource states. States distinguish verified keyless remote endpoints, bounded fallbacks, and providers that still require OAuth, API keys, or host-app installation.',
       inputSchema: z.object({}),
     },
     async () =>
       asToolResult({
-        schema: 'claude.resource_connector_status.v1',
+        schema: 'claude.resource_connector_status.v2',
         resources: EXTERNAL_RESOURCES,
         canonical_admission: 'NOT_APPLICABLE',
       }),
@@ -143,11 +156,16 @@ const handler = createMcpHandler((server) => {
     },
     async () =>
       asToolResult({
-        schema: 'claude.outsource_health.v2',
+        schema: 'claude.outsource_health.v3',
         status: 'REQUEST_PATH_ALIVE',
         mode: 'PUBLIC_CANARY_ONLY',
         capabilities: publicRuntime.registry.list(),
-        external_resources: EXTERNAL_RESOURCES.map(({ id, state, exposed_tools }) => ({ id, state, exposed_tools })),
+        external_resources: EXTERNAL_RESOURCES.map(({ id, state, exposed_tools, fallback }) => ({
+          id,
+          state,
+          exposed_tools,
+          fallback,
+        })),
         durable_scheduler_verified: false,
         canonical_write: false,
       }),
@@ -265,6 +283,114 @@ const handler = createMcpHandler((server) => {
         evidence_class: 'OBSERVATION',
         canonical_admission: 'PENDING',
         upstream,
+      });
+    },
+  );
+
+  server.registerTool(
+    'research_paper_search',
+    {
+      title: 'Research Paper Search',
+      description:
+        'Scientific/preprint discovery fallback while direct alphaXiv remains authorization-bound. Searches research and PDF sources through verified Firecrawl. It is not represented as alphaXiv-equivalent.',
+      inputSchema: z.object({
+        query: z.string().min(1).max(2000),
+        limit: z.number().int().min(1).max(20).optional(),
+      }),
+    },
+    async ({ query, limit }) => {
+      const upstream = await callRemoteMcpTool(FIRECRAWL_ENDPOINT, 'firecrawl_search', {
+        query,
+        limit: limit || 10,
+        categories: ['research', 'pdf'],
+        sources: [{ type: 'web' }],
+        highlights: true,
+      });
+      return asToolResult({
+        schema: 'claude.research_fallback_result.v1',
+        provider: 'firecrawl',
+        fallback_for: 'alphaxiv',
+        fallback_equivalence: false,
+        upstream_tool: 'firecrawl_search',
+        evidence_class: 'LEAD_OR_OBSERVATION',
+        canonical_admission: 'PENDING',
+        upstream,
+      });
+    },
+  );
+
+  server.registerTool(
+    'research_pdf_read',
+    {
+      title: 'Research PDF Read',
+      description:
+        'Reads a known public research/PDF URL through verified Firecrawl with a bounded page limit. This is a scientific full-text fallback, not a direct alphaXiv connection.',
+      inputSchema: z.object({
+        url: z.string().url(),
+        max_pages: z.number().int().min(1).max(100).optional(),
+      }),
+    },
+    async ({ url, max_pages }) => {
+      const upstream = await callRemoteMcpTool(FIRECRAWL_ENDPOINT, 'firecrawl_scrape', {
+        url,
+        formats: ['markdown'],
+        parsers: ['pdf'],
+        pdfOptions: { maxPages: max_pages || 50 },
+        onlyMainContent: true,
+        redactPII: true,
+      });
+      return asToolResult({
+        schema: 'claude.research_fallback_result.v1',
+        provider: 'firecrawl',
+        fallback_for: 'alphaxiv',
+        fallback_equivalence: false,
+        upstream_tool: 'firecrawl_scrape',
+        evidence_class: 'OBSERVATION',
+        canonical_admission: 'PENDING',
+        upstream,
+      });
+    },
+  );
+
+  server.registerTool(
+    'source_reputation_scout',
+    {
+      title: 'Source Reputation Scout',
+      description:
+        'Lead-only reputation scout against public Norton/Malwarebytes-owned web surfaces while their native host connectors are not server-side connected. It must not be treated as a Norton or Malwarebytes verdict.',
+      inputSchema: z.object({
+        url: z.string().url(),
+        context: z.string().max(500).optional(),
+      }),
+    },
+    async ({ url, context }) => {
+      const suffix = context ? ` ${context}` : '';
+      const [norton, malwarebytes] = await Promise.all([
+        callRemoteMcpTool(FIRECRAWL_ENDPOINT, 'firecrawl_search', {
+          query: `${url} reputation safety threat${suffix}`,
+          limit: 5,
+          includeDomains: ['safeweb.norton.com', 'norton.com'],
+          sources: [{ type: 'web' }],
+          highlights: true,
+        }),
+        callRemoteMcpTool(FIRECRAWL_ENDPOINT, 'firecrawl_search', {
+          query: `${url} reputation safety scam malware${suffix}`,
+          limit: 5,
+          includeDomains: ['malwarebytes.com'],
+          sources: [{ type: 'web' }],
+          highlights: true,
+        }),
+      ]);
+
+      return asToolResult({
+        schema: 'claude.source_reputation_scout.v1',
+        providers_scouted: ['norton_public_web', 'malwarebytes_public_web'],
+        native_vendor_connector_connected: false,
+        evidence_class: 'LEAD_ONLY',
+        vendor_verdict: 'NOT_ESTABLISHED',
+        canonical_admission: 'PENDING',
+        norton,
+        malwarebytes,
       });
     },
   );
