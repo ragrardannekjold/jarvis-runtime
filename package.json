@@ -1,0 +1,26 @@
+{
+  "name": "jarvis-runtime-claude-outsource-mcp-canary",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start -p ${PORT:-3000}",
+    "mcp:check": "node --check app/api/mcp/route.js && node --check app/api/health/route.js",
+    "mcp:providers:probe": "node scripts/probe-remote-mcp.mjs",
+    "mcp:gateway:probe": "node scripts/probe-live-gateway.mjs",
+    "mcp:auth:probe": "node scripts/probe-auth-bound-resources.mjs"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/client": "^2.0.0",
+    "@modelcontextprotocol/server": "^2.0.0",
+    "mcp-handler": "^2.1.1",
+    "next": "16.3.4",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "zod": "^4.2.0"
+  }
+}

@@ -1,0 +1,63 @@
+name: Claude Outsource MCP Canary
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'app/api/mcp/**'
+      - 'app/api/health/**'
+      - 'package.json'
+      - 'scripts/probe-remote-mcp.mjs'
+      - 'scripts/probe-live-gateway.mjs'
+      - 'scripts/probe-auth-bound-resources.mjs'
+      - 'public_outsource_worker/**'
+      - '.github/workflows/claude-outsource-mcp-canary.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Install dependencies
+        run: npm install --no-audit --no-fund
+      - name: Syntax check MCP routes
+        run: npm run mcp:check
+      - name: Existing public outsource worker tests
+        run: npm --prefix public_outsource_worker test
+      - name: Probe keyless Exa and Firecrawl MCPs
+        run: npm run mcp:providers:probe
+      - name: Probe auth-bound alphaXiv Grain and HIBP
+        run: npm run mcp:auth:probe
+      - name: Build deployment bundle
+        run: npm run build
+      - name: External HTTPS health smoke
+        run: |
+          set -euo pipefail
+          URL='https://claude-outsource-mcp-canary.onrender.com/api/health'
+          HEALTH=''
+          for i in $(seq 1 24); do
+            HEALTH="$(curl --fail --silent --show-error --retry 2 --retry-delay 2 --retry-all-errors "$URL" || true)"
+            if printf '%s' "$HEALTH" | grep -q 'claude.outsource_gateway_health.v3'; then break; fi
+            sleep 5
+          done
+          printf '%s\n' "$HEALTH"
+          node -e 'const x=JSON.parse(process.argv[1]); if (x.schema!=="claude.outsource_gateway_health.v3" || x.status!=="REQUEST_PATH_ALIVE" || x.mode!=="PUBLIC_CANARY_ONLY" || x.canonical_write!==false || x.provider_mediated_public_web_access!==true) process.exit(1)' "$HEALTH"
+      - name: External MCP initialize smoke
+        run: |
+          set -euo pipefail
+          URL='https://claude-outsource-mcp-canary.onrender.com/api/mcp'
+          BODY='{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"github-actions-canary","version":"1.0"}}}'
+          RESP="$(curl --fail --silent --show-error --retry 4 --retry-delay 3 --retry-all-errors -X POST "$URL" -H 'content-type: application/json' -H 'accept: application/json, text/event-stream' --data "$BODY")"
+          printf '%s\n' "$RESP"
+          printf '%s' "$RESP" | grep -q '"jsonrpc":"2.0"'
+          printf '%s' "$RESP" | grep -q '"result"'
+      - name: External resources and fallback gateway calls
+        run: npm run mcp:gateway:probe
