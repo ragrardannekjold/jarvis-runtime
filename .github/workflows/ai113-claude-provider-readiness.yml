@@ -1,0 +1,41 @@
+name: AI-113 Claude Provider Readiness
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - 'runtime/provider-readiness/**'
+      - '.github/workflows/ai113-claude-provider-readiness.yml'
+  schedule:
+    - cron: '7,22,37,52 * * * *'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ai113-claude-provider-readiness
+  cancel-in-progress: true
+
+jobs:
+  readiness:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      CLAUDE_API_KEY_REF: ${{ vars.CLAUDE_API_KEY_REF }}
+    steps:
+      - name: Checkout public runtime
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+
+      - name: Set up Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: '24'
+          package-manager-cache: false
+
+      - name: Verify secret-isolated provider readiness contract
+        run: node --test runtime/provider-readiness/claude-readiness.test.mjs
+
+      - name: Emit sanitized readiness readback
+        run: node runtime/provider-readiness/claude-readiness-worker.mjs
