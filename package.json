@@ -8,6 +8,7 @@
   "scripts": {
     "dev": "next dev",
     "build": "next build",
+    "start": "next start -p ${PORT:-3000}",
     "mcp:check": "node --check app/api/mcp/route.js && node --check app/api/health/route.js"
   },
   "dependencies": {
