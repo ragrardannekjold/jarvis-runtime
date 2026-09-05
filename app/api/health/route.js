@@ -6,17 +6,42 @@ const publicRuntime = createPublicRuntime();
 
 const externalResources = [
   { id: 'exa', state: 'REMOTE_ENDPOINT_PROBED', exposed_tools: ['exa_web_search', 'exa_web_fetch'] },
-  { id: 'firecrawl', state: 'REMOTE_ENDPOINT_PROBED', exposed_tools: ['firecrawl_search', 'firecrawl_scrape'] },
-  { id: 'alphaxiv', state: 'AUTH_REQUIRED_NONINTERACTIVE' },
-  { id: 'haveibeenpwned', state: 'AUTH_REQUIRED_FOR_ACCOUNT_LOOKUP' },
-  { id: 'malwarebytes', state: 'PLUGIN_INSTALLATION_SURFACE_ONLY' },
-  { id: 'norton', state: 'PLUGIN_INSTALLATION_SURFACE_ONLY' },
-  { id: 'grain', state: 'OWNER_OAUTH_REQUIRED' },
+  {
+    id: 'firecrawl',
+    state: 'REMOTE_ENDPOINT_PROBED',
+    exposed_tools: [
+      'firecrawl_search',
+      'firecrawl_scrape',
+      'research_paper_search',
+      'research_pdf_read',
+      'source_reputation_scout',
+    ],
+  },
+  {
+    id: 'alphaxiv',
+    state: 'AUTH_REQUIRED_NONINTERACTIVE',
+    fallback: ['research_paper_search', 'research_pdf_read'],
+    fallback_equivalence: false,
+  },
+  { id: 'haveibeenpwned', state: 'AUTH_REQUIRED_FOR_ACCOUNT_LOOKUP', fallback: [] },
+  {
+    id: 'malwarebytes',
+    state: 'PLUGIN_INSTALLATION_SURFACE_ONLY',
+    fallback: ['source_reputation_scout'],
+    fallback_equivalence: false,
+  },
+  {
+    id: 'norton',
+    state: 'PLUGIN_INSTALLATION_SURFACE_ONLY',
+    fallback: ['source_reputation_scout'],
+    fallback_equivalence: false,
+  },
+  { id: 'grain', state: 'OWNER_OAUTH_REQUIRED', fallback: [] },
 ];
 
 export async function GET() {
   return Response.json({
-    schema: 'claude.outsource_gateway_health.v2',
+    schema: 'claude.outsource_gateway_health.v3',
     status: 'REQUEST_PATH_ALIVE',
     mode: 'PUBLIC_CANARY_ONLY',
     capabilities: publicRuntime.registry.list(),
