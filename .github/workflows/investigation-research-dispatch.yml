@@ -1,0 +1,69 @@
+name: Investigation research dispatch
+
+on:
+  issues:
+    types: [opened]
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: investigation-research-${{ github.event.issue.number }}
+  cancel-in-progress: false
+
+jobs:
+  dispatch:
+    if: >-
+      startsWith(github.event.issue.title, '[INVESTIGATION-TASK] ') &&
+      github.event.issue.user.login == github.repository_owner
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: '24'
+          package-manager-cache: false
+      - name: Install bounded MCP client
+        run: |
+          npm init -y >/dev/null 2>&1
+          npm install --no-audit --no-fund --no-save @modelcontextprotocol/client@2.0.0
+      - name: Syntax and contract guard
+        run: |
+          node --check investigation_dispatch/task_contract.mjs
+          node --check investigation_dispatch/run_issue_task.mjs
+          node --input-type=module <<'NODE'
+          import { validateTask } from './investigation_dispatch/task_contract.mjs';
+          const good = validateTask({
+            schema: 'investigation.public_research_task.v1',
+            task_id: 'CANARY-1',
+            case_id: 'CANARY',
+            question: 'official Model Context Protocol specification security guidance',
+            scope: 'PUBLIC_TECHNICAL',
+            search_profile: 'developer',
+            max_results: 2,
+          });
+          if (good.max_results !== 2) process.exit(1);
+          let rejected = false;
+          try {
+            validateTask({
+              schema: 'investigation.public_research_task.v1',
+              task_id: 'BAD-1',
+              case_id: 'CANARY',
+              question: 'current exact coordinates of relay position',
+              scope: 'PUBLIC_TECHNICAL',
+              search_profile: 'broad',
+            });
+          } catch (error) {
+            rejected = error.code === 'TACTICAL_QUERY_REJECTED';
+          }
+          if (!rejected) throw new Error('TACTICAL_QUERY_REJECTED regression failed');
+          NODE
+      - name: Dispatch external scout with truth guard
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          GATEWAY_URL: https://claude-outsource-mcp-canary.onrender.com/api/mcp
+        run: node investigation_dispatch/run_issue_task.mjs
