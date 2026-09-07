@@ -1,0 +1,206 @@
+name: AI46 responsive research fabric
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'runtime/ai46_research_fabric.py'
+      - 'runtime/test_ai46_research_fabric.py'
+      - 'runtime/ai46_result_hardener.py'
+      - 'runtime/test_ai46_result_hardener.py'
+      - '.github/workflows/ai46-responsive-research-fabric.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Compile and run focused tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m py_compile \
+            runtime/ai46_research_fabric.py \
+            runtime/test_ai46_research_fabric.py \
+            runtime/ai46_result_hardener.py \
+            runtime/test_ai46_result_hardener.py
+          PYTHONPATH=runtime python -m unittest \
+            runtime/test_ai46_research_fabric.py \
+            runtime/test_ai46_result_hardener.py -v
+
+  compile:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Compile bounded mission packet
+        run: |
+          mkdir -p out
+          python runtime/ai46_research_fabric.py compile --out out/mission.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ai46-mission
+          path: out/mission.json
+          if-no-files-found: error
+          retention-days: 2
+
+  cybint:
+    needs: compile
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    env:
+      SHODAN_API_KEY: ${{ secrets.SHODAN_API_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install --disable-pip-version-check requests
+      - uses: actions/download-artifact@v4
+        with:
+          name: ai46-mission
+          path: in
+      - name: Run passive CYBINT worker
+        run: |
+          mkdir -p out
+          python runtime/ai46_research_fabric.py worker \
+            --name cybint --mission in/mission.json --out out/cybint.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ai46-worker-cybint
+          path: out/cybint.json
+          if-no-files-found: warn
+          retention-days: 2
+
+  terrain:
+    needs: compile
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: >-
+          python -m pip install --disable-pip-version-check
+          numpy scipy rasterio pystac-client planetary-computer
+      - uses: actions/download-artifact@v4
+        with:
+          name: ai46-mission
+          path: in
+      - name: Run EO/terrain worker
+        run: |
+          mkdir -p out
+          python runtime/ai46_research_fabric.py worker \
+            --name terrain --mission in/mission.json --out out/terrain.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ai46-worker-terrain
+          path: out/terrain.json
+          if-no-files-found: warn
+          retention-days: 2
+
+  entity:
+    needs: compile
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install --disable-pip-version-check requests
+      - uses: actions/download-artifact@v4
+        with:
+          name: ai46-mission
+          path: in
+      - name: Run official entity/document worker
+        run: |
+          mkdir -p out
+          python runtime/ai46_research_fabric.py worker \
+            --name entity --mission in/mission.json --out out/entity.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ai46-worker-entity
+          path: out/entity.json
+          if-no-files-found: warn
+          retention-days: 2
+
+  aggregate:
+    needs: [tests, compile, cybint, terrain, entity]
+    if: ${{ always() && needs.compile.result == 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/download-artifact@v4
+        with:
+          name: ai46-mission
+          path: in/mission
+      - uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: ai46-worker-cybint
+          path: in/workers/cybint
+      - uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: ai46-worker-terrain
+          path: in/workers/terrain
+      - uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: ai46-worker-entity
+          path: in/workers/entity
+      - name: Merge valid worker envelopes
+        run: |
+          mkdir -p out in/workers
+          python runtime/ai46_research_fabric.py aggregate \
+            --mission in/mission/mission.json \
+            --workers-root in/workers \
+            --out out/aggregate.json
+      - name: Block uncalibrated numeric promotion and validate safe values
+        run: |
+          python runtime/ai46_result_hardener.py \
+            --input out/aggregate.json \
+            --output out/hardened.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ai46-research-fabric-result
+          path: |
+            out/aggregate.json
+            out/hardened.json
+          if-no-files-found: error
+          retention-days: 2
+      - name: Acceptance gate
+        run: |
+          python - <<'PY'
+          import json
+          data=json.load(open('out/hardened.json'))
+          assert data['status'] == 'VERIFIED_DIRECTIONAL_UPDATE', data
+          assert data['worker_count_accepted'] >= 2, data
+          assert data['material_evidence_change_count'] >= 1, data
+          assert data['numeric_updates_promoted'] == 0, data
+          assert data['safe_output_validation'] == 'PASS', data
+          assert data['candidate_ledger']['D4']['organized_presence_movement'] == 'UNCHANGED', data
+          assert data['external_side_effects'] is False, data
+          print('AI46_EXTERNAL_FABRIC_HARDENED_ACCEPTANCE_PASS')
+          PY
