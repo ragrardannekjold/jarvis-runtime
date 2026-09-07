@@ -1,0 +1,230 @@
+name: AI39 cloud reconstruction holdout v2
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install geospatial stack
+        run: python -m pip install --disable-pip-version-check numpy rasterio requests pillow
+      - name: Run counterfactual cloud-removal validation
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          python - <<'PY'
+          import json, math
+          from datetime import datetime, timezone
+          from pathlib import Path
+
+          import numpy as np
+          import rasterio
+          from rasterio.enums import Resampling
+          from rasterio.transform import from_origin
+          from rasterio.warp import reproject
+          import requests
+          from PIL import Image, ImageDraw
+
+          AOI=[37.65,48.45,38.25,48.90]
+          CRS='EPSG:32637'
+          GRID_BBOX=[400170,5367190,445040,5416620]
+          RES=20
+          DATES=['2026-07-28','2026-07-31','2026-08-05','2026-08-15','2026-08-17','2026-08-20']
+          CURRENT=DATES[-1]
+          STAC='https://earth-search.aws.element84.com/v1/search'
+          BAND_KEYS=['blue','green','red','nir08','swir16','swir22']
+          CLEAR_SCL=[2,4,5,6,7]
+
+          minx,miny,maxx,maxy=GRID_BBOX
+          W=math.ceil((maxx-minx)/RES); H=math.ceil((maxy-miny)/RES)
+          TR=from_origin(minx,maxy,RES,RES)
+
+          def search_day(day):
+              r=requests.post(STAC,json={'collections':['sentinel-2-c1-l2a'],'bbox':AOI,'datetime':day+'T00:00:00Z/'+day+'T23:59:59Z','limit':100},timeout=90)
+              r.raise_for_status(); return r.json().get('features',[])
+
+          def rp(href, dtype=np.float32, resampling=Resampling.bilinear):
+              out=np.zeros((H,W),dtype=dtype)
+              with rasterio.Env(AWS_NO_SIGN_REQUEST='YES',GDAL_DISABLE_READDIR_ON_OPEN='EMPTY_DIR'):
+                  with rasterio.open(href) as ds:
+                      reproject(source=rasterio.band(ds,1),destination=out,src_transform=ds.transform,src_crs=ds.crs,
+                                src_nodata=ds.nodata,dst_transform=TR,dst_crs=CRS,dst_nodata=0,resampling=resampling)
+              return out
+
+          def load_day(day):
+              bands=np.zeros((len(BAND_KEYS),H,W),np.float32)
+              scl=np.zeros((H,W),np.uint8)
+              ids=[]
+              for it in search_day(day):
+                  a=it.get('assets',{})
+                  if not all((a.get(k) or {}).get('href') for k in BAND_KEYS+['scl']):
+                      continue
+                  try:
+                      local=[rp(a[k]['href']) for k in BAND_KEYS]
+                      cs=rp(a['scl']['href'],dtype=np.uint8,resampling=Resampling.nearest)
+                  except Exception:
+                      continue
+                  valid=np.logical_and.reduce([x>0 for x in local])
+                  for i,x in enumerate(local): bands[i][valid]=x[valid]
+                  scl[valid]=cs[valid]
+                  ids.append(it.get('id'))
+              valid=np.logical_and.reduce([bands[i]>0 for i in range(len(BAND_KEYS))])
+              clear=valid & np.isin(scl,CLEAR_SCL)
+              # Earth-search L2A is typically scaled reflectance. Convert to float reflectance conservatively.
+              bands=np.clip(bands/10000.0,0,1.5)
+              bands[:,~valid]=np.nan
+              return {'date':day,'bands':bands,'clear':clear,'valid':valid,'ids':sorted(set(ids))}
+
+          scenes=[load_day(d) for d in DATES]
+          cur=scenes[-1]
+          older=scenes[:-1]
+
+          # Counterfactual reconstruction: pretend every currently-clear pixel was clouded,
+          # reconstruct it from older real clear observations only, then compare to hidden current truth.
+          rec_last=np.full_like(cur['bands'],np.nan)
+          rec_age=np.full((H,W),65535,np.uint16)
+          rec_source=np.zeros((H,W),np.uint8)
+          for idx,s in reversed(list(enumerate(older))):
+              age=(datetime.fromisoformat(CURRENT+'T00:00:00+00:00')-datetime.fromisoformat(s['date']+'T00:00:00+00:00')).days
+              take=s['clear'] & (rec_age==65535)
+              rec_last[:,take]=s['bands'][:,take]
+              rec_age[take]=age
+              rec_source[take]=idx+1
+
+          evalmask=cur['clear'] & (rec_age!=65535) & np.all(np.isfinite(rec_last),axis=0)
+          if evalmask.mean()<0.55:
+              raise RuntimeError(f'counterfactual evaluation coverage too low: {evalmask.mean():.3f}')
+
+          # Alternative: recency-weighted blend of all older clear observations.
+          weighted=np.zeros_like(cur['bands']); wsum=np.zeros((H,W),np.float32)
+          for s in older:
+              age=(datetime.fromisoformat(CURRENT+'T00:00:00+00:00')-datetime.fromisoformat(s['date']+'T00:00:00+00:00')).days
+              w=np.exp(-age/5.0).astype(np.float32) if hasattr(np.exp(-age/5.0),'astype') else float(np.exp(-age/5.0))
+              m=s['clear']
+              weighted[:,m]+=s['bands'][:,m]*w
+              wsum[m]+=w
+          rec_weighted=np.full_like(cur['bands'],np.nan)
+          m=wsum>0
+          rec_weighted[:,m]=weighted[:,m]/wsum[m]
+
+          def indices(b):
+              blue,green,red,nir,s16,s22=b
+              ndvi=(nir-red)/(nir+red+1e-6)
+              nbr=(nir-s22)/(nir+s22+1e-6)
+              bsi=((s16+red)-(nir+blue))/((s16+red)+(nir+blue)+1e-6)
+              return ndvi,nbr,bsi
+
+          truth_idx=indices(cur['bands'])
+
+          def metrics(rec, mask):
+              diff=rec-cur['bands']
+              vals=diff[:,mask]
+              mae=np.nanmean(np.abs(vals),axis=1)
+              rmse=np.sqrt(np.nanmean(vals*vals,axis=1))
+              r_idx=indices(rec)
+              di=[r_idx[i]-truth_idx[i] for i in range(3)]
+              out={
+                'pixels':int(mask.sum()),
+                'band_mae_reflectance':{BAND_KEYS[i]:round(float(mae[i]),5) for i in range(len(BAND_KEYS))},
+                'band_rmse_reflectance':{BAND_KEYS[i]:round(float(rmse[i]),5) for i in range(len(BAND_KEYS))},
+                'mean_abs_dNDVI':round(float(np.nanmean(np.abs(di[0][mask]))),5),
+                'mean_abs_dNBR':round(float(np.nanmean(np.abs(di[1][mask]))),5),
+                'mean_abs_dBSI':round(float(np.nanmean(np.abs(di[2][mask]))),5),
+                'false_change_NDVI_ge_0_08_pct':round(float((np.abs(di[0][mask])>=0.08).mean()*100),2),
+                'false_change_NBR_ge_0_08_pct':round(float((np.abs(di[1][mask])>=0.08).mean()*100),2),
+                'false_change_BSI_ge_0_08_pct':round(float((np.abs(di[2][mask])>=0.08).mean()*100),2),
+                'false_multichannel_change_pct':round(float(((np.abs(di[0][mask])>=0.08).astype(int)+(np.abs(di[1][mask])>=0.08).astype(int)+(np.abs(di[2][mask])>=0.08).astype(int)>=2).mean()*100),2)
+              }
+              return out
+
+          age_buckets={}
+          for age in sorted(set(int(x) for x in np.unique(rec_age[evalmask]))):
+              m=evalmask & (rec_age==age)
+              if m.sum()>=1000:
+                  age_buckets[str(age)]=metrics(rec_last,m)
+
+          overall_last=metrics(rec_last,evalmask)
+          overall_weighted=metrics(rec_weighted,evalmask & np.all(np.isfinite(rec_weighted),axis=0))
+
+          # Error / confidence surface for last-clear reconstruction.
+          r_idx=indices(rec_last)
+          dndvi=np.abs(r_idx[0]-truth_idx[0]); dnbr=np.abs(r_idx[1]-truth_idx[1]); dbsi=np.abs(r_idx[2]-truth_idx[2])
+          err=np.nanmean(np.stack([dndvi,dnbr,dbsi]),axis=0)
+          err_vis=np.zeros((H,W),np.uint8)
+          err_vis[evalmask]=np.clip(err[evalmask]/0.20*255,0,255).astype(np.uint8)
+          Image.fromarray(err_vis).save('out/reconstruction_error_index.png')
+
+          # Broad visual holdout sample: current truth vs last-clear fallback vs absolute difference.
+          # No coordinates or target-level annotations are emitted.
+          def display_rgb(b):
+              arr=np.stack([b[2],b[1],b[0]],axis=-1)
+              good=np.all(np.isfinite(arr),axis=2)
+              vals=arr[good]
+              lo=np.percentile(vals,2,axis=0); hi=np.percentile(vals,98,axis=0)
+              out=np.clip((arr-lo)/(hi-lo+1e-6),0,1)
+              out[~good]=0
+              return (out*255).astype(np.uint8)
+          truth_rgb=display_rgb(cur['bands'])
+          rec_rgb=display_rgb(rec_last)
+          diff_rgb=np.abs(truth_rgb.astype(np.int16)-rec_rgb.astype(np.int16)).astype(np.uint8)
+          panels=[]
+          for arr,title in [(truth_rgb,'CURRENT TRUTH 20 AUG'),(rec_rgb,'COUNTERFACTUAL LAST-CLEAR'),(diff_rgb,'ABS VISUAL DIFFERENCE')]:
+              im=Image.fromarray(arr).resize((720,540),Image.Resampling.LANCZOS)
+              canvas=Image.new('RGB',(720,580),'black'); canvas.paste(im,(0,40))
+              d=ImageDraw.Draw(canvas); d.text((14,12),title,fill='white')
+              panels.append(canvas)
+          sheet=Image.new('RGB',(720*3,580),'black')
+          for i,p in enumerate(panels): sheet.paste(p,(i*720,0))
+          sheet.save('out/holdout_visual_comparison.png')
+
+          # Decision rule: this reconstruction is context, not evidence, unless empirically low-error.
+          verdict='CONTEXT_ONLY'
+          if overall_last['false_multichannel_change_pct']<=5 and overall_last['mean_abs_dNDVI']<=0.04 and overall_last['mean_abs_dNBR']<=0.04:
+              verdict='VISUAL_CONTEXT_WITH_LOW_EMPIRICAL_ERROR'
+          elif overall_last['false_multichannel_change_pct']>=20:
+              verdict='HIGH_FALSE_CHANGE_RISK'
+
+          result={
+            'status':'MEASURED_HOLDOUT',
+            'generated_utc':datetime.now(timezone.utc).isoformat(),
+            'method':'Counterfactual test on pixels that are actually clear on 2026-08-20: hide current truth logically, reconstruct only from older real clear observations, compare reconstruction to the held-out current observation.',
+            'current_date':CURRENT,
+            'older_dates':[s['date'] for s in older],
+            'scene_ids':{s['date']:s['ids'] for s in scenes},
+            'evaluation_fraction_of_aoi':round(float(evalmask.mean()),5),
+            'last_clear_overall':overall_last,
+            'recency_weighted_overall':overall_weighted,
+            'last_clear_by_age_days':age_buckets,
+            'verdict':verdict,
+            'interpretation_rules':[
+              'This validates temporal optical reconstruction only, not terrain-height reconstruction.',
+              'Large spectral disagreement can be real surface change, phenology, illumination/atmosphere, or reconstruction error; therefore fallback imagery is not a single-date evidence image.',
+              'Machine change detection must operate on dated source scenes, not on the reconstructed mosaic.',
+              'Any cloud-removed view must preserve per-pixel age and source provenance.'
+            ]
+          }
+          Path('out/holdout_metrics.json').write_text(json.dumps(result,indent=2),encoding='utf-8')
+          print(json.dumps({'status':result['status'],'eval_fraction':result['evaluation_fraction_of_aoi'],'verdict':verdict,'last_clear':overall_last,'weighted':overall_weighted,'by_age':age_buckets},indent=2))
+          PY
+      - name: Validate outputs
+        run: |
+          test -s out/holdout_metrics.json
+          test -s out/reconstruction_error_index.png
+          test -s out/holdout_visual_comparison.png
+          python -c "import json; m=json.load(open('out/holdout_metrics.json')); print(m['verdict']); print(m['last_clear_by_age_days'])"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ai39-cloud-reconstruction-holdout-v2
+          path: out/
+          if-no-files-found: error
+          retention-days: 2
