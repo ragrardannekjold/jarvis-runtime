@@ -1,0 +1,183 @@
+name: AI39 digital twin historical surface canary
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  historical-surface:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install geospatial stack
+        run: python -m pip install --disable-pip-version-check numpy rasterio requests pillow
+      - name: Build matched seasonal optical checkpoints
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          python - <<'PY'
+          import json, math
+          from datetime import datetime, timezone
+          from pathlib import Path
+          import numpy as np
+          import rasterio
+          from rasterio.enums import Resampling
+          from rasterio.transform import from_origin
+          from rasterio.warp import reproject
+          import requests
+          from PIL import Image
+
+          AOI=[37.65,48.45,38.25,48.90]
+          CRS='EPSG:32637'
+          BBOX=[400170,5367190,445040,5416620]
+          RES=20
+          STAC='https://earth-search.aws.element84.com/v1/search'
+          WINDOWS={
+            '2025':('2025-08-01','2025-08-23'),
+            '2026':('2026-08-01','2026-08-20')
+          }
+
+          minx,miny,maxx,maxy=BBOX
+          W=math.ceil((maxx-minx)/RES); H=math.ceil((maxy-miny)/RES)
+          TR=from_origin(minx,maxy,RES,RES)
+
+          def reproj(href,dst,resampling,nodata=0):
+              with rasterio.Env(AWS_NO_SIGN_REQUEST='YES',GDAL_DISABLE_READDIR_ON_OPEN='EMPTY_DIR'):
+                  with rasterio.open(href) as ds:
+                      reproject(source=rasterio.band(ds,1),destination=dst,
+                                src_transform=ds.transform,src_crs=ds.crs,src_nodata=ds.nodata,
+                                dst_transform=TR,dst_crs=CRS,dst_nodata=nodata,resampling=resampling)
+
+          def search_window(start,end):
+              r=requests.post(STAC,json={
+                'collections':['sentinel-2-c1-l2a'],
+                'bbox':AOI,
+                'datetime':start+'T00:00:00Z/'+end+'T23:59:59Z',
+                'limit':100
+              },timeout=90)
+              r.raise_for_status()
+              feats=r.json().get('features',[])
+              feats.sort(key=lambda x:x.get('properties',{}).get('datetime',''), reverse=True)
+              return feats
+
+          def build_checkpoint(label,start,end):
+              end_dt=datetime.fromisoformat(end+'T00:00:00+00:00')
+              rgb=np.zeros((H,W,3),np.float32)
+              nbr=np.full((H,W),np.nan,np.float32)
+              filled=np.zeros((H,W),bool)
+              age=np.full((H,W),65535,np.uint16)
+              prov=np.zeros((H,W),np.uint16)
+              provmap={}; code=1; used=[]; queried=0
+              for item in search_window(start,end):
+                  queried+=1
+                  a=item.get('assets',{})
+                  keys=['red','green','blue','nir','swir22','scl']
+                  if not all((a.get(k) or {}).get('href') for k in keys): continue
+                  dt=item.get('properties',{}).get('datetime','')[:10]
+                  if not dt: continue
+                  day_dt=datetime.fromisoformat(dt+'T00:00:00+00:00')
+                  day_age=max(0,(end_dt-day_dt).days)
+                  red=np.zeros((H,W),np.float32); green=np.zeros_like(red); blue=np.zeros_like(red)
+                  nir=np.zeros_like(red); swir=np.zeros_like(red); scl=np.zeros((H,W),np.uint8)
+                  try:
+                      reproj(a['red']['href'],red,Resampling.bilinear)
+                      reproj(a['green']['href'],green,Resampling.bilinear)
+                      reproj(a['blue']['href'],blue,Resampling.bilinear)
+                      reproj(a['nir']['href'],nir,Resampling.bilinear)
+                      reproj(a['swir22']['href'],swir,Resampling.bilinear)
+                      reproj(a['scl']['href'],scl,Resampling.nearest)
+                  except Exception:
+                      continue
+                  valid=(red>0)&(green>0)&(blue>0)&(nir>0)&(swir>0)
+                  clear=valid & np.isin(scl,[2,4,5,6,7])
+                  take=clear & (~filled)
+                  if not take.any(): continue
+                  rgb[take,0]=red[take]; rgb[take,1]=green[take]; rgb[take,2]=blue[take]
+                  nbr_local=(nir-swir)/(nir+swir+1e-6)
+                  nbr[take]=nbr_local[take]
+                  age[take]=day_age
+                  prov[take]=code
+                  sid=item.get('id') or f'{label}-{code}'
+                  provmap[str(code)]={'scene_id':sid,'date':dt}
+                  used.append(sid); code+=1; filled[take]=True
+                  if filled.mean()>=0.9995: break
+              if filled.mean()<0.95:
+                  raise RuntimeError(f'{label} coverage too low: {filled.mean():.4f}')
+              vals=rgb[filled]
+              lo=np.percentile(vals,2,axis=0); hi=np.percentile(vals,98,axis=0)
+              disp=np.clip((rgb-lo)/(hi-lo+1e-6),0,1)
+              disp=(disp*255).astype(np.uint8); disp[~filled]=0
+              Image.fromarray(disp).save(f'out/surface_{label}.png')
+              age_vis=np.where(age==65535,255,np.clip(age*12,0,230)).astype(np.uint8)
+              Image.fromarray(age_vis).save(f'out/age_{label}.png')
+              profile={'driver':'GTiff','height':H,'width':W,'count':1,'crs':CRS,'transform':TR,'compress':'deflate','tiled':True}
+              with rasterio.open(f'out/age_{label}.tif','w',dtype='uint16',nodata=65535,**profile) as ds: ds.write(age,1)
+              with rasterio.open(f'out/provenance_{label}.tif','w',dtype='uint16',nodata=0,**profile) as ds: ds.write(prov,1)
+              return {'label':label,'start':start,'end':end,'coverage':float(filled.mean()),'age':age,'nbr':nbr,'filled':filled,'provenance_map':provmap,'used_scene_ids':used,'queried_items':queried}
+
+          cps={k:build_checkpoint(k,*v) for k,v in WINDOWS.items()}
+          a=cps['2025']; b=cps['2026']
+          common=a['filled'] & b['filled'] & np.isfinite(a['nbr']) & np.isfinite(b['nbr'])
+          dnbr=np.abs(b['nbr']-a['nbr'])
+
+          sectors=[]
+          row_edges=np.linspace(0,H,5,dtype=int); col_edges=np.linspace(0,W,5,dtype=int)
+          for r in range(4):
+              for c in range(4):
+                  sl=(slice(row_edges[r],row_edges[r+1]),slice(col_edges[c],col_edges[c+1]))
+                  m=common[sl]
+                  vals=dnbr[sl][m]
+                  sectors.append({
+                    'sector':chr(ord('A')+c)+str(r+1),
+                    'valid_fraction':round(float(m.mean()),5),
+                    'abs_dNBR_median':round(float(np.median(vals)),5) if vals.size else None,
+                    'abs_dNBR_p90':round(float(np.percentile(vals,90)),5) if vals.size else None,
+                    'fraction_abs_dNBR_ge_0_10':round(float((vals>=0.10).mean()),5) if vals.size else None
+                  })
+
+          def age_dist(cp):
+              vals=cp['age'][cp['age']!=65535]; u,n=np.unique(vals,return_counts=True); total=n.sum()
+              return {str(int(x)):round(float(k/total),6) for x,k in zip(u,n)}
+
+          manifest={
+            'status':'MEASURED_HISTORICAL_SURFACE_CANARY',
+            'generated_utc':datetime.now(timezone.utc).isoformat(),
+            'aoi_wgs84_bbox':AOI,'analysis_crs':CRS,'resolution_m':RES,
+            'checkpoints':{},
+            'broad_surface_spectral_change_4x4':sectors,
+            'interpretation_boundary':[
+              'This is optical surface/spectral change, not measured terrain-height change.',
+              'Seasonal/agricultural explanations remain mandatory controls.',
+              'No exact anomaly coordinates or tactical interpretations are emitted.',
+              'Freshest-clear composites use only real clear observations; no generative inpainting.'
+            ]
+          }
+          for k,cp in cps.items():
+              manifest['checkpoints'][k]={
+                'window':[cp['start'],cp['end']],
+                'coverage_fraction':round(cp['coverage'],6),
+                'queried_items':cp['queried_items'],
+                'used_scene_ids':cp['used_scene_ids'],
+                'pixel_age_distribution':age_dist(cp),
+                'provenance_code_map':cp['provenance_map']
+              }
+          Path('out/historical_surface_manifest.json').write_text(json.dumps(manifest,indent=2),encoding='utf-8')
+          print(json.dumps({k:{'coverage':manifest['checkpoints'][k]['coverage_fraction'],'used_scenes':len(manifest['checkpoints'][k]['used_scene_ids'])} for k in ['2025','2026']},indent=2))
+          PY
+      - name: Validate outputs
+        run: |
+          ls -lh out
+          python -c "import json; m=json.load(open('out/historical_surface_manifest.json')); assert m['checkpoints']['2025']['coverage_fraction']>=0.95; assert m['checkpoints']['2026']['coverage_fraction']>=0.95; print('validated')"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ai39-digital-twin-historical-surface-canary
+          path: out/
+          if-no-files-found: error
+          retention-days: 2
