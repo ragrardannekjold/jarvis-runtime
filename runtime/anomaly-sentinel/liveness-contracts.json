@@ -3,6 +3,7 @@
   "baseline_ref": "17d7be324f71e336e08773debabe9b019e0d0832",
   "incident_closure_mode": "quarantine",
   "contracts": [
+    {"workflow_path":".github/workflows/ai113-claude-provider-readiness.yml","workflow_name":"AI-113 Claude Provider Readiness","workflow_blob_sha":"67a840ace333caab89d9c473b32a6fdd64f18948","mode":"scheduled","enabled_since":"2026-09-05T15:15:16Z","expected_event":"schedule","cadence_ms":900000,"freshness_ttl_ms":2700000,"grace_ms":900000,"recovery_min_successes":2},
     {"workflow_path":".github/workflows/ai39-cdse-stac-canary.yml","workflow_name":"AI39 CDSE STAC canary (Shared Token Disabled)","workflow_blob_sha":"e2f470dcd3b37547576b35d174410c62cb03da47","mode":"decommissioned","enabled_since":"2026-08-26T00:00:00Z","expected_event":null,"cadence_ms":null,"freshness_ttl_ms":null,"grace_ms":null,"recovery_min_successes":0},
     {"workflow_path":".github/workflows/ai39-private-async-cybint-ci.yml","workflow_name":"AI39 private async CYBINT tests","workflow_blob_sha":"aec07e7bdc87d1e9f74a61e5560d66c8c5c7fd6e","mode":"event_driven","enabled_since":"2026-08-26T00:00:00Z","expected_event":null,"cadence_ms":null,"freshness_ttl_ms":null,"grace_ms":null,"recovery_min_successes":0},
     {"workflow_path":".github/workflows/async-job-worker-ci.yml","workflow_name":"Async Job Worker CI","workflow_blob_sha":"5fca3c555f65ea872a2da32f637eb1d6a9f96639","mode":"event_driven","enabled_since":"2026-08-26T00:00:00Z","expected_event":null,"cadence_ms":null,"freshness_ttl_ms":null,"grace_ms":null,"recovery_min_successes":0},
