@@ -1,0 +1,38 @@
+name: AI-112 Render attribution live canary
+
+on:
+  push:
+    branches:
+      - claude-outsource-mcp-canary
+    paths:
+      - "app/api/mcp/route.js"
+      - "lib/ai112-attribution-gate.mjs"
+      - "scripts/probe-ai112-live-gateway.mjs"
+      - "test/ai112-attribution-gate.test.mjs"
+      - "package.json"
+      - ".github/workflows/ai112-render-attribution-live-canary.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ai112-render-attribution-live-canary
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm install
+      - run: npm run test:ai112
+      - run: npm run mcp:check
+      - name: Verify live Render MCP attribution gate
+        env:
+          GATEWAY_URL: https://claude-outsource-mcp-canary.onrender.com/api/mcp
+        run: node scripts/probe-ai112-live-gateway.mjs
