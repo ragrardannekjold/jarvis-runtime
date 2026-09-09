@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { evaluatePublicAttributionEnvelope } from '../../../lib/ai112-attribution-gate.mjs';
 import { Client, StreamableHTTPClientTransport } from '@modelcontextprotocol/client';
 import { createMcpHandler } from 'mcp-handler';
 import { z } from 'zod';
@@ -393,6 +394,26 @@ const handler = createMcpHandler((server) => {
         malwarebytes,
       });
     },
+  );
+
+  server.registerTool(
+    'ai112_attribution_check',
+    {
+      title: 'AI-112 Attribution Integrity Check',
+      description:
+        'Runs a deterministic PUBLIC/synthetic evidence-integrity gate. Inputs must contain pseudonymous references and coded metadata only. It never identifies an enemy, determines guilt or targetability, processes private case material, or authorises adverse action.',
+      inputSchema: z
+        .object({
+          assessment: z.record(z.string(), z.unknown()),
+        })
+        .strict(),
+    },
+    async ({ assessment }) =>
+      asToolResult(
+        evaluatePublicAttributionEnvelope({
+          assessment,
+        }),
+      ),
   );
 
   server.registerTool(

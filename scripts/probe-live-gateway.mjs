@@ -16,6 +16,7 @@ try {
   const names = new Set((listed.tools ?? []).map((tool) => tool.name));
   const requiredTools = [
     'resource_connector_status',
+    'ai112_attribution_check',
     'exa_web_search',
     'firecrawl_search',
     'research_paper_search',
@@ -33,6 +34,71 @@ try {
     !status.includes('fallback_equivalence')
   ) {
     throw new Error('Live connector manifest is not the expected v2 state');
+  }
+
+  const attribution = parseText(await client.callTool({
+    name: 'ai112_attribution_check',
+    arguments: {
+      assessment: {
+        assessment_id: 'render-canary-1',
+        subject_ref: 'subject-pseudonym-1',
+        attribution_level: 'INDIVIDUAL',
+        requested_conclusion: 'INDIVIDUAL_CONDUCT_LINK',
+        requested_action: 'RESEARCH_ONLY',
+        evidence: [
+          {
+            evidence_id: 'e1',
+            source_family_id: 'family-a',
+            provenance_root_id: 'root-a',
+            provenance_ref: 'public-ref-a',
+            access_state: 'AVAILABLE',
+            source_reliability: 'HIGH',
+            information_credibility: 'HIGH',
+            supports_claims: ['INDIVIDUAL_CONDUCT_LINK'],
+            subject_roles: ['VICTIM'],
+            act_specific: false,
+            original_or_earliest_known: true,
+            transformation_log_present: true,
+          },
+          {
+            evidence_id: 'e2',
+            source_family_id: 'family-b',
+            provenance_root_id: 'root-b',
+            provenance_ref: 'public-ref-b',
+            access_state: 'AVAILABLE',
+            source_reliability: 'HIGH',
+            information_credibility: 'HIGH',
+            supports_claims: ['INDIVIDUAL_CONDUCT_LINK'],
+            subject_roles: ['WITNESS'],
+            act_specific: false,
+            original_or_earliest_known: true,
+            transformation_log_present: true,
+          },
+        ],
+        alternative_hypotheses: [
+          'VICTIM_OR_WITNESS',
+          'RESISTANCE_TO_RF_CRIME',
+          'UNRELATED_OR_IDENTITY_COLLISION',
+          'MANIPULATION_OR_FALSE_FLAG',
+        ],
+        exculpatory_search_completed: true,
+        falsifiers: ['falsifier-1'],
+        assumptions: ['assumption-1'],
+        uncertainties: ['uncertainty-1'],
+        identity_resolution_checked: true,
+        peer_review_refs: ['reviewer-1'],
+      },
+    },
+  }));
+  if (
+    !attribution.includes('"outcome": "INSUFFICIENT_EVIDENCE"') ||
+    !attribution.includes('"automatic_adverse_action_allowed": false') ||
+    !attribution.includes('"input_echoed": false') ||
+    !attribution.includes('VICTIM_WITNESS_OR_RESISTANCE_CONTENT_IS_NOT_PERPETRATOR_EVIDENCE') ||
+    attribution.includes('subject-pseudonym-1') ||
+    attribution.includes('public-ref-a')
+  ) {
+    throw new Error('AI-112 live attribution gate did not fail closed with a non-echo receipt');
   }
 
   const exa = parseText(await client.callTool({
