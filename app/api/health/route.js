@@ -1,4 +1,5 @@
 import { createPublicRuntime } from '../../../public_outsource_worker/src/runtime.mjs';
+import { ai112AttributionGateMetadata } from '../../../lib/ai112-attribution-gate.mjs';
 
 export const runtime = 'nodejs';
 
@@ -50,6 +51,7 @@ export async function GET() {
     direct_arbitrary_network_access: false,
     provider_mediated_public_web_access: true,
     private_data_access: false,
+    attribution_integrity: ai112AttributionGateMetadata,
     durable_scheduler_verified: false,
   });
 }
