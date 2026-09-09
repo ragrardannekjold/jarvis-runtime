@@ -1,4 +1,6 @@
-name: AI-113 Claude Provider Readiness
+name: AI-113 Claude Readiness Contract (No Provider Call)
+
+run-name: AI-113 readiness schema audit — no Claude API call
 
 on:
   workflow_dispatch:
@@ -6,8 +8,6 @@ on:
     paths:
       - 'runtime/provider-readiness/**'
       - '.github/workflows/ai113-claude-provider-readiness.yml'
-  schedule:
-    - cron: '7,22,37,52 * * * *'
 
 permissions:
   contents: read
@@ -34,8 +34,8 @@ jobs:
           node-version: '24'
           package-manager-cache: false
 
-      - name: Verify secret-isolated provider readiness contract
+      - name: Verify secret-isolated readiness schema
         run: node --test runtime/provider-readiness/claude-readiness.test.mjs
 
-      - name: Emit sanitized readiness readback
+      - name: Emit sanitized blocker/readiness schema
         run: node runtime/provider-readiness/claude-readiness-worker.mjs
