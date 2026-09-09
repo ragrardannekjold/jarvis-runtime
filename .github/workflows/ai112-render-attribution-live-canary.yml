@@ -29,8 +29,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 20
-          cache: npm
-      - run: npm ci
+      - run: npm install
       - run: npm run test:ai112
       - run: npm run mcp:check
       - name: Verify live Render MCP attribution gate
